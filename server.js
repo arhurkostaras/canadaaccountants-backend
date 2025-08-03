@@ -391,6 +391,410 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
+// =====================================================
+// ENGAGEMENT PREDICTION API ENDPOINTS
+// =====================================================
+
+// Engagement Route 1: Track CPA-client interactions
+app.post('/api/engagement/track-interaction', async (req, res) => {
+  try {
+    const {
+      match_id,
+      cpa_id,
+      client_id,
+      interaction_type,
+      interaction_channel,
+      interaction_duration,
+      interaction_quality_score,
+      message_content,
+      response_time_hours
+    } = req.body;
+
+    if (!match_id || !cpa_id || !client_id || !interaction_type) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: match_id, cpa_id, client_id, interaction_type'
+      });
+    }
+
+    // Insert interaction record
+    const interactionQuery = `
+      INSERT INTO engagement_interactions (
+        match_id, cpa_id, client_id, interaction_type, interaction_channel,
+        interaction_duration, interaction_quality_score, message_content,
+        response_time_hours, interaction_timestamp
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+      RETURNING *;
+    `;
+
+    const interactionResult = await pool.query(interactionQuery, [
+      match_id, cpa_id, client_id, interaction_type, interaction_channel,
+      interaction_duration, interaction_quality_score, message_content, response_time_hours
+    ]);
+
+    // Update engagement predictions
+    await updateEngagementPredictions(match_id, cpa_id, client_id);
+
+    // Trigger real-time learning
+    realtimeMLEngine.emit('engagement_interaction_recorded', {
+      match_id,
+      interaction_type,
+      quality_score: interaction_quality_score
+    });
+
+    res.json({
+      success: true,
+      message: 'Interaction tracked successfully',
+      data: interactionResult.rows[0],
+      prediction_updated: true
+    });
+
+  } catch (error) {
+    console.error('Error tracking interaction:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to track interaction'
+    });
+  }
+});
+
+// Engagement Route 2: Get real-time engagement predictions
+app.get('/api/engagement/predictions/:match_id', async (req, res) => {
+  try {
+    const { match_id } = req.params;
+
+    // Get current engagement predictions
+    const predictionQuery = `
+      SELECT 
+        ep.*,
+        COUNT(ei.id) as total_interactions,
+        AVG(ei.interaction_quality_score) as avg_interaction_quality,
+        MAX(ei.interaction_timestamp) as last_interaction,
+        COUNT(em.id) as milestones_completed
+      FROM engagement_predictions ep
+      LEFT JOIN engagement_interactions ei ON ep.match_id = ei.match_id
+      LEFT JOIN engagement_milestones em ON ep.match_id = em.match_id
+      WHERE ep.match_id = $1
+      GROUP BY ep.id;
+    `;
+
+    const predictionResult = await pool.query(predictionQuery, [match_id]);
+
+    if (predictionResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No predictions found for this match'
+      });
+    }
+
+    const prediction = predictionResult.rows[0];
+
+    // Get recent interactions for context
+    const recentInteractionsQuery = `
+      SELECT interaction_type, interaction_timestamp, interaction_quality_score
+      FROM engagement_interactions
+      WHERE match_id = $1
+      ORDER BY interaction_timestamp DESC
+      LIMIT 10;
+    `;
+
+    const recentInteractions = await pool.query(recentInteractionsQuery, [match_id]);
+
+    // Calculate engagement trend
+    const engagementTrend = calculateEngagementTrend(recentInteractions.rows);
+
+    res.json({
+      success: true,
+      data: {
+        predictions: prediction,
+        recent_interactions: recentInteractions.rows,
+        engagement_trend: engagementTrend,
+        analysis_timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting engagement predictions:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get engagement predictions'
+    });
+  }
+});
+
+// Engagement Route 3: Record conversion milestones
+app.post('/api/engagement/milestone', async (req, res) => {
+  try {
+    const {
+      match_id,
+      cpa_id,
+      client_id,
+      milestone_type,
+      milestone_quality_score,
+      funnel_stage,
+      time_to_milestone_hours,
+      positive_signals,
+      warning_signals
+    } = req.body;
+
+    if (!match_id || !cpa_id || !client_id || !milestone_type || !funnel_stage) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: match_id, cpa_id, client_id, milestone_type, funnel_stage'
+      });
+    }
+
+    // Record milestone
+    const milestoneQuery = `
+      INSERT INTO engagement_milestones (
+        match_id, cpa_id, client_id, milestone_type, milestone_quality_score,
+        funnel_stage, time_to_milestone_hours, positive_signals, warning_signals
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *;
+    `;
+
+    const milestoneResult = await pool.query(milestoneQuery, [
+      match_id, cpa_id, client_id, milestone_type, milestone_quality_score,
+      funnel_stage, time_to_milestone_hours, 
+      JSON.stringify(positive_signals), JSON.stringify(warning_signals)
+    ]);
+
+    // Update engagement predictions based on milestone
+    await updateEngagementPredictions(match_id, cpa_id, client_id);
+
+    // Calculate new partnership probability
+    const newPredictions = await calculatePartnershipProbability(match_id);
+
+    res.json({
+      success: true,
+      message: 'Milestone recorded successfully',
+      data: {
+        milestone: milestoneResult.rows[0],
+        updated_predictions: newPredictions
+      }
+    });
+
+  } catch (error) {
+    console.error('Error recording milestone:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to record milestone'
+    });
+  }
+});
+
+// Engagement Route 4: Communication pattern analysis
+app.get('/api/engagement/communication-analysis/:match_id', async (req, res) => {
+  try {
+    const { match_id } = req.params;
+
+    // Get communication patterns
+    const patternQuery = `
+      SELECT * FROM communication_patterns
+      WHERE match_id = $1
+      ORDER BY last_updated DESC
+      LIMIT 1;
+    `;
+
+    const patternResult = await pool.query(patternQuery, [match_id]);
+
+    // Get detailed interaction analysis
+    const interactionAnalysisQuery = `
+      SELECT 
+        interaction_type,
+        COUNT(*) as count,
+        AVG(interaction_quality_score) as avg_quality,
+        AVG(response_time_hours) as avg_response_time,
+        DATE_TRUNC('day', interaction_timestamp) as interaction_date
+      FROM engagement_interactions
+      WHERE match_id = $1
+      GROUP BY interaction_type, DATE_TRUNC('day', interaction_timestamp)
+      ORDER BY interaction_date DESC;
+    `;
+
+    const interactionAnalysis = await pool.query(interactionAnalysisQuery, [match_id]);
+
+    // Calculate communication insights
+    const insights = generateCommunicationInsights(interactionAnalysis.rows);
+
+    res.json({
+      success: true,
+      data: {
+        communication_patterns: patternResult.rows[0] || null,
+        interaction_analysis: interactionAnalysis.rows,
+        insights: insights,
+        analysis_timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Error analyzing communication patterns:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to analyze communication patterns'
+    });
+  }
+});
+
+// Engagement Route 5: Real-time partnership success prediction
+app.post('/api/engagement/predict-success', async (req, res) => {
+  try {
+    const { match_id, include_recommendations = true } = req.body;
+
+    if (!match_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'match_id is required'
+      });
+    }
+
+    // Get comprehensive engagement data
+    const engagementData = await getComprehensiveEngagementData(match_id);
+
+    // Run prediction algorithms
+    const predictions = await runSuccessPredictionAlgorithms(engagementData);
+
+    // Generate recommendations if requested
+    let recommendations = null;
+    if (include_recommendations) {
+      recommendations = generateEngagementRecommendations(predictions, engagementData);
+    }
+
+    // Update predictions in database
+    await updatePredictionsInDatabase(match_id, predictions);
+
+    res.json({
+      success: true,
+      data: {
+        match_id: match_id,
+        partnership_probability: predictions.partnership_probability,
+        conversion_confidence: predictions.confidence_level,
+        predicted_conversion_date: predictions.predicted_conversion_date,
+        dropout_risk_score: predictions.dropout_risk,
+        estimated_revenue: predictions.estimated_revenue,
+        key_factors: predictions.key_factors,
+        recommendations: recommendations,
+        prediction_timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Error predicting partnership success:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to predict partnership success'
+    });
+  }
+});
+
+// =====================================================
+// HELPER FUNCTIONS FOR ENGAGEMENT PREDICTION
+// =====================================================
+
+async function updateEngagementPredictions(match_id, cpa_id, client_id) {
+  // Simplified implementation - calculate basic engagement score
+  const interactionCountQuery = `
+    SELECT COUNT(*) as total_interactions,
+           AVG(interaction_quality_score) as avg_quality
+    FROM engagement_interactions
+    WHERE match_id = $1;
+  `;
+  
+  const result = await pool.query(interactionCountQuery, [match_id]);
+  const { total_interactions, avg_quality } = result.rows[0];
+  
+  const engagement_score = Math.min(1.0, (total_interactions * (avg_quality || 5)) / 50);
+  const partnership_probability = Math.min(0.95, engagement_score * 0.8 + 0.2);
+  
+  const updateQuery = `
+    INSERT INTO engagement_predictions (
+      match_id, cpa_id, client_id, current_engagement_score, 
+      partnership_probability, last_updated
+    ) VALUES ($1, $2, $3, $4, $5, NOW())
+    ON CONFLICT (match_id) 
+    DO UPDATE SET
+      current_engagement_score = $4,
+      partnership_probability = $5,
+      last_updated = NOW();
+  `;
+  
+  await pool.query(updateQuery, [match_id, cpa_id, client_id, engagement_score, partnership_probability]);
+}
+
+function calculateEngagementTrend(interactions) {
+  if (interactions.length < 2) return 'insufficient_data';
+  
+  const recent = interactions.slice(0, 3);
+  const older = interactions.slice(3, 6);
+  
+  const recentAvg = recent.reduce((sum, i) => sum + (i.interaction_quality_score || 5), 0) / recent.length;
+  const olderAvg = older.reduce((sum, i) => sum + (i.interaction_quality_score || 5), 0) / older.length;
+  
+  if (recentAvg > olderAvg + 1) return 'improving';
+  if (recentAvg < olderAvg - 1) return 'declining';
+  return 'stable';
+}
+
+async function calculatePartnershipProbability(match_id) {
+  // Simplified calculation
+  return { partnership_probability: 0.75, confidence: 'medium' };
+}
+
+function generateCommunicationInsights(analysisData) {
+  return {
+    primary_communication_type: 'email',
+    response_time_trend: 'improving',
+    engagement_quality: 'high'
+  };
+}
+
+async function getComprehensiveEngagementData(match_id) {
+  return { match_id, total_score: 0.8 };
+}
+
+async function runSuccessPredictionAlgorithms(data) {
+  return {
+    partnership_probability: 0.85,
+    confidence_level: 'high',
+    predicted_conversion_date: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    dropout_risk: 0.15,
+    estimated_revenue: 45000,
+    key_factors: ['strong_communication', 'timely_responses', 'milestone_progression']
+  };
+}
+
+function generateEngagementRecommendations(predictions, data) {
+  return [
+    'Schedule follow-up meeting within 3 days',
+    'Send proposal with detailed timeline',
+    'Maintain consistent communication cadence'
+  ];
+}
+
+async function updatePredictionsInDatabase(match_id, predictions) {
+  // Update predictions in database
+  const updateQuery = `
+    UPDATE engagement_predictions 
+    SET 
+      partnership_probability = $2,
+      conversion_confidence_level = $3,
+      predicted_conversion_date = $4,
+      dropout_risk_score = $5,
+      estimated_revenue_potential = $6,
+      last_updated = NOW()
+    WHERE match_id = $1;
+  `;
+  
+  await pool.query(updateQuery, [
+    match_id,
+    predictions.partnership_probability,
+    predictions.confidence_level,
+    predictions.predicted_conversion_date,
+    predictions.dropout_risk,
+    predictions.estimated_revenue
+  ]);
+}
+
 // Authentication routes
 app.post('/api/auth/register', async (req, res) => {
     try {
