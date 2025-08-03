@@ -545,3 +545,207 @@ INSERT INTO learning_weights (factor_name, factor_category, current_weight, base
 INSERT INTO ml_model_versions (version_number, model_type, accuracy_score, is_active) VALUES
 ('1.0.0', 'baseline_matching', 0.9500, TRUE);
 
+-- =====================================================
+-- PHASE 3B STEP 2A: ENGAGEMENT SUCCESS PREDICTION TABLES
+-- =====================================================
+
+-- TABLE 1: Track every CPA-client interaction
+CREATE TABLE engagement_interactions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    match_id VARCHAR(255) NOT NULL,
+    cpa_id UUID NOT NULL REFERENCES users(id),
+    client_id UUID NOT NULL REFERENCES users(id),
+    
+    -- Interaction Details
+    interaction_type VARCHAR(50) NOT NULL, -- profile_view, contact_made, response, meeting_scheduled, etc.
+    interaction_channel VARCHAR(30), -- platform, email, phone, video_call
+    interaction_duration INTEGER, -- seconds for calls/meetings
+    interaction_quality_score DECIMAL(3,2), -- 0.00 to 10.00
+    
+    -- Content Analysis
+    message_content TEXT,
+    sentiment_score DECIMAL(3,2), -- -1.00 to 1.00
+    professionalism_score DECIMAL(3,2), -- 0.00 to 10.00
+    
+    -- Timing Analysis
+    response_time_hours DECIMAL(8,2),
+    interaction_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 2: Engagement milestones and conversion funnel
+CREATE TABLE engagement_milestones (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    match_id VARCHAR(255) NOT NULL,
+    cpa_id UUID NOT NULL REFERENCES users(id),
+    client_id UUID NOT NULL REFERENCES users(id),
+    
+    -- Milestone Tracking
+    milestone_type VARCHAR(50) NOT NULL, -- first_contact, proposal_sent, meeting_held, contract_discussed, etc.
+    milestone_reached_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    milestone_quality_score DECIMAL(3,2), -- How well was this milestone achieved
+    
+    -- Conversion Funnel Position
+    funnel_stage VARCHAR(30) NOT NULL, -- awareness, interest, consideration, intent, decision
+    funnel_progression_score DECIMAL(5,4), -- 0.0000 to 1.0000
+    
+    -- Predictive Factors
+    time_to_milestone_hours DECIMAL(10,2),
+    milestone_completion_quality VARCHAR(20), -- excellent, good, average, poor
+    next_expected_milestone VARCHAR(50),
+    predicted_next_milestone_date TIMESTAMP WITH TIME ZONE,
+    
+    -- Success Indicators
+    positive_signals JSONB, -- Array of positive engagement signals
+    warning_signals JSONB, -- Array of concerning signals
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 3: Real-time engagement scores and predictions
+CREATE TABLE engagement_predictions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    match_id VARCHAR(255) UNIQUE NOT NULL,
+    cpa_id UUID NOT NULL REFERENCES users(id),
+    client_id UUID NOT NULL REFERENCES users(id),
+    
+    -- Current Engagement Metrics
+    current_engagement_score DECIMAL(5,4), -- 0.0000 to 1.0000
+    interaction_frequency_score DECIMAL(5,4),
+    response_quality_score DECIMAL(5,4),
+    communication_consistency_score DECIMAL(5,4),
+    
+    -- Predictive Analytics
+    partnership_probability DECIMAL(5,4), -- 0.0000 to 1.0000
+    conversion_confidence_level VARCHAR(20), -- very_high, high, medium, low, very_low
+    predicted_conversion_date TIMESTAMP WITH TIME ZONE,
+    estimated_revenue_potential DECIMAL(12,2),
+    
+    -- Risk Assessment
+    dropout_risk_score DECIMAL(5,4), -- 0.0000 to 1.0000
+    risk_factors JSONB,
+    recommended_actions JSONB,
+    
+    -- Time-based Predictions
+    days_to_conversion_estimate INTEGER,
+    optimal_followup_timing TIMESTAMP WITH TIME ZONE,
+    
+    -- Model Performance
+    prediction_model_version VARCHAR(20),
+    prediction_confidence DECIMAL(5,4),
+    last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 4: Communication pattern analysis
+CREATE TABLE communication_patterns (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    match_id VARCHAR(255) NOT NULL,
+    
+    -- Communication Frequency
+    total_interactions INTEGER DEFAULT 0,
+    cpa_initiated_interactions INTEGER DEFAULT 0,
+    client_initiated_interactions INTEGER DEFAULT 0,
+    average_response_time_hours DECIMAL(8,2),
+    
+    -- Communication Quality
+    average_message_length INTEGER,
+    professional_language_score DECIMAL(3,2),
+    clarity_score DECIMAL(3,2),
+    enthusiasm_indicators INTEGER DEFAULT 0,
+    
+    -- Engagement Patterns
+    peak_communication_hours JSONB, -- Array of most active hours
+    preferred_communication_channel VARCHAR(30),
+    communication_consistency_score DECIMAL(5,4),
+    
+    -- Success Indicators
+    meeting_requests INTEGER DEFAULT 0,
+    document_shares INTEGER DEFAULT 0,
+    follow_up_actions INTEGER DEFAULT 0,
+    
+    -- Calculated Metrics
+    engagement_momentum_score DECIMAL(5,4), -- Is engagement increasing or decreasing
+    communication_compatibility_score DECIMAL(5,4),
+    
+    -- Temporal Analysis
+    analysis_period_start TIMESTAMP WITH TIME ZONE,
+    analysis_period_end TIMESTAMP WITH TIME ZONE,
+    last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 5: Success prediction models and versions
+CREATE TABLE prediction_models (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    model_name VARCHAR(100) NOT NULL,
+    model_version VARCHAR(20) NOT NULL,
+    model_type VARCHAR(50) NOT NULL, -- engagement_success, revenue_prediction, dropout_risk
+    
+    -- Model Performance Metrics
+    accuracy_score DECIMAL(5,4),
+    precision_score DECIMAL(5,4),
+    recall_score DECIMAL(5,4),
+    f1_score DECIMAL(5,4),
+    
+    -- Training Data
+    training_samples INTEGER,
+    validation_samples INTEGER,
+    test_accuracy DECIMAL(5,4),
+    
+    -- Model Configuration
+    model_parameters JSONB,
+    feature_weights JSONB,
+    threshold_settings JSONB,
+    
+    -- Deployment Status
+    is_active BOOLEAN DEFAULT FALSE,
+    deployed_at TIMESTAMP WITH TIME ZONE,
+    performance_benchmark DECIMAL(5,4),
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- =====================================================
+-- INDEXES FOR ENGAGEMENT PREDICTION PERFORMANCE
+-- =====================================================
+
+-- Engagement Interactions Indexes
+CREATE INDEX idx_engagement_interactions_match_id ON engagement_interactions(match_id);
+CREATE INDEX idx_engagement_interactions_cpa_id ON engagement_interactions(cpa_id);
+CREATE INDEX idx_engagement_interactions_client_id ON engagement_interactions(client_id);
+CREATE INDEX idx_engagement_interactions_type ON engagement_interactions(interaction_type);
+CREATE INDEX idx_engagement_interactions_timestamp ON engagement_interactions(interaction_timestamp);
+
+-- Engagement Milestones Indexes
+CREATE INDEX idx_engagement_milestones_match_id ON engagement_milestones(match_id);
+CREATE INDEX idx_engagement_milestones_funnel_stage ON engagement_milestones(funnel_stage);
+CREATE INDEX idx_engagement_milestones_milestone_type ON engagement_milestones(milestone_type);
+
+-- Engagement Predictions Indexes
+CREATE INDEX idx_engagement_predictions_match_id ON engagement_predictions(match_id);
+CREATE INDEX idx_engagement_predictions_partnership_probability ON engagement_predictions(partnership_probability DESC);
+CREATE INDEX idx_engagement_predictions_dropout_risk ON engagement_predictions(dropout_risk_score DESC);
+
+-- Communication Patterns Indexes
+CREATE INDEX idx_communication_patterns_match_id ON communication_patterns(match_id);
+CREATE INDEX idx_communication_patterns_engagement_score ON communication_patterns(engagement_momentum_score DESC);
+
+-- Prediction Models Indexes
+CREATE INDEX idx_prediction_models_active ON prediction_models(is_active);
+CREATE INDEX idx_prediction_models_type ON prediction_models(model_type);
+
+-- =====================================================
+-- INITIAL PREDICTION MODEL DATA
+-- =====================================================
+
+-- Initialize baseline prediction models
+INSERT INTO prediction_models (model_name, model_version, model_type, accuracy_score, is_active) VALUES
+('baseline_engagement_predictor', '1.0.0', 'engagement_success', 0.8500, TRUE),
+('revenue_forecasting_model', '1.0.0', 'revenue_prediction', 0.8200, TRUE),
+('dropout_risk_classifier', '1.0.0', 'dropout_risk', 0.7800, TRUE);
+
