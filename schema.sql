@@ -372,3 +372,176 @@ INSERT INTO sme_service_needs (sme_profile_id, service_type, priority, budget) V
 ((SELECT id FROM sme_profiles WHERE company_name = 'Maple Manufacturing'), 'Audit Services', 'high', 15000),
 ((SELECT id FROM sme_profiles WHERE company_name = 'Maple Manufacturing'), 'Financial Advisory', 'medium', 8000);
 
+-- =====================================================
+-- PHASE 3B: MACHINE LEARNING SYSTEM TABLES
+-- =====================================================
+
+-- TABLE 1: Track success of every CPA-client match
+CREATE TABLE match_outcomes (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    match_id VARCHAR(255) UNIQUE NOT NULL,
+    cpa_id UUID NOT NULL REFERENCES users(id),
+    client_id UUID NOT NULL REFERENCES users(id),
+    
+    -- Partnership Formation Tracking
+    partnership_formed BOOLEAN DEFAULT FALSE,
+    partnership_start_date DATE,
+    partnership_duration_months INTEGER,
+    partnership_status VARCHAR(50) DEFAULT 'pending',
+    
+    -- Satisfaction Scores (1-10 scale)
+    client_satisfaction_score INTEGER CHECK (client_satisfaction_score >= 1 AND client_satisfaction_score <= 10),
+    cpa_satisfaction_score INTEGER CHECK (cpa_satisfaction_score >= 1 AND cpa_satisfaction_score <= 10),
+    
+    -- Financial Success Metrics
+    revenue_generated DECIMAL(12,2),
+    project_value DECIMAL(12,2),
+    ongoing_monthly_value DECIMAL(10,2),
+    
+    -- Communication & Engagement
+    initial_contact_made BOOLEAN DEFAULT FALSE,
+    proposal_submitted BOOLEAN DEFAULT FALSE,
+    contract_signed BOOLEAN DEFAULT FALSE,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 2: Dynamic AI factor importance weights
+CREATE TABLE learning_weights (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    factor_name VARCHAR(100) UNIQUE NOT NULL,
+    factor_category VARCHAR(50) NOT NULL,
+    
+    -- Current AI Weights
+    current_weight DECIMAL(5,4) DEFAULT 1.0000,
+    baseline_weight DECIMAL(5,4) DEFAULT 1.0000,
+    
+    -- Success Correlation Analytics
+    success_correlation DECIMAL(5,4),
+    confidence_score DECIMAL(5,4),
+    
+    -- Learning Statistics
+    total_matches_analyzed INTEGER DEFAULT 0,
+    successful_matches INTEGER DEFAULT 0,
+    failed_matches INTEGER DEFAULT 0,
+    
+    -- Update Tracking
+    last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    learning_iterations INTEGER DEFAULT 0,
+    accuracy_improvement DECIMAL(5,4) DEFAULT 0.0000
+);
+
+-- TABLE 3: Granular success patterns
+CREATE TABLE predictive_features (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    feature_name VARCHAR(200) NOT NULL,
+    feature_value VARCHAR(500) NOT NULL,
+    feature_type VARCHAR(50) NOT NULL,
+    
+    -- Success Analytics
+    success_rate DECIMAL(5,4),
+    total_matches INTEGER DEFAULT 0,
+    successful_matches INTEGER DEFAULT 0,
+    
+    -- Statistical Confidence
+    confidence_score DECIMAL(5,4),
+    sample_size_adequacy BOOLEAN DEFAULT FALSE,
+    
+    -- Feature Context
+    related_factor VARCHAR(100),
+    
+    -- Temporal Analysis
+    trend_direction VARCHAR(20),
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_analyzed TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 4: Track AI improvements
+CREATE TABLE ml_model_versions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    version_number VARCHAR(20) NOT NULL,
+    model_type VARCHAR(50) NOT NULL,
+    
+    -- Performance Metrics
+    accuracy_score DECIMAL(5,4),
+    precision_score DECIMAL(5,4),
+    recall_score DECIMAL(5,4),
+    
+    -- Comparison with Previous
+    improvement_over_previous DECIMAL(5,4),
+    baseline_comparison DECIMAL(5,4),
+    
+    -- Training Data
+    training_samples INTEGER,
+    validation_samples INTEGER,
+    
+    -- Deployment
+    deployed_at TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT FALSE,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by VARCHAR(100) DEFAULT 'system'
+);
+
+-- TABLE 5: Live learning results
+CREATE TABLE real_time_insights (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    insight_type VARCHAR(100) NOT NULL,
+    insight_category VARCHAR(50) NOT NULL,
+    
+    -- Insight Content
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    actionable_recommendation TEXT,
+    
+    -- Relevance & Impact
+    confidence_level VARCHAR(20),
+    potential_impact VARCHAR(20),
+    target_audience VARCHAR(50),
+    
+    -- Data Supporting Insight
+    supporting_data JSONB,
+    sample_size INTEGER,
+    
+    -- Status & Lifecycle
+    is_active BOOLEAN DEFAULT TRUE,
+    expiry_date TIMESTAMP WITH TIME ZONE,
+    
+    -- Metadata
+    generated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_validated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- =====================================================
+-- INDEXES FOR PERFORMANCE
+-- =====================================================
+
+CREATE INDEX idx_match_outcomes_cpa_id ON match_outcomes(cpa_id);
+CREATE INDEX idx_match_outcomes_client_id ON match_outcomes(client_id);
+CREATE INDEX idx_match_outcomes_partnership_formed ON match_outcomes(partnership_formed);
+CREATE INDEX idx_learning_weights_factor_category ON learning_weights(factor_category);
+CREATE INDEX idx_predictive_features_success_rate ON predictive_features(success_rate DESC);
+CREATE INDEX idx_real_time_insights_is_active ON real_time_insights(is_active);
+
+-- =====================================================
+-- INITIAL ML DATA
+-- =====================================================
+
+-- Initialize baseline learning weights for 6-factor matching
+INSERT INTO learning_weights (factor_name, factor_category, current_weight, baseline_weight) VALUES
+('industry_expertise', 'industry', 1.0000, 1.0000),
+('geographic_proximity', 'geographic', 1.0000, 1.0000),
+('business_size_match', 'size', 1.0000, 1.0000),
+('service_specialization', 'services', 1.0000, 1.0000),
+('experience_level', 'experience', 1.0000, 1.0000),
+('communication_style', 'communication', 1.0000, 1.0000);
+
+-- Initialize first model version
+INSERT INTO ml_model_versions (version_number, model_type, accuracy_score, is_active) VALUES
+('1.0.0', 'baseline_matching', 0.9500, TRUE);
+
