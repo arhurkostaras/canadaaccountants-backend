@@ -3,6 +3,9 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+// Machine Learning imports
+const { CanadianCPAMLEngine, MLScheduler } = require('./services/ml-engine');
+const { RealtimeMLRecommendationEngine, RealtimeMLMiddleware } = require('./services/realtime-ml');
 require('dotenv').config();
 
 const app = express();
@@ -13,6 +16,14 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
+// Initialize ML engines
+const mlEngine = new CanadianCPAMLEngine(pool);
+const realtimeMLEngine = new RealtimeMLRecommendationEngine(pool);
+const mlScheduler = new MLScheduler(pool);
+const mlMiddleware = new RealtimeMLMiddleware(realtimeMLEngine);
+
+// Start ML learning scheduler
+mlScheduler.startScheduler().catch(console.error);
 
 // Middleware
 app.use(cors({
@@ -20,6 +31,290 @@ app.use(cors({
     credentials: true
 }));
 app.use(express.json());
+
+// =====================================================
+// MACHINE LEARNING API ENDPOINTS
+// =====================================================
+
+// ML Route 1: Record match outcome
+app.post('/api/ml/match-outcome', async (req, res) => {
+  try {
+    const {
+      match_id,
+      cpa_id,
+      client_id,
+      partnership_formed,
+      partnership_start_date,
+      client_satisfaction_score,
+      cpa_satisfaction_score,
+      revenue_generated,
+      project_value,
+      ongoing_monthly_value,
+      initial_contact_made,
+      proposal_submitted,
+      contract_signed
+    } = req.body;
+
+    if (!match_id || !cpa_id || !client_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: match_id, cpa_id, client_id'
+      });
+    }
+
+    const query = `
+      INSERT INTO match_outcomes (
+        match_id, cpa_id, client_id, partnership_formed,
+        partnership_start_date, client_satisfaction_score, cpa_satisfaction_score,
+        revenue_generated, project_value, ongoing_monthly_value,
+        initial_contact_made, proposal_submitted, contract_signed,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+      ON CONFLICT (match_id) 
+      DO UPDATE SET
+        partnership_formed = EXCLUDED.partnership_formed,
+        partnership_start_date = EXCLUDED.partnership_start_date,
+        client_satisfaction_score = EXCLUDED.client_satisfaction_score,
+        cpa_satisfaction_score = EXCLUDED.cpa_satisfaction_score,
+        revenue_generated = EXCLUDED.revenue_generated,
+        project_value = EXCLUDED.project_value,
+        ongoing_monthly_value = EXCLUDED.ongoing_monthly_value,
+        initial_contact_made = EXCLUDED.initial_contact_made,
+        proposal_submitted = EXCLUDED.proposal_submitted,
+        contract_signed = EXCLUDED.contract_signed,
+        updated_at = NOW()
+      RETURNING *;
+    `;
+
+    const result = await pool.query(query, [
+      match_id, cpa_id, client_id, partnership_formed,
+      partnership_start_date, client_satisfaction_score, cpa_satisfaction_score,
+      revenue_generated, project_value, ongoing_monthly_value,
+      initial_contact_made, proposal_submitted, contract_signed
+    ]);
+
+    // Trigger ML learning if significant outcome
+    if (partnership_formed !== null) {
+      realtimeMLEngine.emit('match_outcome_recorded', {
+        match_id,
+        cpa_id,
+        client_id,
+        partnership_formed,
+        client_satisfaction_score,
+        cpa_satisfaction_score
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Match outcome recorded successfully',
+      data: result.rows[0],
+      ml_triggered: partnership_formed !== null
+    });
+
+  } catch (error) {
+    console.error('Error recording match outcome:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to record match outcome'
+    });
+  }
+});
+
+// ML Route 2: Get learning insights
+app.get('/api/ml/learning-insights', async (req, res) => {
+  try {
+    const { factor_category, confidence_threshold = 0.5 } = req.query;
+
+    // Get current learning weights
+    let weightsQuery = `
+      SELECT 
+        factor_name,
+        factor_category,
+        current_weight,
+        baseline_weight,
+        success_correlation,
+        confidence_score,
+        total_matches_analyzed,
+        successful_matches,
+        accuracy_improvement,
+        ROUND((current_weight - baseline_weight) / baseline_weight * 100, 2) as weight_change_percent
+      FROM learning_weights
+      WHERE confidence_score >= $1
+    `;
+    
+    const queryParams = [confidence_threshold];
+    
+    if (factor_category) {
+      weightsQuery += ` AND factor_category = $2`;
+      queryParams.push(factor_category);
+    }
+    
+    weightsQuery += ` ORDER BY success_correlation DESC`;
+
+    const weightsResult = await pool.query(weightsQuery, queryParams);
+
+    // Get system performance
+    const performanceQuery = `
+      SELECT 
+        COUNT(*) as total_matches,
+        COUNT(CASE WHEN partnership_formed = true THEN 1 END) as successful_partnerships,
+        ROUND(AVG(CASE WHEN partnership_formed = true THEN client_satisfaction_score END), 2) as avg_client_satisfaction,
+        ROUND(AVG(CASE WHEN partnership_formed = true THEN cpa_satisfaction_score END), 2) as avg_cpa_satisfaction,
+        ROUND(AVG(CASE WHEN partnership_formed = true THEN revenue_generated END), 2) as avg_revenue_per_success
+      FROM match_outcomes
+      WHERE created_at >= NOW() - INTERVAL '30 days';
+    `;
+
+    const performanceResult = await pool.query(performanceQuery);
+
+    res.json({
+      success: true,
+      data: {
+        learning_weights: weightsResult.rows,
+        system_performance: performanceResult.rows[0],
+        analysis_metadata: {
+          confidence_threshold,
+          factor_category_filter: factor_category,
+          generated_at: new Date().toISOString()
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error retrieving learning insights:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve learning insights'
+    });
+  }
+});
+
+// ML Route 3: Trigger ML weight recalculation
+app.post('/api/ml/recalculate-weights', async (req, res) => {
+  try {
+    const { force_recalculation = false, minimum_samples = 10 } = req.body;
+
+    // Check if we have enough data
+    const dataCheckQuery = `
+      SELECT COUNT(*) as total_outcomes
+      FROM match_outcomes
+      WHERE partnership_formed IS NOT NULL;
+    `;
+
+    const dataCheck = await pool.query(dataCheckQuery);
+    const totalOutcomes = parseInt(dataCheck.rows[0].total_outcomes);
+
+    if (!force_recalculation && totalOutcomes < minimum_samples) {
+      return res.json({
+        success: true,
+        message: `Insufficient data for recalculation. Need ${minimum_samples}, have ${totalOutcomes}`,
+        recalculated: false,
+        total_outcomes: totalOutcomes
+      });
+    }
+
+    // Trigger ML learning cycle
+    const learningResults = await mlEngine.performLearningCycle();
+
+    res.json({
+      success: true,
+      message: 'ML weights recalculated successfully',
+      recalculated: true,
+      data: {
+        total_outcomes: totalOutcomes,
+        learning_results: learningResults,
+        recalculation_timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Error recalculating ML weights:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to recalculate ML weights'
+    });
+  }
+});
+
+// ML Route 4: Enhanced recommendations
+app.post('/api/ml/enhanced-recommendations', async (req, res) => {
+  try {
+    const {
+      client_profile,
+      limit = 10,
+      include_explanations = true,
+      use_ml_weights = true
+    } = req.body;
+
+    if (!client_profile) {
+      return res.status(400).json({
+        success: false,
+        error: 'Client profile is required'
+      });
+    }
+
+    // Generate enhanced recommendations using ML
+    const recommendations = await realtimeMLEngine.generateEnhancedRecommendations(
+      client_profile,
+      { limit, include_explanations, use_ml_weights }
+    );
+
+    res.json({
+      success: true,
+      data: {
+        recommendations: recommendations,
+        ml_enhanced: true,
+        total_analyzed: recommendations.length,
+        generated_at: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Error generating enhanced recommendations:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to generate enhanced recommendations'
+    });
+  }
+});
+
+// ML Route 5: Get ML system status
+app.get('/api/ml/status', async (req, res) => {
+  try {
+    const schedulerStatus = mlScheduler.getStatus();
+    const performanceMetrics = realtimeMLEngine.getPerformanceMetrics();
+
+    // Get latest model version
+    const modelQuery = `
+      SELECT version_number, accuracy_score, is_active, created_at
+      FROM ml_model_versions
+      WHERE is_active = true
+      ORDER BY created_at DESC
+      LIMIT 1;
+    `;
+    
+    const modelResult = await pool.query(modelQuery);
+
+    res.json({
+      success: true,
+      data: {
+        scheduler_status: schedulerStatus,
+        performance_metrics: performanceMetrics,
+        current_model: modelResult.rows[0] || null,
+        system_health: 'operational',
+        timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting ML status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get ML status'
+    });
+  }
+});
 
 // Test database connection on startup
 pool.query('SELECT NOW()', (err, result) => {
