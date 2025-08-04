@@ -251,14 +251,6 @@ app.post('/api/performance/score', async (req, res) => {
   }
 });
 
-  } catch (error) {
-    console.error('Error retrieving learning insights:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to retrieve learning insights'
-    });
-  }
-});
 
 // ML Route 3: Trigger ML weight recalculation
 app.post('/api/ml/recalculate-weights', async (req, res) => {
