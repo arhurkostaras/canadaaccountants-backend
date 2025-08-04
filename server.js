@@ -18,6 +18,13 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+// Simple test endpoint
+app.get('/api/test', (req, res) => {
+  res.json({ 
+    message: 'Test endpoint working!', 
+    timestamp: new Date().toISOString() 
+  });
+});
 
 // Database connection
 const pool = new Pool({
