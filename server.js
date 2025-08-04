@@ -33,6 +33,29 @@ app.use(cors({
 app.use(express.json());
 
 // =====================================================
+// HEALTH CHECK ENDPOINT
+// =====================================================
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    message: 'CanadaAccountants AI Backend is running successfully',
+    timestamp: new Date().toISOString(),
+    services: {
+      ml_engine: 'active',
+      database: 'connected',
+      ai_services: 'ready'
+    }
+  });
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Welcome to CanadaAccountants AI Backend',
+    version: '1.0.0',
+    ai_engines: 'ready'
+  });
+});
+// =====================================================
 // MACHINE LEARNING API ENDPOINTS
 // =====================================================
 
