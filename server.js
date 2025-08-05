@@ -25,6 +25,13 @@ app.get('/api/test', (req, res) => {
     message: 'Test endpoint working!', 
     timestamp: new Date().toISOString() 
   });
+  // Health check endpoint for Railway
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'OK',
+    message: 'CanadaAccountants AI Backend is running successfully',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Database connection
