@@ -236,7 +236,7 @@ app.get('/api/ml/learning-insights', async (req, res) => {
       }
     });
 
-   /* Performance Scoring Engine API
+   // Performance Scoring Engine API
 app.post('/api/performance/score', async (req, res) => {
   try {
     const { cpa, businessRequirements } = req.body;
@@ -264,7 +264,7 @@ app.post('/api/performance/score', async (req, res) => {
     console.error('Performance scoring error:', error);
     res.status(500).json({ error: 'Performance scoring failed' });
   }
-});/*
+});
 
 
 // ML Route 3: Trigger ML weight recalculation
