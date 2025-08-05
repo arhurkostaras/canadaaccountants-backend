@@ -749,3 +749,565 @@ INSERT INTO prediction_models (model_name, model_version, model_type, accuracy_s
 ('revenue_forecasting_model', '1.0.0', 'revenue_prediction', 0.8200, TRUE),
 ('dropout_risk_classifier', '1.0.0', 'dropout_risk', 0.7800, TRUE);
 
+
+-- =====================================================
+-- FRICTION ELIMINATION SYSTEM TABLES
+-- Add these tables to the end of your existing schema.sql
+-- =====================================================
+
+-- TABLE 1: SME Friction Elimination Requests
+CREATE TABLE sme_friction_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    request_id VARCHAR(255) UNIQUE NOT NULL,
+    
+    -- Core Friction Data
+    pain_point VARCHAR(50) NOT NULL, -- time-drain, tax-stress, cpa-search, financial-chaos
+    business_type VARCHAR(50) NOT NULL,
+    business_size VARCHAR(20) NOT NULL, -- startup, small, medium, large
+    
+    -- Services and Requirements
+    services_needed JSONB, -- Array of required services
+    time_being_lost VARCHAR(20), -- minimal, moderate, significant, severe
+    urgency_level VARCHAR(20) DEFAULT 'urgent', -- emergency, urgent, soon, flexible
+    budget_range VARCHAR(30), -- standard, premium, enterprise
+    
+    -- Contact Information
+    contact_info JSONB NOT NULL, -- name, email, phone, company
+    additional_context TEXT,
+    
+    -- Friction Analysis
+    friction_score INTEGER DEFAULT 0, -- 0-100 calculated friction severity
+    estimated_time_savings VARCHAR(50), -- projected time recovery
+    estimated_cost_savings VARCHAR(50), -- projected cost savings
+    
+    -- Status Tracking
+    status VARCHAR(30) DEFAULT 'pending', -- pending, matched, completed, expired
+    matched_at TIMESTAMP WITH TIME ZONE,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    ip_address INET,
+    user_agent TEXT
+);
+
+-- TABLE 2: CPA Friction Elimination Profiles
+CREATE TABLE cpa_friction_profiles (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    registration_id VARCHAR(255) UNIQUE NOT NULL,
+    
+    -- Current Friction Points
+    marketing_waste_amount VARCHAR(20), -- Annual $ wasted on ineffective marketing
+    sales_cycle_length VARCHAR(10), -- Current sales cycle in days
+    current_win_rate VARCHAR(10), -- Current win rate percentage
+    lead_generation_method VARCHAR(50), -- How they currently get leads
+    biggest_challenge VARCHAR(100), -- Primary business challenge
+    
+    -- Target Client Profile
+    target_client_size VARCHAR(30), -- startup, small, medium, large, enterprise
+    preferred_industries JSONB, -- Array of preferred industries
+    service_specializations JSONB, -- Array of specialized services
+    
+    -- Contact and Availability
+    contact_info JSONB NOT NULL, -- name, email, phone, firm
+    availability VARCHAR(30) DEFAULT 'immediately', -- immediately, within_week, within_month
+    capacity_level VARCHAR(20) DEFAULT 'medium', -- low, medium, high, unlimited
+    
+    -- Friction Elimination Metrics
+    friction_elimination_score INTEGER DEFAULT 0, -- 0-100 CPA friction level
+    projected_savings VARCHAR(50), -- Marketing waste elimination projection
+    projected_cycle_improvement VARCHAR(50), -- Sales cycle improvement projection
+    projected_win_rate VARCHAR(10), -- Projected new win rate
+    
+    -- Status and Performance
+    status VARCHAR(30) DEFAULT 'active', -- active, inactive, pending_review
+    clients_matched INTEGER DEFAULT 0,
+    successful_partnerships INTEGER DEFAULT 0,
+    avg_client_satisfaction DECIMAL(3,2) DEFAULT 0.00,
+    
+    -- Onboarding and Training
+    onboarding_completed BOOLEAN DEFAULT FALSE,
+    onboarding_completed_at TIMESTAMP WITH TIME ZONE,
+    training_modules_completed JSONB, -- Array of completed training modules
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_active TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 3: Friction-Based CPA Matches
+CREATE TABLE friction_matches (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    match_id VARCHAR(255) UNIQUE NOT NULL,
+    
+    -- Request and CPA References
+    request_id VARCHAR(255) NOT NULL REFERENCES sme_friction_requests(request_id),
+    cpa_id VARCHAR(255) NOT NULL,
+    cpa_name VARCHAR(200) NOT NULL,
+    
+    -- Match Quality Metrics
+    match_score DECIMAL(5,2) NOT NULL, -- 0.00 to 100.00
+    friction_compatibility_score DECIMAL(5,2), -- How well CPA addresses specific friction
+    specializations JSONB, -- CPA specializations relevant to request
+    
+    -- Friction Elimination Specifics
+    friction_expertise VARCHAR(50), -- CPA's friction elimination expertise
+    success_rate INTEGER, -- CPA's historical success rate
+    avg_time_savings VARCHAR(50), -- Average time savings CPA delivers
+    avg_cost_savings VARCHAR(50), -- Average cost savings CPA delivers
+    
+    -- Availability and Location
+    location VARCHAR(100),
+    availability VARCHAR(30),
+    response_time_estimate VARCHAR(30), -- Expected response time
+    
+    -- Match Status and Outcomes
+    status VARCHAR(30) DEFAULT 'presented', -- presented, contacted, meeting_scheduled, partnership_formed, declined
+    client_contacted_cpa BOOLEAN DEFAULT FALSE,
+    cpa_responded BOOLEAN DEFAULT FALSE,
+    meeting_scheduled BOOLEAN DEFAULT FALSE,
+    partnership_formed BOOLEAN DEFAULT FALSE,
+    
+    -- Success Tracking
+    actual_time_savings VARCHAR(50), -- Actual time savings achieved
+    actual_cost_savings VARCHAR(50), -- Actual cost savings achieved
+    client_satisfaction_score INTEGER, -- 1-10 rating
+    partnership_duration_months INTEGER,
+    
+    -- Communication Log
+    first_contact_at TIMESTAMP WITH TIME ZONE,
+    last_interaction_at TIMESTAMP WITH TIME ZONE,
+    total_interactions INTEGER DEFAULT 0,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 4: Friction Elimination Analytics and Metrics
+CREATE TABLE friction_analytics (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    metric_date DATE NOT NULL,
+    
+    -- Daily Request Metrics
+    total_requests_today INTEGER DEFAULT 0,
+    total_cpa_registrations_today INTEGER DEFAULT 0,
+    total_matches_generated_today INTEGER DEFAULT 0,
+    total_partnerships_formed_today INTEGER DEFAULT 0,
+    
+    -- Pain Point Distribution
+    time_drain_requests INTEGER DEFAULT 0,
+    tax_stress_requests INTEGER DEFAULT 0,
+    cpa_search_requests INTEGER DEFAULT 0,
+    financial_chaos_requests INTEGER DEFAULT 0,
+    
+    -- Urgency Distribution
+    emergency_requests INTEGER DEFAULT 0,
+    urgent_requests INTEGER DEFAULT 0,
+    soon_requests INTEGER DEFAULT 0,
+    flexible_requests INTEGER DEFAULT 0,
+    
+    -- Business Size Distribution
+    startup_requests INTEGER DEFAULT 0,
+    small_business_requests INTEGER DEFAULT 0,
+    medium_business_requests INTEGER DEFAULT 0,
+    large_business_requests INTEGER DEFAULT 0,
+    
+    -- Success Metrics
+    avg_match_score DECIMAL(5,2) DEFAULT 0.00,
+    avg_friction_score DECIMAL(5,2) DEFAULT 0.00,
+    partnership_conversion_rate DECIMAL(5,2) DEFAULT 0.00,
+    
+    -- Time and Cost Savings Impact
+    total_time_saved_hours INTEGER DEFAULT 0,
+    total_cost_savings_amount DECIMAL(12,2) DEFAULT 0.00,
+    avg_response_time_hours DECIMAL(5,2) DEFAULT 0.00,
+    
+    -- CPA Performance Metrics
+    active_cpas_today INTEGER DEFAULT 0,
+    avg_cpa_utilization DECIMAL(5,2) DEFAULT 0.00,
+    top_performing_cpa_id VARCHAR(255),
+    
+    -- System Performance
+    avg_processing_time_seconds DECIMAL(5,2) DEFAULT 0.00,
+    system_uptime_percentage DECIMAL(5,2) DEFAULT 100.00,
+    api_calls_today INTEGER DEFAULT 0,
+    
+    -- Revenue Impact (Future)
+    estimated_revenue_impact DECIMAL(12,2) DEFAULT 0.00,
+    platform_fee_collected DECIMAL(10,2) DEFAULT 0.00,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    calculated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- TABLE 5: Friction Elimination Success Stories
+CREATE TABLE friction_success_stories (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    
+    -- Reference Data
+    match_id VARCHAR(255) NOT NULL,
+    request_id VARCHAR(255) NOT NULL,
+    cpa_id VARCHAR(255) NOT NULL,
+    
+    -- Success Story Details
+    client_industry VARCHAR(100),
+    business_size VARCHAR(20),
+    original_pain_point VARCHAR(50),
+    
+    -- Quantified Results
+    time_saved_hours_monthly INTEGER,
+    cost_savings_annual DECIMAL(10,2),
+    efficiency_improvement_percentage INTEGER,
+    stress_reduction_score INTEGER, -- 1-10
+    
+    -- Success Timeline
+    partnership_start_date DATE,
+    first_results_date DATE,
+    full_implementation_date DATE,
+    days_to_first_results INTEGER,
+    
+    -- Client Testimonial
+    client_testimonial TEXT,
+    client_satisfaction_rating INTEGER, -- 1-10
+    would_recommend BOOLEAN DEFAULT TRUE,
+    
+    -- CPA Perspective
+    cpa_satisfaction_rating INTEGER, -- 1-10
+    cpa_notes TEXT,
+    services_provided JSONB, -- Array of services delivered
+    
+    -- Success Story Status
+    is_featured BOOLEAN DEFAULT FALSE,
+    is_public BOOLEAN DEFAULT FALSE,
+    client_approved_sharing BOOLEAN DEFAULT FALSE,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    featured_at TIMESTAMP WITH TIME ZONE
+);
+
+-- =====================================================
+-- INDEXES FOR FRICTION ELIMINATION PERFORMANCE
+-- =====================================================
+
+-- SME Friction Requests Indexes
+CREATE INDEX idx_sme_friction_requests_pain_point ON sme_friction_requests(pain_point);
+CREATE INDEX idx_sme_friction_requests_urgency ON sme_friction_requests(urgency_level);
+CREATE INDEX idx_sme_friction_requests_business_size ON sme_friction_requests(business_size);
+CREATE INDEX idx_sme_friction_requests_status ON sme_friction_requests(status);
+CREATE INDEX idx_sme_friction_requests_friction_score ON sme_friction_requests(friction_score DESC);
+CREATE INDEX idx_sme_friction_requests_created_at ON sme_friction_requests(created_at DESC);
+
+-- CPA Friction Profiles Indexes
+CREATE INDEX idx_cpa_friction_profiles_status ON cpa_friction_profiles(status);
+CREATE INDEX idx_cpa_friction_profiles_availability ON cpa_friction_profiles(availability);
+CREATE INDEX idx_cpa_friction_profiles_target_size ON cpa_friction_profiles(target_client_size);
+CREATE INDEX idx_cpa_friction_profiles_score ON cpa_friction_profiles(friction_elimination_score DESC);
+CREATE INDEX idx_cpa_friction_profiles_success ON cpa_friction_profiles(successful_partnerships DESC);
+
+-- Friction Matches Indexes
+CREATE INDEX idx_friction_matches_request_id ON friction_matches(request_id);
+CREATE INDEX idx_friction_matches_cpa_id ON friction_matches(cpa_id);
+CREATE INDEX idx_friction_matches_match_score ON friction_matches(match_score DESC);
+CREATE INDEX idx_friction_matches_status ON friction_matches(status);
+CREATE INDEX idx_friction_matches_partnership_formed ON friction_matches(partnership_formed);
+CREATE INDEX idx_friction_matches_created_at ON friction_matches(created_at DESC);
+
+-- Friction Analytics Indexes
+CREATE INDEX idx_friction_analytics_date ON friction_analytics(metric_date DESC);
+CREATE INDEX idx_friction_analytics_requests ON friction_analytics(total_requests_today DESC);
+CREATE INDEX idx_friction_analytics_partnerships ON friction_analytics(total_partnerships_formed_today DESC);
+
+-- Friction Success Stories Indexes  
+CREATE INDEX idx_friction_success_stories_match_id ON friction_success_stories(match_id);
+CREATE INDEX idx_friction_success_stories_featured ON friction_success_stories(is_featured);
+CREATE INDEX idx_friction_success_stories_public ON friction_success_stories(is_public);
+CREATE INDEX idx_friction_success_stories_pain_point ON friction_success_stories(original_pain_point);
+
+-- =====================================================
+-- TRIGGERS FOR UPDATED_AT TIMESTAMPS
+-- =====================================================
+
+-- SME Friction Requests trigger
+CREATE TRIGGER update_sme_friction_requests_updated_at 
+    BEFORE UPDATE ON sme_friction_requests 
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- CPA Friction Profiles trigger
+CREATE TRIGGER update_cpa_friction_profiles_updated_at 
+    BEFORE UPDATE ON cpa_friction_profiles 
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Friction Matches trigger  
+CREATE TRIGGER update_friction_matches_updated_at 
+    BEFORE UPDATE ON friction_matches 
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Friction Success Stories trigger
+CREATE TRIGGER update_friction_success_stories_updated_at 
+    BEFORE UPDATE ON friction_success_stories 
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- =====================================================
+-- SAMPLE FRICTION ELIMINATION DATA
+-- =====================================================
+
+-- Sample SME Friction Request
+INSERT INTO sme_friction_requests (
+    request_id, pain_point, business_type, business_size, services_needed,
+    time_being_lost, urgency_level, budget_range, contact_info, friction_score
+) VALUES (
+    'req_sample_001',
+    'time-drain',
+    'technology_startup',
+    'small',
+    '["bookkeeping", "tax_planning", "financial_consulting"]',
+    'significant',
+    'urgent',
+    'standard',
+    '{"name": "John Smith", "email": "john@techstartup.com", "phone": "416-555-0123", "company": "TechStart Solutions"}',
+    75
+);
+
+-- Sample CPA Friction Profile
+INSERT INTO cpa_friction_profiles (
+    registration_id, marketing_waste_amount, sales_cycle_length, current_win_rate,
+    lead_generation_method, biggest_challenge, target_client_size, contact_info,
+    friction_elimination_score, status
+) VALUES (
+    'cpa_sample_001',
+    '35000',
+    '420',
+    '30',
+    'cold_calling',
+    'lead_qualification',
+    'small_medium',
+    '{"name": "Sarah Johnson CPA", "email": "sarah@johnsoncpa.com", "phone": "416-555-0156", "firm": "Johnson & Associates CPA"}',
+    82,
+    'active'
+);
+
+-- Sample Friction Match
+INSERT INTO friction_matches (
+    match_id, request_id, cpa_id, cpa_name, match_score,
+    friction_compatibility_score, specializations, friction_expertise,
+    success_rate, avg_time_savings, avg_cost_savings, location, availability
+) VALUES (
+    'match_sample_001',
+    'req_sample_001',
+    'cpa_sample_001',
+    'Sarah Johnson CPA',
+    92.50,
+    88.75,
+    '["Small Business Tax", "Startup Consulting", "Financial Planning"]',
+    'time-drain',
+    94,
+    '25 hours/month',
+    '$4,200/year',
+    'Toronto, ON',
+    'immediate'
+);
+
+-- Sample Success Story
+INSERT INTO friction_success_stories (
+    match_id, request_id, cpa_id, client_industry, business_size,
+    original_pain_point, time_saved_hours_monthly, cost_savings_annual,
+    efficiency_improvement_percentage, stress_reduction_score,
+    partnership_start_date, days_to_first_results, client_testimonial,
+    client_satisfaction_rating, cpa_satisfaction_rating, is_featured
+) VALUES (
+    'match_sample_001',
+    'req_sample_001', 
+    'cpa_sample_001',
+    'Technology',
+    'small',
+    'time-drain',
+    28,
+    4650.00,
+    85,
+    9,
+    '2024-11-01',
+    3,
+    'Sarah eliminated our financial chaos in just 3 days. We saved 28 hours per month and $4,650 annually. Best business decision ever!',
+    10,
+    9,
+    TRUE
+);
+
+-- =====================================================
+-- FRICTION ELIMINATION SYSTEM VIEWS
+-- =====================================================
+
+-- View: Active Friction Requests Summary
+CREATE VIEW active_friction_requests_summary AS
+SELECT 
+    pain_point,
+    COUNT(*) as request_count,
+    AVG(friction_score) as avg_friction_score,
+    COUNT(CASE WHEN urgency_level = 'emergency' THEN 1 END) as emergency_count,
+    COUNT(CASE WHEN status = 'matched' THEN 1 END) as matched_count
+FROM sme_friction_requests 
+WHERE status IN ('pending', 'matched')
+    AND created_at >= NOW() - INTERVAL '30 days'
+GROUP BY pain_point
+ORDER BY request_count DESC;
+
+-- View: CPA Friction Performance
+CREATE VIEW cpa_friction_performance AS
+SELECT 
+    cp.registration_id,
+    cp.contact_info->>'name' as cpa_name,
+    cp.friction_elimination_score,
+    cp.clients_matched,
+    cp.successful_partnerships,
+    cp.avg_client_satisfaction,
+    CASE 
+        WHEN cp.clients_matched > 0 THEN 
+            ROUND((cp.successful_partnerships::DECIMAL / cp.clients_matched * 100), 2)
+        ELSE 0 
+    END as conversion_rate,
+    COUNT(fm.id) as total_matches,
+    AVG(fm.match_score) as avg_match_score
+FROM cpa_friction_profiles cp
+LEFT JOIN friction_matches fm ON cp.registration_id = fm.cpa_id
+WHERE cp.status = 'active'
+GROUP BY cp.id, cp.registration_id, cp.contact_info, cp.friction_elimination_score,
+         cp.clients_matched, cp.successful_partnerships, cp.avg_client_satisfaction
+ORDER BY conversion_rate DESC, avg_match_score DESC;
+
+-- View: Daily Friction Elimination Impact
+CREATE VIEW daily_friction_impact AS
+SELECT 
+    fa.metric_date,
+    fa.total_requests_today,
+    fa.total_partnerships_formed_today,
+    fa.total_time_saved_hours,
+    fa.total_cost_savings_amount,
+    CASE 
+        WHEN fa.total_requests_today > 0 THEN 
+            ROUND((fa.total_partnerships_formed_today::DECIMAL / fa.total_requests_today * 100), 2)
+        ELSE 0 
+    END as daily_conversion_rate,
+    fa.avg_friction_score,
+    fa.avg_match_score
+FROM friction_analytics fa
+WHERE fa.metric_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY fa.metric_date DESC;
+
+-- =====================================================
+-- FRICTION ELIMINATION FUNCTIONS
+-- =====================================================
+
+-- Function: Calculate Friction Elimination ROI
+CREATE OR REPLACE FUNCTION calculate_friction_roi(
+    time_saved_hours INTEGER,
+    cost_savings_annual DECIMAL,
+    hourly_rate DECIMAL DEFAULT 75.00
+) RETURNS JSON AS $$
+DECLARE
+    time_value DECIMAL;
+    total_annual_value DECIMAL;
+    monthly_value DECIMAL;
+    roi_data JSON;
+BEGIN
+    -- Calculate time value
+    time_value := time_saved_hours * hourly_rate * 12; -- Monthly hours * rate * 12 months
+    
+    -- Calculate total annual value
+    total_annual_value := time_value + cost_savings_annual;
+    
+    -- Calculate monthly value
+    monthly_value := total_annual_value / 12;
+    
+    -- Build return JSON
+    roi_data := json_build_object(
+        'time_saved_hours_monthly', time_saved_hours,
+        'time_value_annual', time_value,
+        'cost_savings_annual', cost_savings_annual,
+        'total_annual_value', total_annual_value,
+        'monthly_value', monthly_value,
+        'hourly_rate_used', hourly_rate
+    );
+    
+    RETURN roi_data;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function: Update Friction Analytics
+CREATE OR REPLACE FUNCTION update_daily_friction_analytics() RETURNS VOID AS $$
+DECLARE
+    today_date DATE := CURRENT_DATE;
+BEGIN
+    -- Insert or update today's friction analytics
+    INSERT INTO friction_analytics (
+        metric_date,
+        total_requests_today,
+        total_cpa_registrations_today,
+        total_matches_generated_today,
+        total_partnerships_formed_today,
+        time_drain_requests,
+        tax_stress_requests,
+        cpa_search_requests,
+        financial_chaos_requests,
+        emergency_requests,
+        urgent_requests,
+        avg_match_score,
+        avg_friction_score
+    )
+    SELECT 
+        today_date,
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date),
+        (SELECT COUNT(*) FROM cpa_friction_profiles WHERE DATE(created_at) = today_date),
+        (SELECT COUNT(*) FROM friction_matches WHERE DATE(created_at) = today_date),
+        (SELECT COUNT(*) FROM friction_matches WHERE DATE(created_at) = today_date AND partnership_formed = TRUE),
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date AND pain_point = 'time-drain'),
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date AND pain_point = 'tax-stress'),
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date AND pain_point = 'cpa-search'),
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date AND pain_point = 'financial-chaos'),
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date AND urgency_level = 'emergency'),
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE DATE(created_at) = today_date AND urgency_level = 'urgent'),
+        (SELECT COALESCE(AVG(match_score), 0) FROM friction_matches WHERE DATE(created_at) = today_date),
+        (SELECT COALESCE(AVG(friction_score), 0) FROM sme_friction_requests WHERE DATE(created_at) = today_date)
+    ON CONFLICT (metric_date) DO UPDATE SET
+        total_requests_today = EXCLUDED.total_requests_today,
+        total_cpa_registrations_today = EXCLUDED.total_cpa_registrations_today,
+        total_matches_generated_today = EXCLUDED.total_matches_generated_today,
+        total_partnerships_formed_today = EXCLUDED.total_partnerships_formed_today,
+        time_drain_requests = EXCLUDED.time_drain_requests,
+        tax_stress_requests = EXCLUDED.tax_stress_requests,
+        cpa_search_requests = EXCLUDED.cpa_search_requests,
+        financial_chaos_requests = EXCLUDED.financial_chaos_requests,
+        emergency_requests = EXCLUDED.emergency_requests,
+        urgent_requests = EXCLUDED.urgent_requests,
+        avg_match_score = EXCLUDED.avg_match_score,
+        avg_friction_score = EXCLUDED.avg_friction_score,
+        calculated_at = NOW();
+END;
+$$ LANGUAGE plpgsql;
+
+-- =====================================================
+-- COMPLETION MESSAGE
+-- =====================================================
+
+-- Add this comment to confirm friction elimination schema is complete
+/* 
+FRICTION ELIMINATION SYSTEM SCHEMA COMPLETE!
+
+This schema adds comprehensive friction elimination capabilities to your existing CanadaAccountants platform:
+
+✅ SME Friction Requests - Track all friction elimination requests
+✅ CPA Friction Profiles - Manage CPA friction elimination capabilities  
+✅ Friction Matches - Store and track friction-based matches
+✅ Friction Analytics - Comprehensive metrics and reporting
+✅ Success Stories - Track and showcase friction elimination successes
+✅ Performance Views - Real-time friction elimination insights
+✅ ROI Functions - Calculate friction elimination value
+✅ Sample Data - Ready-to-test example records
+
+Your friction elimination system is now fully integrated with your existing ML-powered backend!
+*/
