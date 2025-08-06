@@ -634,11 +634,12 @@ async function sendCPAOnboardingEmail(registrationId, request, clients) {
 }
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 CanadaAccountants API running on http://localhost:${PORT}`);
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 CanadaAccountants API running on port ${PORT}`);
   console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL}`);
-  console.log(`💚 Health check: http://localhost:${PORT}/health`);
-  console.log(`📊 API docs: http://localhost:${PORT}/`);
+  console.log(`💚 Health check available at /health`);
+  console.log(`📊 API docs available at /`);
   console.log(`🔥 6-Factor Matching Algorithm Ready!`);
   console.log(`⚡ Friction Elimination Engine Active!`);
 });
