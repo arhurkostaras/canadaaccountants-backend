@@ -359,7 +359,7 @@ app.get('/api/friction/analytics', async (req, res) => {
           COUNT(CASE WHEN pain_point = 'cpa-search' THEN 1 END) as cpa_search_requests,
           COUNT(CASE WHEN pain_point = 'financial-chaos' THEN 1 END) as financial_chaos_requests
         FROM sme_friction_requests
-        WHERE created_at >= NOW() - INTERVAL '30 days'
+        WHERE created_at::timestamp >= NOW() - INTERVAL '30 days'
       ),
       cpa_metrics AS (
         SELECT 
@@ -368,7 +368,7 @@ app.get('/api/friction/analytics', async (req, res) => {
           AVG(CAST(sales_cycle_length AS NUMERIC)) as avg_sales_cycle,
           AVG(CAST(current_win_rate AS NUMERIC)) as avg_win_rate
         FROM cpa_friction_profiles
-        WHERE created_at >= NOW() - INTERVAL '30 days'
+        WHERE created_at::timestamp >= NOW() - INTERVAL '30 days'
       )
       SELECT fm.*, cm.* FROM friction_metrics fm, cpa_metrics cm;
     `;
