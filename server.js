@@ -69,10 +69,10 @@ app.post('/api/cpa-registration', async (req, res) => {
     
     // Store CPA registration in database
     const insertQuery = `
-      INSERT INTO cpa_registrations (
-        registration_id, first_name, last_name, email, phone, cpa_license,
-        province, experience, firm_size, services, industries, bio,
-        hourly_rate, availability, selected_plan, registration_type, created_at
+      INSERT INTO cpa_profiles (
+        cpa_id, first_name, last_name, email, phone, cpa_license,
+        province, years_experience, firm_size, services, industries_served, bio,
+        hourly_rate_min, availability, profile_status, verification_status, created_date
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
       RETURNING *;
     `;
