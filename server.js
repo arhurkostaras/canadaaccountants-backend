@@ -70,31 +70,30 @@ app.post('/api/cpa-registration', async (req, res) => {
     // Store CPA registration in database
     const insertQuery = `
       INSERT INTO cpa_profiles (
-        cpa_id, first_name, last_name, email, phone, cpa_license,
-        province, years_experience, firm_size, services, industries_served, bio,
-        hourly_rate_min, availability, profile_status, verification_status, created_date
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+        cpa_id, first_name, last_name, email, phone, firm_name,
+        province, years_experience, firm_size, services, industries_served,
+        hourly_rate_min, profile_status, verification_status, created_date
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
       RETURNING *;
     `;
 
     const result = await pool.query(insertQuery, [
-      registrationId,
-      registrationData.firstName || '',
-      registrationData.lastName || '',
-      registrationData.email || '',
-      registrationData.phone || '',
-      registrationData.cpaLicense || '',
-      registrationData.province || '',
-      registrationData.experience || '',
-      registrationData.firmSize || '',
-      JSON.stringify(registrationData.services || []),
-      JSON.stringify(registrationData.industries || []),
-      registrationData.bio || '',
-      registrationData.hourlyRate || '',
-      registrationData.availability || '',
-      registrationData.selectedPlan || 'premium',
-      registrationData.registrationType || 'CPA'
+      registrationId,                                    // $1 - cpa_id
+      registrationData.firstName || '',                  // $2 - first_name
+      registrationData.lastName || '',                   // $3 - last_name
+      registrationData.email || '',                      // $4 - email
+      registrationData.phone || '',                      // $5 - phone
+      registrationData.firmName || '',                   // $6 - firm_name
+      registrationData.province || '',                   // $7 - province
+      registrationData.experience || '',                 // $8 - years_experience
+      registrationData.firmSize || '',                   // $9 - firm_size
+      JSON.stringify(registrationData.services || []),   // $10 - services
+      JSON.stringify(registrationData.industries || []), // $11 - industries_served
+      registrationData.hourlyRate || '',                 // $12 - hourly_rate_min
+      'pending',                                         // $13 - profile_status
+      'unverified'                                       // $14 - verification_status
     ]);
+  
 
     res.json({
       success: true,
