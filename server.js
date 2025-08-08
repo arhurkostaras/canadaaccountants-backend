@@ -41,6 +41,78 @@ app.get('/api/test', (req, res) => {
   });
 });
 
+// Root endpoint - fixes "Cannot GET /" error
+app.get('/', (req, res) => {
+  res.json({
+    message: 'CanadaAccountants API is running',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      cpaRegistration: '/api/cpa-registration',
+      performanceScore: '/api/performance/score',
+      matchCpas: '/api/match-cpas',
+      frictionElimination: '/api/friction/*'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// CPA Registration endpoint for your pricing page form
+app.post('/api/cpa-registration', async (req, res) => {
+  try {
+    const registrationData = req.body;
+    
+    console.log('🎉 Processing CPA registration:', registrationData);
+
+    // Generate unique registration ID
+    const registrationId = `reg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Store CPA registration in database
+    const insertQuery = `
+      INSERT INTO cpa_registrations (
+        registration_id, first_name, last_name, email, phone, cpa_license,
+        province, experience, firm_size, services, industries, bio,
+        hourly_rate, availability, selected_plan, registration_type, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+      RETURNING *;
+    `;
+
+    const result = await pool.query(insertQuery, [
+      registrationId,
+      registrationData.firstName || '',
+      registrationData.lastName || '',
+      registrationData.email || '',
+      registrationData.phone || '',
+      registrationData.cpaLicense || '',
+      registrationData.province || '',
+      registrationData.experience || '',
+      registrationData.firmSize || '',
+      JSON.stringify(registrationData.services || []),
+      JSON.stringify(registrationData.industries || []),
+      registrationData.bio || '',
+      registrationData.hourlyRate || '',
+      registrationData.availability || '',
+      registrationData.selectedPlan || 'premium',
+      registrationData.registrationType || 'CPA'
+    ]);
+
+    res.json({
+      success: true,
+      registrationId: registrationId,
+      message: 'CPA registration successful',
+      data: result.rows[0],
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ CPA registration error:', error);
+    res.status(500).json({ 
+      error: 'Failed to process CPA registration',
+      details: error.message 
+    });
+  }
+});
+
 // Database connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
