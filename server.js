@@ -89,7 +89,7 @@ app.post('/api/cpa-registration', async (req, res) => {
       registrationData.firmSize || '',                   // $9 - firm_size
       JSON.stringify(registrationData.services || []),   // $10 - services
       JSON.stringify(registrationData.industries || []), // $11 - industries_served
-      registrationData.hourlyRate || '',                 // $12 - hourly_rate_min
+      parseFloat(registrationData.hourlyRate) || 0,     // $12 - hourly_rate_min
       'pending',                                         // $13 - profile_status
       'unverified'                                       // $14 - verification_status
     ]);
