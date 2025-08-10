@@ -71,7 +71,7 @@ app.post('/api/cpa-registration', async (req, res) => {
     const insertQuery = `
       INSERT INTO cpa_profiles (
         cpa_id, first_name, last_name, email, phone, firm_name,
-        province, years_experience, firm_size, services, industries_served,
+        province, years_experience, firm_size, specializations, industries_served,
         hourly_rate_min, profile_status, verification_status, created_date
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
       RETURNING *;
