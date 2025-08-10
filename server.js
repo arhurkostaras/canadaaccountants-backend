@@ -85,7 +85,7 @@ app.post('/api/cpa-registration', async (req, res) => {
       registrationData.phone || '',                      // $5 - phone
       registrationData.firmName || '',                   // $6 - firm_name
       registrationData.province || '',                   // $7 - province
-      registrationData.experience || '',                 // $8 - years_experience
+      parseInt(registrationData.experience) || 0,
       registrationData.firmSize || '',                   // $9 - firm_size
       JSON.stringify(registrationData.services || []),   // $10 - services
       JSON.stringify(registrationData.industries || []), // $11 - industries_served
