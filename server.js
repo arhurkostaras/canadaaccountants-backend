@@ -70,11 +70,26 @@ app.post('/api/cpa-registration', async (req, res) => {
     // Store CPA registration in database
     const insertQuery = `
       INSERT INTO cpa_profiles (
-        cpa_id, first_name, last_name, email, phone, firm_name,
-        province, years_experience, firm_size, specializations, industries_served,
-        hourly_rate_min, profile_status, verification_status, created_date
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
-      RETURNING *;
+    cpa_id, first_name, last_name, email, phone, firm_name,
+    province, years_experience, firm_size, specializations, industries_served,
+    hourly_rate_min, profile_status, verification_status, created_date
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+ON CONFLICT (email) 
+DO UPDATE SET 
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name,
+    phone = EXCLUDED.phone,
+    firm_name = EXCLUDED.firm_name,
+    province = EXCLUDED.province,
+    years_experience = EXCLUDED.years_experience,
+    firm_size = EXCLUDED.firm_size,
+    specializations = EXCLUDED.specializations,
+    industries_served = EXCLUDED.industries_served,
+    hourly_rate_min = EXCLUDED.hourly_rate_min,
+    profile_status = EXCLUDED.profile_status,
+    verification_status = EXCLUDED.verification_status,
+    updated_date = NOW()
+RETURNING *;
     `;
 
     const result = await pool.query(insertQuery, [
