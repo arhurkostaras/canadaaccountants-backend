@@ -130,8 +130,7 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         firmName: user.firm_name,
-        subscriptionPlan: user.plan_type,
-        subscriptionStatus: user.subscription_status
+
       }
     });
 
