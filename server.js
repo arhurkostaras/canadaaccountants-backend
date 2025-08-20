@@ -41,13 +41,12 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    console.log('Processing login request for:', email);
-
-    // Get user from database
     const userQuery = `
-      SELECT u.*, cp.id as cpa_profile_id, cp.first_name, cp.last_name, 
-             cp.firm_name, cs.plan_type, cs.status as subscription_status
-      FROM users u
+  SELECT u.*, cp.id as cpa_profile_id, cp.first_name, cp.last_name, cp.firm_name
+  FROM users u
+  LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
+  WHERE u.email = $1 AND u.user_type = 'CPA' AND u.is_active = true;
+`;
       LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
       LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
       WHERE u.email = $1 AND u.user_type = 'CPA' AND u.is_active = true;
@@ -95,8 +94,7 @@ app.post('/api/auth/login', async (req, res) => {
         firstName: user.first_name,
         lastName: user.last_name,
         firmName: user.firm_name,
-        subscriptionPlan: user.plan_type,
-        subscriptionStatus: user.subscription_status
+        
       }
     });
 
@@ -114,11 +112,9 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
   try {
     // Get fresh user data
     const userQuery = `
-      SELECT u.*, cp.first_name, cp.last_name, cp.firm_name, 
-             cs.plan_type, cs.status as subscription_status
+      SELECT u.*, cp.first_name, cp.last_name, cp.firm_name 
       FROM users u
       LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
-      LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
       WHERE u.id = $1;
     `;
     
