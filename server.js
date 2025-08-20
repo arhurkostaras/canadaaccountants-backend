@@ -47,10 +47,6 @@ app.post('/api/auth/login', async (req, res) => {
   LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
   WHERE u.email = $1 AND u.user_type = 'CPA' AND u.is_active = true;
 `;
-      LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
-      LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
-      WHERE u.email = $1 AND u.user_type = 'CPA' AND u.is_active = true;
-    `;
     
     const result = await pool.query(userQuery, [email]);
     
