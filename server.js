@@ -18,6 +18,140 @@ app.use(cors({
 // JSON parsing middleware
 app.use(express.json());
 
+// JWT Authentication Middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret_key', (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// Login endpoint
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    console.log('Processing login request for:', email);
+
+    // Get user from database
+    const userQuery = `
+      SELECT u.*, cp.id as cpa_profile_id, cp.first_name, cp.last_name, 
+             cp.firm_name, cs.plan_type, cs.status as subscription_status
+      FROM users u
+      LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
+      LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
+      WHERE u.email = $1 AND u.user_type = 'CPA' AND u.is_active = true;
+    `;
+    
+    const result = await pool.query(userQuery, [email]);
+    
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    
+    const user = result.rows[0];
+    
+    // For now, we'll create a simple password check
+    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    
+    // Generate JWT token
+    const token = jwt.sign(
+      { 
+        userId: user.id,
+        cpaProfileId: user.cpa_profile_id,
+        email: user.email,
+        userType: user.user_type 
+      },
+      process.env.JWT_SECRET || 'your_jwt_secret_key',
+      { expiresIn: '7d' }
+    );
+    
+    // Update last login
+    await pool.query(
+      'UPDATE users SET last_login = NOW() WHERE id = $1',
+      [user.id]
+    );
+    
+    res.json({
+      success: true,
+      token: token,
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        firmName: user.firm_name,
+        subscriptionPlan: user.plan_type,
+        subscriptionStatus: user.subscription_status
+      }
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ 
+      error: 'Login failed',
+      details: error.message 
+    });
+  }
+});
+
+// Token verification endpoint
+app.get('/api/auth/verify', authenticateToken, async (req, res) => {
+  try {
+    // Get fresh user data
+    const userQuery = `
+      SELECT u.*, cp.first_name, cp.last_name, cp.firm_name, 
+             cs.plan_type, cs.status as subscription_status
+      FROM users u
+      LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
+      LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
+      WHERE u.id = $1;
+    `;
+    
+    const result = await pool.query(userQuery, [req.user.userId]);
+    
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+    
+    const user = result.rows[0];
+    
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        firmName: user.firm_name,
+        subscriptionPlan: user.plan_type,
+        subscriptionStatus: user.subscription_status
+      }
+    });
+
+  } catch (error) {
+    console.error('Token verification error:', error);
+    res.status(500).json({ 
+      error: 'Token verification failed',
+      details: error.message 
+    });
+  }
+});
+
 // Health check endpoint for Railway
 app.get('/health', (req, res) => {
   res.status(200).json({ 
