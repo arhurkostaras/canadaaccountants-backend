@@ -1051,7 +1051,7 @@ app.get('/api/admin/submissions', authenticateToken, requireAdmin, async (req, r
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const result = await pool.query(`
       SELECT request_id, pain_point, business_type, business_size,
-             urgency_level, friction_score, status, contact_info, created_at
+             urgency_level, friction_score, contact_info, created_at
       FROM sme_friction_requests
       ORDER BY created_at DESC
       LIMIT $1
