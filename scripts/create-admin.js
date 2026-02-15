@@ -28,19 +28,28 @@ async function main() {
   try {
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const result = await pool.query(
-      `INSERT INTO users (email, password_hash, user_type, email_verified, is_active, profile_completed)
-       VALUES ($1, $2, 'admin', TRUE, TRUE, TRUE)
-       ON CONFLICT (email) DO UPDATE SET
-         password_hash = EXCLUDED.password_hash,
-         user_type = 'admin',
-         is_active = TRUE
-       RETURNING id, email, user_type`,
-      [email, passwordHash]
-    );
+    // Check if user already exists
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
 
-    const user = result.rows[0];
-    console.log(`Admin user created/updated: ${user.email} (id: ${user.id})`);
+    let user;
+    if (existing.rows.length > 0) {
+      const result = await pool.query(
+        `UPDATE users SET password_hash = $1, user_type = 'admin', is_active = TRUE
+         WHERE email = $2 RETURNING id, email, user_type`,
+        [passwordHash, email]
+      );
+      user = result.rows[0];
+      console.log(`Admin user updated: ${user.email} (id: ${user.id})`);
+    } else {
+      const result = await pool.query(
+        `INSERT INTO users (email, password_hash, user_type, email_verified, is_active, profile_completed)
+         VALUES ($1, $2, 'admin', TRUE, TRUE, TRUE)
+         RETURNING id, email, user_type`,
+        [email, passwordHash]
+      );
+      user = result.rows[0];
+      console.log(`Admin user created: ${user.email} (id: ${user.id})`);
+    }
   } catch (err) {
     console.error('Failed to create admin user:', err.message);
     process.exit(1);
