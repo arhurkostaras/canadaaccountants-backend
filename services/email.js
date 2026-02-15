@@ -205,10 +205,59 @@ async function sendContactFormEmail({ name, email, phone, company, subject, mess
   });
 }
 
+/**
+ * Congratulations email when a CPA is verified by admin
+ */
+async function sendCPAVerificationEmail(cpaProfile) {
+  const email = cpaProfile.email;
+  if (!email) return;
+
+  await sendEmail({
+    to: email,
+    subject: 'Your CPA Profile is Verified — CanadaAccountants',
+    html: `
+      <h2>Congratulations, ${cpaProfile.first_name || 'there'}!</h2>
+      <p>Your CPA profile on CanadaAccountants has been <strong>verified</strong>.</p>
+      <p>This means:</p>
+      <ul>
+        <li>Your profile now has a verified badge</li>
+        <li>You'll rank higher in AI-powered client matches</li>
+        <li>Clients will see your verified status, increasing trust</li>
+      </ul>
+      <p>Log in to your dashboard to see your latest leads and update your profile:</p>
+      <p><a href="https://canadaaccountants.app/cpa-dashboard.html">Go to My Dashboard</a></p>
+      <br>
+      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `,
+  });
+}
+
+/**
+ * Password reset email with token link
+ */
+async function sendPasswordResetEmail({ email, resetUrl, firstName }) {
+  await sendEmail({
+    to: email,
+    subject: 'Reset Your Password — CanadaAccountants',
+    html: `
+      <h2>Password Reset Request</h2>
+      <p>Hi ${firstName || 'there'},</p>
+      <p>We received a request to reset your password. Click the link below to set a new password:</p>
+      <p><a href="${resetUrl}" style="display:inline-block;background:#dc2626;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;">Reset My Password</a></p>
+      <p>This link will expire in <strong>1 hour</strong>.</p>
+      <p>If you didn't request this, you can safely ignore this email. Your password will remain unchanged.</p>
+      <br>
+      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `,
+  });
+}
+
 module.exports = {
   sendEmail,
   sendFrictionMatchNotification,
   sendCPAOnboardingEmail,
   sendCPARegistrationConfirmation,
   sendContactFormEmail,
+  sendCPAVerificationEmail,
+  sendPasswordResetEmail,
 };

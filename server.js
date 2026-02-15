@@ -1,12 +1,28 @@
+const Sentry = require('@sentry/node');
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail } = require('./services/email');
+const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail } = require('./services/email');
+const crypto = require('crypto');
+
+// Initialize Sentry before anything else
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'production',
+    tracesSampleRate: 0.2,
+  });
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Sentry request handler (must be first middleware)
+if (process.env.SENTRY_DSN) {
+  app.use(Sentry.Handlers.requestHandler());
+}
 
 // CORS Configuration
 app.use(cors({
@@ -41,6 +57,14 @@ const authenticateToken = (req, res, next) => {
 const requireAdmin = (req, res, next) => {
   if (req.user.userType !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+};
+
+// CPA authorization middleware
+const requireCPA = (req, res, next) => {
+  if (req.user.userType !== 'CPA') {
+    return res.status(403).json({ error: 'CPA access required' });
   }
   next();
 };
@@ -149,6 +173,110 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
       error: 'Token verification failed',
       details: error.message 
     });
+  }
+});
+
+// Forgot password endpoint
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    // Always return success to avoid revealing whether email exists
+    const successResponse = {
+      success: true,
+      message: 'If an account with that email exists, a password reset link has been sent.'
+    };
+
+    // Look up user
+    const userResult = await pool.query(
+      'SELECT id, email, user_type FROM users WHERE email = $1 AND is_active = true',
+      [email]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.json(successResponse);
+    }
+
+    const user = userResult.rows[0];
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetTokenHash = crypto.createHash('sha256').update(resetToken).digest('hex');
+    const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    // Store hashed token in DB
+    await pool.query(
+      'UPDATE users SET reset_token_hash = $1, reset_token_expires = $2 WHERE id = $3',
+      [resetTokenHash, expires, user.id]
+    );
+
+    // Get first name for email
+    const profileResult = await pool.query(
+      'SELECT first_name FROM cpa_profiles WHERE user_id = $1 LIMIT 1',
+      [user.id]
+    );
+    const firstName = profileResult.rows.length > 0 ? profileResult.rows[0].first_name : null;
+
+    // Send reset email
+    const frontendUrl = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
+    const resetUrl = `${frontendUrl}/reset-password.html?token=${resetToken}`;
+
+    sendPasswordResetEmail({ email: user.email, resetUrl, firstName }).catch(err => {
+      console.error('Password reset email error (non-fatal):', err.message);
+    });
+
+    res.json(successResponse);
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Failed to process password reset request' });
+  }
+});
+
+// Reset password endpoint
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Token and new password are required' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    // Hash the token to compare with stored hash
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    // Find user with matching token that hasn't expired
+    const userResult = await pool.query(
+      'SELECT id, email FROM users WHERE reset_token_hash = $1 AND reset_token_expires > NOW()',
+      [tokenHash]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const user = userResult.rows[0];
+
+    // Hash new password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    // Update password and clear reset token
+    await pool.query(
+      'UPDATE users SET password_hash = $1, reset_token_hash = NULL, reset_token_expires = NULL WHERE id = $2',
+      [passwordHash, user.id]
+    );
+
+    res.json({ success: true, message: 'Password has been reset successfully. You can now log in.' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
   }
 });
 
@@ -808,74 +936,144 @@ function calculateCPAFrictionScore(request) {
 }
 
 async function generateFrictionBasedMatches(request, frictionScore) {
-  // Mock CPA data with friction elimination specialization
-  const frictionEliminationCPAs = [
-    {
-      id: 'cpa_001',
-      name: 'Sarah Mitchell CPA',
-      specializations: ['Small Business Optimization', 'Tax Efficiency'],
-      experience: 12,
-      frictionExpertise: 'time-drain',
-      successRate: 92,
-      avgTimeSavings: '25 hours/month',
-      avgCostSavings: '$4,200/year',
-      location: 'Toronto, ON',
-      availability: 'immediate',
-      matchScore: Math.min(100, frictionScore + Math.random() * 10)
-    },
-    {
-      id: 'cpa_002', 
-      name: 'David Chen CPA',
-      specializations: ['Financial Strategy', 'Business Consulting'],
-      experience: 15,
-      frictionExpertise: 'financial-chaos',
-      successRate: 88,
-      avgTimeSavings: '22 hours/month',
-      avgCostSavings: '$3,800/year',
-      location: 'Vancouver, BC',
-      availability: 'within_24h',
-      matchScore: Math.min(100, frictionScore + Math.random() * 8)
-    },
-    {
-      id: 'cpa_003',
-      name: 'Jennifer Rodriguez CPA',
-      specializations: ['Tax Planning', 'CPA Search Solutions'],
-      experience: 10,
-      frictionExpertise: 'cpa-search',
-      successRate: 95,
-      avgTimeSavings: '30 hours/month',
-      avgCostSavings: '$5,000/year',
-      location: 'Calgary, AB',
-      availability: 'immediate',
-      matchScore: Math.min(100, frictionScore + Math.random() * 12)
-    }
-  ];
+  try {
+    // Query real CPAs from the database
+    const result = await pool.query(
+      'SELECT * FROM cpa_profiles WHERE is_active = true'
+    );
 
-  // Filter and sort by match score
-  return frictionEliminationCPAs
-    .filter(cpa => cpa.frictionExpertise === request.painPoint || cpa.successRate > 85)
-    .sort((a, b) => b.matchScore - a.matchScore)
-    .slice(0, 3);
+    if (result.rows.length === 0) {
+      return [];
+    }
+
+    // Map pain points to relevant specializations
+    const painPointSpecializations = {
+      'time-drain': ['bookkeeping', 'payroll', 'small business', 'accounting'],
+      'tax-stress': ['tax-planning', 'tax', 'compliance', 'tax planning'],
+      'financial-chaos': ['cfo-services', 'financial-planning', 'financial', 'consulting', 'advisory'],
+      'cpa-search': null // matches all specializations
+    };
+
+    const relevantSpecs = painPointSpecializations[request.painPoint] || null;
+
+    // Score each CPA
+    const scoredCPAs = result.rows.map(cpa => {
+      let score = 0;
+
+      // Specialization match (0-40 pts)
+      if (relevantSpecs) {
+        const cpaSpecs = Array.isArray(cpa.specializations)
+          ? cpa.specializations
+          : (typeof cpa.specializations === 'string' ? JSON.parse(cpa.specializations || '[]') : []);
+        const specMatch = cpaSpecs.some(spec =>
+          relevantSpecs.some(rs => spec.toLowerCase().includes(rs))
+        );
+        score += specMatch ? 40 : 10;
+      } else {
+        // cpa-search matches everyone
+        score += 30;
+      }
+
+      // Province proximity (0-20 pts)
+      const smeLocation = (request.contactInfo?.province || request.contactInfo?.location || '').toLowerCase();
+      const cpaProvince = (cpa.province || '').toLowerCase();
+      if (smeLocation && cpaProvince && smeLocation.includes(cpaProvince)) {
+        score += 20;
+      } else if (cpaProvince) {
+        score += 5;
+      }
+
+      // Experience level (0-15 pts)
+      const years = cpa.years_experience || 0;
+      if (years >= 15) score += 15;
+      else if (years >= 10) score += 12;
+      else if (years >= 5) score += 8;
+      else score += 4;
+
+      // Firm size fit (0-15 pts)
+      const bizSize = (request.businessSize || '').toLowerCase();
+      const firmSize = (cpa.firm_size || '').toLowerCase();
+      const sizeCompatibility = {
+        'startup': ['solo', 'small'],
+        'small': ['solo', 'small', 'medium'],
+        'medium': ['small', 'medium', 'large'],
+        'large': ['medium', 'large']
+      };
+      if (sizeCompatibility[bizSize] && sizeCompatibility[bizSize].some(s => firmSize.includes(s))) {
+        score += 15;
+      } else {
+        score += 5;
+      }
+
+      // Verification bonus (0-10 pts)
+      if (cpa.verification_status === 'verified') {
+        score += 10;
+      }
+
+      const matchScore = Math.min(100, score);
+      const cpaSpecs = Array.isArray(cpa.specializations)
+        ? cpa.specializations
+        : (typeof cpa.specializations === 'string' ? JSON.parse(cpa.specializations || '[]') : []);
+
+      return {
+        id: cpa.cpa_id || String(cpa.id),
+        name: `${cpa.first_name || ''} ${cpa.last_name || ''}`.trim() || cpa.firm_name || 'CPA',
+        specializations: cpaSpecs,
+        experience: cpa.years_experience || 0,
+        frictionExpertise: request.painPoint || 'general',
+        successRate: cpa.verification_status === 'verified' ? 90 : 75,
+        avgTimeSavings: `${Math.max(10, (cpa.years_experience || 5) * 2)} hours/month`,
+        avgCostSavings: `$${Math.max(2000, (cpa.years_experience || 5) * 400).toLocaleString()}/year`,
+        location: `${cpa.city || ''}, ${cpa.province || ''}`.replace(/^, |, $/g, '') || 'Canada',
+        availability: 'within_24h',
+        matchScore: matchScore
+      };
+    });
+
+    // Sort by score descending, return top 3
+    return scoredCPAs
+      .sort((a, b) => b.matchScore - a.matchScore)
+      .slice(0, 3);
+  } catch (error) {
+    console.error('Error generating friction-based matches:', error);
+    return [];
+  }
 }
 
 async function generateCPAClientMatches(request, frictionScore) {
-  // Mock potential client data
-  return [
-    {
-      industry: 'Technology',
-      size: 'Small Business',
-      painPoint: 'time-drain',
-      urgency: 'urgent',
-      matchProbability: 85
-    },
-    {
-      industry: 'Manufacturing',
-      size: 'Medium Business', 
-      painPoint: 'tax-stress',
-      urgency: 'soon',
-      matchProbability: 78
+  try {
+    // Query recent SME friction requests that could match this CPA's specializations
+    const cpaSpecs = request.specializations || [];
+    const result = await pool.query(`
+      SELECT request_id, pain_point, business_type, business_size,
+             urgency_level, friction_score, contact_info, created_at
+      FROM sme_friction_requests
+      ORDER BY created_at DESC
+      LIMIT 10
+    `);
+
+    if (result.rows.length === 0) {
+      return [];
     }
-  ];
+
+    return result.rows.map(row => {
+      const contactInfo = typeof row.contact_info === 'string'
+        ? JSON.parse(row.contact_info || '{}')
+        : (row.contact_info || {});
+      return {
+        industry: row.business_type || 'General',
+        size: row.business_size || 'Small Business',
+        painPoint: row.pain_point || 'general',
+        urgency: row.urgency_level || 'soon',
+        matchProbability: Math.min(95, (row.friction_score || 50) + 20),
+        company: contactInfo.company || '',
+        requestDate: row.created_at
+      };
+    }).slice(0, 5);
+  } catch (error) {
+    console.error('Error generating CPA client matches:', error);
+    return [];
+  }
 }
 
 async function storeFrictionMatches(requestId, matches) {
@@ -912,19 +1110,8 @@ async function enhanceMatchesWithRealtimeData(matches) {
   return matches.map(match => ({
     ...match,
     realTimeStatus: 'available',
-    responseTime: '< 2 hours',
-    recentSuccesses: Math.floor(Math.random() * 5) + 3,
-    clientTestimonial: generateTestimonial(match.cpa_name)
+    responseTime: '< 2 hours'
   }));
-}
-
-function generateTestimonial(cpaName) {
-  const testimonials = [
-    `"${cpaName} saved us 20+ hours per month and $3,500 in tax optimization!"`,
-    `"Within 48 hours, ${cpaName} eliminated our financial chaos completely."`,
-    `"Best CPA decision ever - ${cpaName} transformed our business efficiency."`
-  ];
-  return testimonials[Math.floor(Math.random() * testimonials.length)];
 }
 
 function generateNextSteps(matches) {
@@ -947,6 +1134,144 @@ function calculateTotalCostSavings(metrics) {
   const avgCostSavingsPerRequest = 3534; // dollars per year
   return Math.round(avgRequestsPerDay * avgCostSavingsPerRequest * 30);
 }
+
+// =====================================================
+// CPA DASHBOARD API ENDPOINTS
+// =====================================================
+
+// CPA: Get my matches (leads)
+app.get('/api/cpa/my-matches', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    // Find the CPA's profile via user_id or email
+    const profileResult = await pool.query(
+      'SELECT * FROM cpa_profiles WHERE user_id = $1 OR email = $2 LIMIT 1',
+      [req.user.userId, req.user.email]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.json({ success: true, matches: [], message: 'No CPA profile found' });
+    }
+
+    const cpaProfile = profileResult.rows[0];
+    const cpaId = cpaProfile.cpa_id || String(cpaProfile.id);
+
+    // Get friction matches for this CPA
+    const matchesResult = await pool.query(`
+      SELECT fm.*, sfr.pain_point, sfr.business_type, sfr.business_size,
+             sfr.urgency_level, sfr.contact_info AS sme_contact, sfr.friction_score,
+             sfr.created_at AS request_date
+      FROM friction_matches fm
+      LEFT JOIN sme_friction_requests sfr ON fm.request_id = sfr.request_id
+      WHERE fm.cpa_id = $1
+      ORDER BY fm.created_at DESC
+    `, [cpaId]);
+
+    res.json({ success: true, matches: matchesResult.rows });
+  } catch (error) {
+    console.error('CPA my-matches error:', error);
+    res.status(500).json({ error: 'Failed to fetch matches', details: error.message });
+  }
+});
+
+// CPA: Get my profile
+app.get('/api/cpa/my-profile', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM cpa_profiles WHERE user_id = $1 OR email = $2 LIMIT 1',
+      [req.user.userId, req.user.email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'CPA profile not found' });
+    }
+
+    res.json({ success: true, profile: result.rows[0] });
+  } catch (error) {
+    console.error('CPA my-profile error:', error);
+    res.status(500).json({ error: 'Failed to fetch profile', details: error.message });
+  }
+});
+
+// CPA: Update my profile
+app.put('/api/cpa/my-profile', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const { specializations, hourlyRate, firmName, province, city, phone } = req.body;
+
+    const result = await pool.query(`
+      UPDATE cpa_profiles SET
+        specializations = COALESCE($1, specializations),
+        hourly_rate_min = COALESCE($2, hourly_rate_min),
+        firm_name = COALESCE($3, firm_name),
+        province = COALESCE($4, province),
+        city = COALESCE($5, city),
+        phone = COALESCE($6, phone),
+        updated_date = NOW()
+      WHERE user_id = $7 OR email = $8
+      RETURNING *
+    `, [
+      specializations ? JSON.stringify(specializations) : null,
+      hourlyRate || null,
+      firmName || null,
+      province || null,
+      city || null,
+      phone || null,
+      req.user.userId,
+      req.user.email
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'CPA profile not found' });
+    }
+
+    res.json({ success: true, profile: result.rows[0] });
+  } catch (error) {
+    console.error('CPA update profile error:', error);
+    res.status(500).json({ error: 'Failed to update profile', details: error.message });
+  }
+});
+
+// CPA: Get my stats
+app.get('/api/cpa/my-stats', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const profileResult = await pool.query(
+      'SELECT * FROM cpa_profiles WHERE user_id = $1 OR email = $2 LIMIT 1',
+      [req.user.userId, req.user.email]
+    );
+
+    if (profileResult.rows.length === 0) {
+      return res.json({ success: true, stats: { totalMatches: 0, byStatus: {} } });
+    }
+
+    const cpaId = profileResult.rows[0].cpa_id || String(profileResult.rows[0].id);
+
+    const statsResult = await pool.query(`
+      SELECT
+        COUNT(*) AS total_matches,
+        COUNT(CASE WHEN status = 'presented' THEN 1 END) AS presented,
+        COUNT(CASE WHEN status = 'contacted' THEN 1 END) AS contacted,
+        COUNT(CASE WHEN status = 'meeting_scheduled' THEN 1 END) AS meetings,
+        COUNT(CASE WHEN partnership_formed = true THEN 1 END) AS partnerships
+      FROM friction_matches
+      WHERE cpa_id = $1
+    `, [cpaId]);
+
+    const s = statsResult.rows[0];
+    res.json({
+      success: true,
+      stats: {
+        totalMatches: parseInt(s.total_matches) || 0,
+        presented: parseInt(s.presented) || 0,
+        contacted: parseInt(s.contacted) || 0,
+        meetings: parseInt(s.meetings) || 0,
+        partnerships: parseInt(s.partnerships) || 0,
+        verificationStatus: profileResult.rows[0].verification_status
+      }
+    });
+  } catch (error) {
+    console.error('CPA my-stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch stats', details: error.message });
+  }
+});
 
 // =====================================================
 // ADMIN DASHBOARD API ENDPOINTS
@@ -1038,6 +1363,18 @@ app.post('/api/admin/cpas/:id/verify', authenticateToken, requireAdmin, async (r
       return res.status(404).json({ error: 'CPA profile not found' });
     }
 
+    // Send verification congratulations email if newly verified
+    if (newStatus === 'verified') {
+      const cpa = result.rows[0];
+      // Look up full profile for email
+      const fullProfile = await pool.query('SELECT * FROM cpa_profiles WHERE id = $1', [id]);
+      if (fullProfile.rows.length > 0 && fullProfile.rows[0].email) {
+        sendCPAVerificationEmail(fullProfile.rows[0]).catch(err => {
+          console.error('Verification email error (non-fatal):', err.message);
+        });
+      }
+    }
+
     res.json({ success: true, cpa: result.rows[0] });
   } catch (error) {
     console.error('Admin verify CPA error:', error);
@@ -1113,7 +1450,11 @@ app.post('/api/contact', async (req, res) => {
   }
 });
 
-// Start server
+// Sentry error handler (must be before app.listen, after all routes)
+if (process.env.SENTRY_DSN) {
+  app.use(Sentry.Handlers.errorHandler());
+}
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 CanadaAccountants API running on port ${PORT}`);
