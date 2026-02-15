@@ -9,7 +9,7 @@ CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
-    user_type VARCHAR(10) NOT NULL CHECK (user_type IN ('CPA', 'SME')),
+    user_type VARCHAR(10) NOT NULL CHECK (user_type IN ('CPA', 'SME', 'admin')),
     email_verified BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

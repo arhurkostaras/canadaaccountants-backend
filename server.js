@@ -3,6 +3,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail } = require('./services/email');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -36,16 +37,24 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Admin authorization middleware
+const requireAdmin = (req, res, next) => {
+  if (req.user.userType !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+};
+
 // Login endpoint
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    
+
     const userQuery = `
   SELECT u.*, cp.id as cpa_profile_id, cp.first_name, cp.last_name, cp.firm_name
   FROM users u
   LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
-  WHERE u.email = $1 AND u.user_type = 'CPA' AND u.is_active = true;
+  WHERE u.email = $1 AND u.user_type IN ('CPA', 'admin') AND u.is_active = true;
 `;
     
     const result = await pool.query(userQuery, [email]);
@@ -87,10 +96,10 @@ app.post('/api/auth/login', async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
+        userType: user.user_type,
         firstName: user.first_name,
         lastName: user.last_name,
         firmName: user.firm_name,
-        
       }
     });
 
@@ -127,10 +136,10 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
+        userType: user.user_type,
         firstName: user.first_name,
         lastName: user.last_name,
         firmName: user.firm_name,
-
       }
     });
 
@@ -241,6 +250,11 @@ RETURNING *;
       message: 'CPA registration successful',
       data: result.rows[0],
       timestamp: new Date().toISOString()
+    });
+
+    // Send registration confirmation email (async, non-blocking)
+    sendCPARegistrationConfirmation(registrationData).catch(err => {
+      console.error('Email send error (non-fatal):', err.message);
     });
 
   } catch (error) {
@@ -934,16 +948,170 @@ function calculateTotalCostSavings(metrics) {
   return Math.round(avgRequestsPerDay * avgCostSavingsPerRequest * 30);
 }
 
-// Mock notification functions
-async function sendFrictionMatchNotification(requestId, request, matches) {
-  console.log(`📧 Sending friction match notification for ${requestId}`);
-  // Implementation would integrate with your email service
-}
+// =====================================================
+// ADMIN DASHBOARD API ENDPOINTS
+// =====================================================
 
-async function sendCPAOnboardingEmail(registrationId, request, clients) {
-  console.log(`📧 Sending CPA onboarding email for ${registrationId}`);
-  // Implementation would integrate with your email service
-}
+// Admin: Dashboard stats overview
+app.get('/api/admin/dashboard-stats', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const stats = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM users WHERE user_type = 'CPA') AS total_cpas,
+        (SELECT COUNT(*) FROM users WHERE user_type = 'SME') AS total_smes,
+        (SELECT COUNT(*) FROM sme_friction_requests) AS total_sme_requests,
+        (SELECT COUNT(*) FROM friction_matches) AS total_matches,
+        (SELECT COUNT(*) FROM friction_matches WHERE partnership_formed = true) AS total_partnerships,
+        (SELECT COUNT(*) FROM cpa_friction_profiles) AS total_cpa_friction_profiles,
+        (SELECT COUNT(*) FROM cpa_profiles WHERE license_verified = true) AS verified_cpas,
+        (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days') AS new_users_7d,
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days') AS new_requests_7d
+    `);
+    res.json({ success: true, stats: stats.rows[0] });
+  } catch (error) {
+    console.error('Admin stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch dashboard stats', details: error.message });
+  }
+});
+
+// Admin: Paginated CPA list with optional status filter
+app.get('/api/admin/cpas', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const offset = (page - 1) * limit;
+    const verified = req.query.verified; // 'true', 'false', or undefined (all)
+
+    let whereClause = '';
+    const params = [limit, offset];
+    if (verified === 'true') {
+      whereClause = 'WHERE cp.license_verified = true';
+    } else if (verified === 'false') {
+      whereClause = 'WHERE cp.license_verified = false';
+    }
+
+    const cpas = await pool.query(`
+      SELECT cp.*, u.email, u.created_at AS user_created_at, u.last_login, u.is_active
+      FROM cpa_profiles cp
+      JOIN users u ON cp.user_id = u.id
+      ${whereClause}
+      ORDER BY cp.created_at DESC
+      LIMIT $1 OFFSET $2
+    `, params);
+
+    const countResult = await pool.query(`
+      SELECT COUNT(*) FROM cpa_profiles cp
+      JOIN users u ON cp.user_id = u.id
+      ${whereClause}
+    `);
+
+    res.json({
+      success: true,
+      cpas: cpas.rows,
+      pagination: {
+        page,
+        limit,
+        total: parseInt(countResult.rows[0].count),
+        totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limit),
+      },
+    });
+  } catch (error) {
+    console.error('Admin CPAs error:', error);
+    res.status(500).json({ error: 'Failed to fetch CPAs', details: error.message });
+  }
+});
+
+// Admin: Verify / unverify a CPA
+app.post('/api/admin/cpas/:id/verify', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { verified } = req.body; // boolean
+
+    const result = await pool.query(`
+      UPDATE cpa_profiles
+      SET license_verified = $1, verification_date = CASE WHEN $1 THEN NOW() ELSE NULL END
+      WHERE id = $2
+      RETURNING id, first_name, last_name, license_verified, verification_date
+    `, [verified !== false, id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'CPA profile not found' });
+    }
+
+    res.json({ success: true, cpa: result.rows[0] });
+  } catch (error) {
+    console.error('Admin verify CPA error:', error);
+    res.status(500).json({ error: 'Failed to update CPA verification', details: error.message });
+  }
+});
+
+// Admin: Recent friction elimination submissions
+app.get('/api/admin/submissions', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const result = await pool.query(`
+      SELECT request_id, pain_point, business_type, business_size,
+             urgency_level, friction_score, status, contact_info, created_at
+      FROM sme_friction_requests
+      ORDER BY created_at DESC
+      LIMIT $1
+    `, [limit]);
+
+    res.json({ success: true, submissions: result.rows });
+  } catch (error) {
+    console.error('Admin submissions error:', error);
+    res.status(500).json({ error: 'Failed to fetch submissions', details: error.message });
+  }
+});
+
+// Admin: Recent match activity
+app.get('/api/admin/matches', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const result = await pool.query(`
+      SELECT fm.match_id, fm.request_id, fm.cpa_name, fm.match_score,
+             fm.friction_expertise, fm.status, fm.partnership_formed, fm.created_at,
+             sfr.pain_point, sfr.business_type, sfr.contact_info
+      FROM friction_matches fm
+      LEFT JOIN sme_friction_requests sfr ON fm.request_id = sfr.request_id
+      ORDER BY fm.created_at DESC
+      LIMIT $1
+    `, [limit]);
+
+    res.json({ success: true, matches: result.rows });
+  } catch (error) {
+    console.error('Admin matches error:', error);
+    res.status(500).json({ error: 'Failed to fetch matches', details: error.message });
+  }
+});
+
+// =====================================================
+// CONTACT FORM ENDPOINT
+// =====================================================
+app.post('/api/contact', async (req, res) => {
+  try {
+    const { name, email, phone, company, subject, message } = req.body;
+
+    if (!name || !email || !message) {
+      return res.status(400).json({ error: 'Name, email, and message are required' });
+    }
+
+    console.log(`📧 Contact form submission from ${name} (${email})`);
+
+    // Send emails (async, non-blocking)
+    sendContactFormEmail({ name, email, phone, company, subject, message }).catch(err => {
+      console.error('Contact email error (non-fatal):', err.message);
+    });
+
+    res.json({
+      success: true,
+      message: 'Your message has been received. We will get back to you within 1 business day.',
+    });
+  } catch (error) {
+    console.error('❌ Contact form error:', error);
+    res.status(500).json({ error: 'Failed to process contact form', details: error.message });
+  }
+});
 
 // Start server
 // Start server
