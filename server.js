@@ -963,7 +963,7 @@ app.get('/api/admin/dashboard-stats', authenticateToken, requireAdmin, async (re
         (SELECT COUNT(*) FROM friction_matches) AS total_matches,
         (SELECT COUNT(*) FROM friction_matches WHERE partnership_formed = true) AS total_partnerships,
         (SELECT COUNT(*) FROM cpa_friction_profiles) AS total_cpa_friction_profiles,
-        (SELECT COUNT(*) FROM cpa_profiles WHERE license_verified = true) AS verified_cpas,
+        (SELECT COUNT(*) FROM cpa_profiles WHERE verification_status = 'verified') AS verified_cpas,
         (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days') AS new_users_7d,
         (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days') AS new_requests_7d
     `);
@@ -985,23 +985,22 @@ app.get('/api/admin/cpas', authenticateToken, requireAdmin, async (req, res) => 
     let whereClause = '';
     const params = [limit, offset];
     if (verified === 'true') {
-      whereClause = 'WHERE cp.license_verified = true';
+      whereClause = "WHERE cp.verification_status = 'verified'";
     } else if (verified === 'false') {
-      whereClause = 'WHERE cp.license_verified = false';
+      whereClause = "WHERE cp.verification_status != 'verified'";
     }
 
     const cpas = await pool.query(`
-      SELECT cp.*, u.email, u.created_at AS user_created_at, u.last_login, u.is_active
+      SELECT cp.*, u.created_at AS user_created_at, u.last_login, u.is_active AS user_is_active
       FROM cpa_profiles cp
-      JOIN users u ON cp.user_id = u.id
+      LEFT JOIN users u ON cp.user_id = u.id
       ${whereClause}
-      ORDER BY cp.created_at DESC
+      ORDER BY cp.created_date DESC NULLS LAST
       LIMIT $1 OFFSET $2
     `, params);
 
     const countResult = await pool.query(`
       SELECT COUNT(*) FROM cpa_profiles cp
-      JOIN users u ON cp.user_id = u.id
       ${whereClause}
     `);
 
@@ -1027,12 +1026,13 @@ app.post('/api/admin/cpas/:id/verify', authenticateToken, requireAdmin, async (r
     const { id } = req.params;
     const { verified } = req.body; // boolean
 
+    const newStatus = (verified !== false) ? 'verified' : 'unverified';
     const result = await pool.query(`
       UPDATE cpa_profiles
-      SET license_verified = $1, verification_date = CASE WHEN $1 THEN NOW() ELSE NULL END
+      SET verification_status = $1, updated_date = NOW()
       WHERE id = $2
-      RETURNING id, first_name, last_name, license_verified, verification_date
-    `, [verified !== false, id]);
+      RETURNING id, first_name, last_name, verification_status
+    `, [newStatus, id]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'CPA profile not found' });
