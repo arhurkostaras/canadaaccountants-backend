@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail } = require('./services/email');
+const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const crypto = require('crypto');
 
 // Initialize Sentry before anything else
@@ -20,8 +21,10 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Sentry request handler (must be first middleware)
-if (process.env.SENTRY_DSN) {
+if (process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.requestHandler());
+} else if (process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) {
+  // Sentry SDK v8+ — setupExpressErrorHandler is called after routes
 }
 
 // CORS Configuration
@@ -385,6 +388,13 @@ RETURNING *;
       console.error('Email send error (non-fatal):', err.message);
     });
 
+    // Track outreach conversion (async, non-blocking)
+    if (registrationData.email) {
+      outreachEngine.trackConversion(registrationData.email, result.rows[0]?.id).catch(err => {
+        console.error('Outreach conversion tracking error (non-fatal):', err.message);
+      });
+    }
+
   } catch (error) {
     console.error('❌ CPA registration error:', error);
     res.status(500).json({ 
@@ -399,6 +409,10 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
+
+// Initialize Outreach Engine
+const outreachEngine = new OutreachEngine(pool);
+outreachEngine.startQueueProcessor();
 
 // AI Performance Scoring Engine API
 app.post('/api/performance/score', async (req, res) => {
@@ -549,6 +563,14 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
     setTimeout(() => {
       sendFrictionMatchNotification(requestId, frictionRequest, cpaMatches);
     }, 1000);
+
+    // Track outreach conversion (async, non-blocking)
+    const smeEmail = frictionRequest.contactInfo?.email;
+    if (smeEmail) {
+      outreachEngine.trackConversion(smeEmail, null).catch(err => {
+        console.error('Outreach conversion tracking error (non-fatal):', err.message);
+      });
+    }
 
   } catch (error) {
     console.error('❌ SME friction request error:', error);
@@ -1423,6 +1445,239 @@ app.get('/api/admin/matches', authenticateToken, requireAdmin, async (req, res) 
 });
 
 // =====================================================
+// OUTREACH CAMPAIGN API ENDPOINTS (Admin)
+// =====================================================
+
+// Create campaign
+app.post('/api/admin/outreach/campaigns', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const campaign = await outreachEngine.createCampaign(req.body);
+    res.json({ success: true, campaign });
+  } catch (error) {
+    console.error('Create campaign error:', error);
+    res.status(500).json({ error: 'Failed to create campaign', details: error.message });
+  }
+});
+
+// List campaigns
+app.get('/api/admin/outreach/campaigns', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const campaigns = await outreachEngine.listCampaigns();
+    res.json({ success: true, campaigns });
+  } catch (error) {
+    console.error('List campaigns error:', error);
+    res.status(500).json({ error: 'Failed to list campaigns', details: error.message });
+  }
+});
+
+// Get campaign details
+app.get('/api/admin/outreach/campaigns/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const campaign = await outreachEngine.getCampaign(parseInt(req.params.id));
+    if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
+    res.json({ success: true, campaign });
+  } catch (error) {
+    console.error('Get campaign error:', error);
+    res.status(500).json({ error: 'Failed to get campaign', details: error.message });
+  }
+});
+
+// Update campaign
+app.put('/api/admin/outreach/campaigns/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const campaign = await outreachEngine.updateCampaign(parseInt(req.params.id), req.body);
+    res.json({ success: true, campaign });
+  } catch (error) {
+    console.error('Update campaign error:', error);
+    res.status(500).json({ error: 'Failed to update campaign', details: error.message });
+  }
+});
+
+// Launch campaign
+app.post('/api/admin/outreach/campaigns/:id/launch', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await outreachEngine.launchCampaign(parseInt(req.params.id));
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Launch campaign error:', error);
+    res.status(500).json({ error: 'Failed to launch campaign', details: error.message });
+  }
+});
+
+// Pause campaign
+app.post('/api/admin/outreach/campaigns/:id/pause', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    await outreachEngine.pauseCampaign(parseInt(req.params.id));
+    res.json({ success: true, message: 'Campaign paused' });
+  } catch (error) {
+    console.error('Pause campaign error:', error);
+    res.status(500).json({ error: 'Failed to pause campaign', details: error.message });
+  }
+});
+
+// Preview campaign template
+app.post('/api/admin/outreach/campaigns/:id/preview', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const preview = await outreachEngine.previewTemplate(parseInt(req.params.id));
+    res.json({ success: true, preview });
+  } catch (error) {
+    console.error('Preview campaign error:', error);
+    res.status(500).json({ error: 'Failed to preview campaign', details: error.message });
+  }
+});
+
+// Test send campaign
+app.post('/api/admin/outreach/campaigns/:id/test-send', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const testEmail = req.body.email || req.user.email;
+    const result = await outreachEngine.testSend(parseInt(req.params.id), testEmail);
+    res.json({ success: true, result, sentTo: testEmail });
+  } catch (error) {
+    console.error('Test send error:', error);
+    res.status(500).json({ error: 'Failed to send test email', details: error.message });
+  }
+});
+
+// Browse scraped CPAs (admin)
+app.get('/api/admin/outreach/scraped-cpas', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { province, city, page = 1, limit = 50 } = req.query;
+    const offset = (Math.max(1, parseInt(page)) - 1) * Math.min(100, parseInt(limit) || 50);
+    const params = [];
+    const conditions = [];
+    let paramIdx = 1;
+
+    if (province) { conditions.push(`province = $${paramIdx++}`); params.push(province); }
+    if (city) { conditions.push(`city ILIKE $${paramIdx++}`); params.push(`%${city}%`); }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const lim = Math.min(100, parseInt(limit) || 50);
+    params.push(lim, offset);
+
+    const result = await pool.query(
+      `SELECT * FROM scraped_cpas ${where} ORDER BY scraped_at DESC LIMIT $${paramIdx++} OFFSET $${paramIdx}`,
+      params
+    );
+    const countResult = await pool.query(`SELECT COUNT(*) FROM scraped_cpas ${where}`, params.slice(0, -2));
+
+    res.json({ success: true, cpas: result.rows, total: parseInt(countResult.rows[0].count), page: parseInt(page) });
+  } catch (error) {
+    console.error('Browse scraped CPAs error:', error);
+    res.status(500).json({ error: 'Failed to browse scraped CPAs', details: error.message });
+  }
+});
+
+// Browse scraped SMEs (admin)
+app.get('/api/admin/outreach/scraped-smes', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { province, industry, page = 1, limit = 50 } = req.query;
+    const offset = (Math.max(1, parseInt(page)) - 1) * Math.min(100, parseInt(limit) || 50);
+    const params = [];
+    const conditions = [];
+    let paramIdx = 1;
+
+    if (province) { conditions.push(`province = $${paramIdx++}`); params.push(province); }
+    if (industry) { conditions.push(`industry ILIKE $${paramIdx++}`); params.push(`%${industry}%`); }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const lim = Math.min(100, parseInt(limit) || 50);
+    params.push(lim, offset);
+
+    const result = await pool.query(
+      `SELECT * FROM scraped_smes ${where} ORDER BY scraped_at DESC LIMIT $${paramIdx++} OFFSET $${paramIdx}`,
+      params
+    );
+    const countResult = await pool.query(`SELECT COUNT(*) FROM scraped_smes ${where}`, params.slice(0, -2));
+
+    res.json({ success: true, smes: result.rows, total: parseInt(countResult.rows[0].count), page: parseInt(page) });
+  } catch (error) {
+    console.error('Browse scraped SMEs error:', error);
+    res.status(500).json({ error: 'Failed to browse scraped SMEs', details: error.message });
+  }
+});
+
+// Outreach stats
+app.get('/api/admin/outreach/stats', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const stats = await outreachEngine.getOverallStats();
+    res.json({ success: true, stats });
+  } catch (error) {
+    console.error('Outreach stats error:', error);
+    res.status(500).json({ error: 'Failed to get outreach stats', details: error.message });
+  }
+});
+
+// =====================================================
+// PUBLIC OUTREACH ENDPOINTS
+// =====================================================
+
+// Resend webhook handler
+app.post('/api/webhooks/resend', express.json(), async (req, res) => {
+  try {
+    await outreachEngine.handleResendWebhook(req.body);
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Resend webhook error:', error);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// Unsubscribe page (GET)
+app.get('/api/unsubscribe/:token', async (req, res) => {
+  try {
+    const info = await outreachEngine.getUnsubscribeInfo(req.params.token);
+    const email = info ? info.email : '';
+    res.send(`
+      <!DOCTYPE html>
+      <html><head><title>Unsubscribe - CanadaAccountants</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>body{font-family:Arial,sans-serif;max-width:500px;margin:60px auto;padding:20px;text-align:center;color:#333;}
+      h2{color:#1e293b;}
+      button{background:#dc2626;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer;margin-top:16px;}
+      button:hover{background:#b91c1c;}
+      .muted{color:#999;font-size:13px;margin-top:20px;}
+      </style></head>
+      <body>
+        <h2>Unsubscribe</h2>
+        <p>We're sorry to see you go${info ? `, ${info.name || ''}` : ''}.</p>
+        <p>Click below to unsubscribe <strong>${email || 'your email'}</strong> from future CanadaAccountants outreach emails.</p>
+        <form method="POST" action="/api/unsubscribe/${req.params.token}">
+          <button type="submit">Unsubscribe Me</button>
+        </form>
+        <p class="muted">You will no longer receive marketing emails from CanadaAccountants.</p>
+      </body></html>
+    `);
+  } catch (error) {
+    res.status(500).send('An error occurred. Please try again later.');
+  }
+});
+
+// Process unsubscribe (POST)
+app.post('/api/unsubscribe/:token', express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    const success = await outreachEngine.processUnsubscribe(req.params.token, req.body.reason || 'user_request');
+    if (success) {
+      res.send(`
+        <!DOCTYPE html>
+        <html><head><title>Unsubscribed - CanadaAccountants</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>body{font-family:Arial,sans-serif;max-width:500px;margin:60px auto;padding:20px;text-align:center;color:#333;}
+        h2{color:#16a34a;}</style></head>
+        <body>
+          <h2>You've been unsubscribed</h2>
+          <p>You won't receive any more marketing emails from CanadaAccountants.</p>
+          <p>If this was a mistake, you can contact us at <strong>arthur@negotiateandwin.com</strong>.</p>
+        </body></html>
+      `);
+    } else {
+      res.status(400).send('Invalid or expired unsubscribe link.');
+    }
+  } catch (error) {
+    res.status(500).send('An error occurred. Please try again later.');
+  }
+});
+
+// =====================================================
 // CONTACT FORM ENDPOINT
 // =====================================================
 app.post('/api/contact', async (req, res) => {
@@ -1451,8 +1706,10 @@ app.post('/api/contact', async (req, res) => {
 });
 
 // Sentry error handler (must be before app.listen, after all routes)
-if (process.env.SENTRY_DSN) {
+if (process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.errorHandler());
+} else if (process.env.SENTRY_DSN && Sentry.setupExpressErrorHandler) {
+  Sentry.setupExpressErrorHandler(app);
 }
 
 // Start server
