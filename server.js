@@ -414,6 +414,17 @@ const pool = new Pool({
 const outreachEngine = new OutreachEngine(pool);
 outreachEngine.startQueueProcessor();
 
+// Auto-migrate: add missing columns for outreach improvements
+(async () => {
+  try {
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0`);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT`);
+    console.log('[Migration] Outreach email columns verified');
+  } catch (err) {
+    console.error('[Migration] Column migration error (non-fatal):', err.message);
+  }
+})();
+
 // AI Performance Scoring Engine API
 app.post('/api/performance/score', async (req, res) => {
   try {

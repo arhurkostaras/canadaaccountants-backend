@@ -213,14 +213,16 @@ class OutreachEngine {
 
         const remaining = campaign.daily_limit - sentToday;
 
-        // Get queued emails for this campaign
+        // Get queued emails for this campaign (skip emails that have failed too many times)
         const emails = await this.pool.query(
-          `SELECT * FROM outreach_emails WHERE campaign_id = $1 AND status = 'queued' ORDER BY queued_at ASC LIMIT $2`,
+          `SELECT * FROM outreach_emails WHERE campaign_id = $1 AND status = 'queued' AND COALESCE(retry_count, 0) < 5 ORDER BY queued_at ASC LIMIT $2`,
           [campaign.id, remaining]
         );
 
         for (const email of emails.rows) {
           await this._sendOutreachEmail(campaign, email);
+          // 2-second delay between sends to avoid Resend rate limiting
+          await new Promise(r => setTimeout(r, 2000));
         }
 
         // Check if campaign is complete (no more queued)
@@ -275,22 +277,27 @@ class OutreachEngine {
           [campaign.id]
         );
 
-        // Store unsubscribe token mapping (temporary — will be linked on unsubscribe)
-        // We store a pending record with the token so we can look it up later
+        // Store unsubscribe token on the email record for lookup when they click
         await this.pool.query(
-          `INSERT INTO outreach_unsubscribes (email, unsubscribe_token, reason) VALUES ($1, $2, 'pending') ON CONFLICT (email) DO NOTHING`,
-          [emailRecord.recipient_email, unsubToken]
+          `UPDATE outreach_emails SET unsubscribe_token = $2 WHERE id = $1`,
+          [emailRecord.id, unsubToken]
         ).catch(() => {});
-        // Delete the pending record if they haven't actually unsubscribed
-        await this.pool.query(
-          `DELETE FROM outreach_unsubscribes WHERE email = $1 AND reason = 'pending'`,
-          [emailRecord.recipient_email]
-        ).catch(() => {});
-
-        // Actually just store token on the email record for unsubscribe lookup
-        // We don't insert into unsubscribes until they actually click
       } else {
-        console.error(`[Outreach] Failed to send to ${emailRecord.recipient_email}: ${result.reason}`);
+        // Increment retry count; mark as 'failed' after 5 attempts
+        const retries = (emailRecord.retry_count || 0) + 1;
+        if (retries >= 5) {
+          await this.pool.query(
+            `UPDATE outreach_emails SET status = 'failed', retry_count = $2, updated_at = NOW() WHERE id = $1`,
+            [emailRecord.id, retries]
+          );
+          console.error(`[Outreach] Permanently failed after ${retries} attempts: ${emailRecord.recipient_email} (${result.reason})`);
+        } else {
+          await this.pool.query(
+            `UPDATE outreach_emails SET retry_count = $2, updated_at = NOW() WHERE id = $1`,
+            [emailRecord.id, retries]
+          );
+          console.warn(`[Outreach] Retry ${retries}/5 for ${emailRecord.recipient_email}: ${result.reason}`);
+        }
       }
     } catch (error) {
       console.error(`[Outreach] Send error for email ${emailRecord.id}:`, error.message);
@@ -477,12 +484,18 @@ class OutreachEngine {
   // =====================================================
 
   async getUnsubscribeInfo(token) {
-    // Find the email that used this token — we embedded it in the unsubscribe URL
-    // We'll look it up by checking rendered_body for the token
-    const result = await this.pool.query(
-      `SELECT recipient_email, recipient_name FROM outreach_emails WHERE rendered_body LIKE $1 LIMIT 1`,
-      [`%${token}%`]
+    // Look up by stored unsubscribe_token first (fast), fallback to body search
+    let result = await this.pool.query(
+      `SELECT recipient_email, recipient_name FROM outreach_emails WHERE unsubscribe_token = $1 LIMIT 1`,
+      [token]
     );
+    if (result.rows.length === 0) {
+      // Fallback for emails sent before token column was added
+      result = await this.pool.query(
+        `SELECT recipient_email, recipient_name FROM outreach_emails WHERE rendered_body LIKE $1 LIMIT 1`,
+        [`%${token}%`]
+      );
+    }
     if (result.rows.length > 0) {
       return { email: result.rows[0].recipient_email, name: result.rows[0].recipient_name };
     }
