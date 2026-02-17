@@ -382,6 +382,28 @@ class OutreachEngine {
       }
       const result = await this.pool.query(query, params);
       return parseInt(result.rows[0].count);
+    } else if (campaign.type === 'sme') {
+      let query = `
+        SELECT COUNT(*) FROM scraped_smes ss
+        WHERE ss.contact_email IS NOT NULL
+          AND ss.status != 'invalid'
+          AND ss.contact_email NOT IN (SELECT email FROM outreach_unsubscribes)
+          AND ss.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'sme')
+      `;
+      const params = [campaign.id];
+      let idx = 2;
+      if (campaign.target_provinces && campaign.target_provinces.length > 0) {
+        query += ` AND ss.province = ANY($${idx})`;
+        params.push(campaign.target_provinces);
+        idx++;
+      }
+      if (campaign.target_naics_codes && campaign.target_naics_codes.length > 0) {
+        query += ` AND ss.naics_code = ANY($${idx})`;
+        params.push(campaign.target_naics_codes);
+        idx++;
+      }
+      const result = await this.pool.query(query, params);
+      return parseInt(result.rows[0].count);
     }
     return 0;
   }
@@ -748,24 +770,26 @@ const CPA_ACQUISITION_TEMPLATE = {
 };
 
 const SME_ACQUISITION_TEMPLATE = {
-  subject: 'Stop wasting 585 days finding the right CPA',
+  subject: '{{business_name}} — your AI-matched CPA is waiting',
   body: `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
-      <h2 style="color:#1e293b;">Hi {{business_name}},</h2>
-      <p>Finding the right CPA for your {{industry}} business shouldn't take <strong>585 days</strong> — but that's the Canadian average.</p>
-      <p>CanadaAccountants uses AI to match your business with pre-verified CPAs in {{province}} in <strong>under 24 hours</strong>.</p>
-      <p>There are <strong>{{cpa_count}} verified CPAs</strong> in {{province}} on our platform right now, specializing in everything from tax planning to advisory services.</p>
+      <h2 style="color:#1e293b;">Hi there,</h2>
+      <p>Canadian businesses spend an average of <strong>585 days</strong> searching for the right CPA. That's time and money you can't afford to lose.</p>
+      <p>CanadaAccountants is an AI-powered platform that matches {{industry}} businesses like {{business_name}} with pre-verified CPAs in <strong>under 24 hours</strong>.</p>
+      <p>We've already onboarded <strong>{{cpa_count}} qualified CPAs</strong> in {{province}} — covering tax planning, bookkeeping, advisory, and more.</p>
       <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:20px 0;">
-        <p style="margin:0 0 12px 0;font-weight:bold;">How it works:</p>
-        <ol style="margin:0;padding-left:20px;">
-          <li>Tell us about your business needs (2 minutes)</li>
-          <li>Our AI matches you with the top 3 CPAs for your situation</li>
-          <li>Connect directly — no middleman, no fees</li>
-        </ol>
+        <p style="margin:0 0 12px 0;font-weight:bold;">What makes us different:</p>
+        <ul style="margin:0;padding-left:20px;">
+          <li><strong>AI-powered matching</strong> — not a generic directory, a precision match to your industry and needs</li>
+          <li><strong>Pre-verified CPAs only</strong> — every professional is credential-checked</li>
+          <li><strong>24-hour turnaround</strong> — submit your needs, get matched tomorrow</li>
+          <li><strong>Built by a CPA</strong> — we understand what businesses actually need</li>
+        </ul>
       </div>
+      <p style="font-size:14px;color:#555;">We're selectively onboarding businesses to ensure match quality. Submit your needs and we'll personally match you with the right CPA for your situation.</p>
       <p style="text-align:center;margin:30px 0;">
         <a href="{{platform_url}}/find-cpa.html" style="display:inline-block;background:#dc2626;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
-          Find My CPA Match
+          Get Matched With a CPA
         </a>
       </p>
       <p style="color:#666;font-size:14px;">Best regards,<br>Arthur Kostaras, CPA, CF<br>Founder, CanadaAccountants</p>
