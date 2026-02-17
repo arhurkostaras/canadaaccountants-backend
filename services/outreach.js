@@ -786,7 +786,7 @@ const SME_ACQUISITION_TEMPLATE = {
           <li><strong>Built by a CPA</strong> — we understand what businesses actually need</li>
         </ul>
       </div>
-      <p style="font-size:14px;color:#555;">We're selectively onboarding businesses to ensure match quality. Submit your needs and we'll personally match you with the right CPA for your situation.</p>
+      <p style="font-size:14px;color:#555;">There's no cost to your business — CPAs invest in the platform to reach qualified clients like you. Submit your needs and we'll personally match you with the right CPA for your situation.</p>
       <p style="text-align:center;margin:30px 0;">
         <a href="{{platform_url}}/find-cpa.html" style="display:inline-block;background:#dc2626;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
           Get Matched With a CPA
