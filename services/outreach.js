@@ -237,11 +237,51 @@ class OutreachEngine {
           );
         }
       }
+      // Auto-relaunch: check completed campaigns for newly enriched CPAs
+      const completedCampaigns = await this.pool.query(
+        `SELECT * FROM outreach_campaigns WHERE status = 'completed'`
+      );
+
+      for (const campaign of completedCampaigns.rows) {
+        const newEmails = await this._countNewRecipientsForCampaign(campaign);
+        if (newEmails > 0) {
+          const queued = await this._queueEmailsForCampaign(campaign);
+          if (queued > 0) {
+            await this.pool.query(
+              `UPDATE outreach_campaigns SET status = 'active', total_queued = total_queued + $2, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
+              [campaign.id, queued]
+            );
+            console.log(`[Outreach] Auto-relaunched campaign ${campaign.id} "${campaign.name}" with ${queued} new emails`);
+          }
+        }
+      }
     } catch (error) {
       console.error('[Outreach] Queue processing error:', error.message);
     } finally {
       this.processing = false;
     }
+  }
+
+  async _countNewRecipientsForCampaign(campaign) {
+    if (campaign.type === 'cpa') {
+      let query = `
+        SELECT COUNT(*) FROM scraped_cpas sc
+        WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
+          AND sc.status != 'invalid'
+          AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
+          AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'cpa')
+      `;
+      const params = [campaign.id];
+      let idx = 2;
+      if (campaign.target_provinces && campaign.target_provinces.length > 0) {
+        query += ` AND sc.province = ANY($${idx})`;
+        params.push(campaign.target_provinces);
+        idx++;
+      }
+      const result = await this.pool.query(query, params);
+      return parseInt(result.rows[0].count);
+    }
+    return 0;
   }
 
   async _sendOutreachEmail(campaign, emailRecord) {
