@@ -719,27 +719,26 @@ class OutreachEngine {
 // =====================================================
 
 const CPA_ACQUISITION_TEMPLATE = {
-  subject: '{{sme_count}} businesses in {{city}} need a CPA like you',
+  subject: '{{sme_count}} businesses in {{province}} are looking for a CPA — are you available?',
   body: `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
       <h2 style="color:#1e293b;">Hi {{cpa_name}},</h2>
-      <p>Did you know there are <strong>{{sme_count}} businesses</strong> in {{province}} actively looking for CPA services?</p>
-      <p>Right now, <strong>{{active_requests}} business owners</strong> on CanadaAccountants have submitted requests for help with tax planning, bookkeeping, and advisory services — and they're waiting to be matched with qualified CPAs.</p>
-      <p>The average Canadian SME spends <strong>585 days</strong> searching for the right accountant. We're eliminating that friction completely.</p>
+      <p>The average Canadian SME spends <strong>585 days</strong> searching for the right accountant. Meanwhile, qualified CPAs like you spend thousands on marketing that delivers inconsistent results.</p>
+      <p>We built <strong>CanadaAccountants</strong> to solve both sides of that equation.</p>
+      <p>Our AI-powered matching platform connects <strong>{{sme_count}} businesses</strong> in {{province}} directly with CPAs based on specialization, location, and client fit — eliminating the guesswork for both sides.</p>
       <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:20px 0;">
-        <p style="margin:0 0 12px 0;font-weight:bold;">Why CPAs join CanadaAccountants:</p>
+        <p style="margin:0 0 12px 0;font-weight:bold;">What makes this different:</p>
         <ul style="margin:0;padding-left:20px;">
-          <li>AI-matched leads based on your specialization</li>
-          <li>Serve clients anywhere in Canada — remote-friendly matching</li>
-          <li>Zero marketing spend — clients come to you</li>
-          <li>Verified professional profile with trust badge</li>
-          <li>Free to join during our launch</li>
+          <li><strong>AI-qualified leads</strong> — matched to your specialization, not random inquiries</li>
+          <li><strong>Verified client demand</strong> — {{active_requests}} active requests from real business owners</li>
+          <li><strong>Remote-friendly</strong> — serve clients in {{city}} or anywhere in Canada</li>
+          <li><strong>Professional trust profile</strong> — verified credentials that set you apart</li>
         </ul>
       </div>
-      <p style="font-size:14px;color:#555;"><strong>Work from anywhere:</strong> Whether you prefer in-person meetings in {{city}} or serving clients remotely across Canada, our AI matching considers your work preferences to connect you with the right clients.</p>
+      <p>We're onboarding a limited number of CPAs per region to maintain match quality. If you'd like to be considered, you can apply below.</p>
       <p style="text-align:center;margin:30px 0;">
         <a href="{{platform_url}}/join-as-cpa.html" style="display:inline-block;background:#dc2626;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
-          Claim Your Free Profile
+          Apply to Join
         </a>
       </p>
       <p style="color:#666;font-size:14px;">Best regards,<br>Arthur Kostaras, CPA, CF<br>Founder, CanadaAccountants</p>
