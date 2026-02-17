@@ -240,12 +240,13 @@ class OutreachEngine {
           );
         }
       }
-      // Auto-relaunch: check completed campaigns for newly enriched CPAs
-      const completedCampaigns = await this.pool.query(
-        `SELECT * FROM outreach_campaigns WHERE status = 'completed'`
+      // Auto-relaunch: check completed AND active campaigns for newly enriched CPAs
+      // Active campaigns may have hit the daily limit but still need new recipients queued
+      const relaunchCampaigns = await this.pool.query(
+        `SELECT * FROM outreach_campaigns WHERE status IN ('completed', 'active')`
       );
 
-      for (const campaign of completedCampaigns.rows) {
+      for (const campaign of relaunchCampaigns.rows) {
         const newEmails = await this._countNewRecipientsForCampaign(campaign);
         if (newEmails > 0) {
           const queued = await this._queueEmailsForCampaign(campaign);
@@ -254,7 +255,7 @@ class OutreachEngine {
               `UPDATE outreach_campaigns SET status = 'active', total_queued = total_queued + $2, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
               [campaign.id, queued]
             );
-            console.log(`[Outreach] Auto-relaunched campaign ${campaign.id} "${campaign.name}" with ${queued} new emails`);
+            console.log(`[Outreach] Auto-queued ${queued} new emails for campaign ${campaign.id} "${campaign.name}"`);
           }
         }
       }
