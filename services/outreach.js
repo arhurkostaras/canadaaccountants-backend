@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { Resend } = require('resend');
 const { sendEmail } = require('./email');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
@@ -9,6 +10,8 @@ class OutreachEngine {
     this.pool = pool;
     this.processing = false;
     this.interval = null;
+    this.resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+    this.canPollStatus = null; // null = unknown, true/false after first check
   }
 
   // =====================================================
@@ -255,10 +258,108 @@ class OutreachEngine {
           }
         }
       }
+      // Poll Resend for delivery status of recently sent emails
+      await this._pollEmailStatuses();
     } catch (error) {
       console.error('[Outreach] Queue processing error:', error.message);
     } finally {
       this.processing = false;
+    }
+  }
+
+  async _pollEmailStatuses() {
+    if (!this.resend) return;
+
+    // On first run, test if the API key has read permissions
+    if (this.canPollStatus === null) {
+      try {
+        // Try to fetch any email - if key is send-only, this will throw
+        await this.resend.emails.get('test-id');
+        this.canPollStatus = true;
+      } catch (err) {
+        if (err.message && err.message.includes('restricted')) {
+          this.canPollStatus = false;
+          console.log('[Outreach] Resend API key is send-only — email status polling disabled. Create a full-access key to enable delivery/open/click tracking.');
+        } else {
+          // 404 or other error means the key CAN read, just the ID was invalid
+          this.canPollStatus = true;
+        }
+      }
+    }
+
+    if (!this.canPollStatus) return;
+
+    try {
+      // Get sent emails that haven't been confirmed delivered yet (max 50 per cycle)
+      const emails = await this.pool.query(
+        `SELECT id, resend_email_id, status, campaign_id, recipient_email
+         FROM outreach_emails
+         WHERE resend_email_id IS NOT NULL
+           AND status IN ('sent', 'delivered')
+           AND sent_at >= NOW() - INTERVAL '7 days'
+         ORDER BY sent_at DESC
+         LIMIT 50`
+      );
+
+      let updated = 0;
+      for (const email of emails.rows) {
+        try {
+          const { data } = await this.resend.emails.get(email.resend_email_id);
+          if (!data) continue;
+
+          // Map Resend last_event to our status
+          const event = data.last_event;
+          if (!event) continue;
+
+          const eventToStatus = {
+            'delivered': 'delivered',
+            'opened': 'opened',
+            'clicked': 'clicked',
+            'bounced': 'bounced',
+            'complained': 'complained',
+          };
+
+          const newStatus = eventToStatus[event];
+          if (!newStatus) continue;
+
+          const statusOrder = ['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'];
+          const currentIdx = statusOrder.indexOf(email.status);
+          const newIdx = statusOrder.indexOf(newStatus);
+
+          if (newStatus === 'bounced' || newStatus === 'complained' || newIdx > currentIdx) {
+            await this.pool.query(
+              `UPDATE outreach_emails SET status = $2, updated_at = NOW() WHERE id = $1`,
+              [email.id, newStatus]
+            );
+
+            const counterMap = { delivered: 'total_delivered', opened: 'total_opened', clicked: 'total_clicked', bounced: 'total_bounced', complained: 'total_complained' };
+            if (counterMap[newStatus]) {
+              await this.pool.query(
+                `UPDATE outreach_campaigns SET ${counterMap[newStatus]} = ${counterMap[newStatus]} + 1, updated_at = NOW() WHERE id = $1`,
+                [email.campaign_id]
+              );
+            }
+
+            if (newStatus === 'complained') {
+              await this.pool.query(
+                `INSERT INTO outreach_unsubscribes (email, reason) VALUES ($1, 'complaint') ON CONFLICT (email) DO NOTHING`,
+                [email.recipient_email]
+              );
+            }
+            updated++;
+          }
+
+          await new Promise(r => setTimeout(r, 500)); // Rate limit polling
+        } catch (err) {
+          // Skip individual email errors
+        }
+      }
+
+      if (updated > 0) {
+        console.log(`[Outreach] Status poll: updated ${updated} email statuses`);
+      }
+    } catch (err) {
+      console.error('[Outreach] Status polling error:', err.message);
     }
   }
 
