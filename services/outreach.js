@@ -760,7 +760,7 @@ const CPA_ACQUISITION_TEMPLATE = {
       </div>
       <p>We're onboarding a limited number of CPAs per region to maintain match quality. If you'd like to be considered, you can apply below.</p>
       <p style="text-align:center;margin:30px 0;">
-        <a href="{{platform_url}}/join-as-cpa.html" style="display:inline-block;background:#dc2626;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
+        <a href="{{platform_url}}/join-as-cpa.html" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
           Apply to Join
         </a>
       </p>
@@ -788,7 +788,7 @@ const SME_ACQUISITION_TEMPLATE = {
       </div>
       <p style="font-size:14px;color:#555;">There's no cost to your business — CPAs invest in the platform to reach qualified clients like you. Submit your needs and we'll personally match you with the right CPA for your situation.</p>
       <p style="text-align:center;margin:30px 0;">
-        <a href="{{platform_url}}/find-cpa.html" style="display:inline-block;background:#dc2626;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
+        <a href="{{platform_url}}/find-cpa.html" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
           Get Matched With a CPA
         </a>
       </p>
