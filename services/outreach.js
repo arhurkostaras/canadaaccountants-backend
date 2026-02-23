@@ -97,6 +97,7 @@ class OutreachEngine {
 
     if (campaign.type === 'cpa') {
       // Find scraped CPAs with email (direct or enriched) not already in this campaign
+      // Dedup by both recipient_id AND recipient_email to prevent duplicate sends
       let query = `
         SELECT sc.id, sc.first_name, sc.last_name, sc.full_name, sc.city, sc.province, sc.firm_name,
                COALESCE(sc.enriched_email, sc.email) AS email
@@ -105,6 +106,7 @@ class OutreachEngine {
           AND sc.status != 'invalid'
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
           AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'cpa')
+          AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails WHERE campaign_id = $1)
       `;
       const params = [campaign.id];
       let paramIdx = 2;
@@ -144,6 +146,7 @@ class OutreachEngine {
           AND ss.status != 'invalid'
           AND ss.contact_email NOT IN (SELECT email FROM outreach_unsubscribes)
           AND ss.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'sme')
+          AND ss.contact_email NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails WHERE campaign_id = $1)
       `;
       const params = [campaign.id];
       let paramIdx = 2;
@@ -410,6 +413,22 @@ class OutreachEngine {
 
   async _sendOutreachEmail(campaign, emailRecord) {
     try {
+      // Skip obviously invalid emails (safety net)
+      const email = emailRecord.recipient_email;
+      if (!email ||
+          email.match(/\.(png|jpg|jpeg|gif|svg|css|js|webp|ico|woff|woff2)$/i) ||
+          email.match(/\d+x\d*\./) ||
+          email.match(/@(mysite|yoursite|yourdomain|domain|example|test|placeholder|sentry|wixpress|mailchimp|domainmarket)\./i) ||
+          email.match(/^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|abuse|fraud|spam|bounce|info@info|support@support)@/i) ||
+          email.match(/^(w4bsupport|accessibility|webmaster|hostmaster|admin@admin)@/i) ||
+          email.length > 80 ||
+          email.includes('..') ||
+          !email.match(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)) {
+        console.warn(`[Outreach] Skipping invalid email: ${email}`);
+        await this.pool.query(`UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = $1`, [emailRecord.id]);
+        return;
+      }
+
       // Render template
       const { subject, body } = await this._renderTemplate(campaign, emailRecord);
 
