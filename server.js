@@ -284,17 +284,23 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // Health check endpoint for Railway
-app.get('/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'OK',
-    message: 'CanadaAccountants AI Backend is running successfully',
+app.get('/health', async (req, res) => {
+  const start = Date.now();
+  let dbStatus = 'disconnected';
+  try {
+    await pool.query('SELECT 1');
+    dbStatus = 'connected';
+  } catch (e) {
+    dbStatus = 'error: ' + e.message;
+  }
+  const ok = dbStatus === 'connected';
+  res.status(ok ? 200 : 503).json({
+    status: ok ? 'OK' : 'DEGRADED',
+    message: 'CanadaAccountants Backend',
     timestamp: new Date().toISOString(),
-    services: {
-      ml_engine: 'active',
-      database: 'connected', 
-      ai_services: 'ready',
-      friction_elimination: 'active'
-    }
+    uptime_seconds: Math.floor(process.uptime()),
+    response_ms: Date.now() - start,
+    services: { database: dbStatus }
   });
 });
 
@@ -1714,6 +1720,27 @@ app.post('/api/contact', async (req, res) => {
   } catch (error) {
     console.error('❌ Contact form error:', error);
     res.status(500).json({ error: 'Failed to process contact form', details: error.message });
+  }
+});
+
+// Outreach pipeline health
+app.get('/api/outreach/health', async (req, res) => {
+  try {
+    const today = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE sent_at >= CURRENT_DATE`);
+    const queued = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'queued'`);
+    const bounced7d = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'bounced' AND sent_at > NOW() - INTERVAL '7 days'`);
+    const unsub7d = await pool.query(`SELECT COUNT(*) FROM outreach_unsubscribes WHERE unsubscribed_at > NOW() - INTERVAL '7 days'`);
+    const campaigns = await pool.query(`SELECT id, name, status, daily_limit, total_sent FROM outreach_campaigns WHERE status = 'active'`);
+    res.json({
+      sent_today: parseInt(today.rows[0].count),
+      queued: parseInt(queued.rows[0].count),
+      bounced_7d: parseInt(bounced7d.rows[0].count),
+      unsubscribed_7d: parseInt(unsub7d.rows[0].count),
+      active_campaigns: campaigns.rows,
+      schedule: '9 AM & 2 PM ET daily'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
