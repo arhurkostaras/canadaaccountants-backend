@@ -423,7 +423,7 @@ class OutreachEngine {
           email.match(/@(mysite|yoursite|yourdomain|domain|example|test|placeholder|sentry|wixpress|mailchimp|domainmarket)\./i) ||
           email.match(/^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|abuse|fraud|spam|bounce|info@info|support@support)@/i) ||
           email.match(/^(w4bsupport|accessibility|webmaster|hostmaster|admin@admin)@/i) ||
-          email.match(/^(info|contact|hello|office|admin|support|sales|marketing|hr|careers|jobs|reception|general|enquiries|inquiries|billing|privacy|legal|compliance|media|press|communications|feedback|team|service|accounting|remittance|corporatemarketing|webenquiry|centrecontact|crm|community|newsletter|events?|customerservice|mail|signs|donations?)@/i) ||
+          email.match(/^(info|contact|hello|office|admin|support|sales|marketing|hr|careers|jobs|reception|general|enquiries|inquiries|billing|privacy|legal|compliance|media|press|communications|feedback|team|service|accounting|remittance|corporatemarketing|webenquiry|centrecontact|crm|community|newsletter|events?|customerservice|mail|signs|donations?|frontdesk|connect|kontakt|foi\.?privacy)@/i) ||
           email.length > 80 ||
           email.includes('..') ||
           !email.match(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)) {
