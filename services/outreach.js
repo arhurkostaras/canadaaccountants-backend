@@ -96,20 +96,21 @@ class OutreachEngine {
     let queued = 0;
 
     if (campaign.type === 'cpa') {
-      // Find scraped CPAs with email (direct or enriched) not already in this campaign
-      // Dedup by both recipient_id AND recipient_email to prevent duplicate sends
+      // Find scraped CPAs with email (direct or enriched) not already contacted
+      // Use DISTINCT ON + cross-campaign email dedup to prevent duplicate sends
       let query = `
-        SELECT sc.id, sc.first_name, sc.last_name, sc.full_name, sc.city, sc.province, sc.firm_name,
+        SELECT DISTINCT ON (COALESCE(sc.enriched_email, sc.email))
+               sc.id, sc.first_name, sc.last_name, sc.full_name, sc.city, sc.province, sc.firm_name,
                COALESCE(sc.enriched_email, sc.email) AS email
         FROM scraped_cpas sc
         WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
           AND sc.status != 'invalid'
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
-          AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'cpa')
-          AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails WHERE campaign_id = $1)
+          AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE recipient_type = 'cpa')
+          AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails)
       `;
-      const params = [campaign.id];
-      let paramIdx = 2;
+      const params = [];
+      let paramIdx = 1;
 
       if (campaign.target_provinces && campaign.target_provinces.length > 0) {
         query += ` AND sc.province = ANY($${paramIdx})`;
@@ -139,17 +140,18 @@ class OutreachEngine {
       }
     } else if (campaign.type === 'sme') {
       let query = `
-        SELECT ss.id, ss.business_name, ss.province, ss.city, ss.industry,
+        SELECT DISTINCT ON (ss.contact_email)
+               ss.id, ss.business_name, ss.province, ss.city, ss.industry,
                COALESCE(ss.contact_email) AS email, ss.contact_name
         FROM scraped_smes ss
         WHERE ss.contact_email IS NOT NULL
           AND ss.status != 'invalid'
           AND ss.contact_email NOT IN (SELECT email FROM outreach_unsubscribes)
-          AND ss.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'sme')
-          AND ss.contact_email NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails WHERE campaign_id = $1)
+          AND ss.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE recipient_type = 'sme')
+          AND ss.contact_email NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails)
       `;
-      const params = [campaign.id];
-      let paramIdx = 2;
+      const params = [];
+      let paramIdx = 1;
 
       if (campaign.target_provinces && campaign.target_provinces.length > 0) {
         query += ` AND ss.province = ANY($${paramIdx})`;
@@ -421,6 +423,7 @@ class OutreachEngine {
           email.match(/@(mysite|yoursite|yourdomain|domain|example|test|placeholder|sentry|wixpress|mailchimp|domainmarket)\./i) ||
           email.match(/^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|abuse|fraud|spam|bounce|info@info|support@support)@/i) ||
           email.match(/^(w4bsupport|accessibility|webmaster|hostmaster|admin@admin)@/i) ||
+          email.match(/^(info|contact|hello|office|admin|support|sales|marketing|hr|careers|jobs|reception|general|enquiries|inquiries|billing|privacy|legal|compliance|media|press|communications|feedback|team|service|accounting|remittance|corporatemarketing|webenquiry|centrecontact|crm|community|newsletter|events?|customerservice|mail|signs|donations?)@/i) ||
           email.length > 80 ||
           email.includes('..') ||
           !email.match(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)) {

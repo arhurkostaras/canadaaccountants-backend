@@ -419,6 +419,7 @@ outreachEngine.startQueueProcessor();
   try {
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT`);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
     console.log('[Migration] Outreach email columns verified');
   } catch (err) {
     console.error('[Migration] Column migration error (non-fatal):', err.message);
