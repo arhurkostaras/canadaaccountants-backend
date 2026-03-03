@@ -1,9 +1,26 @@
 const crypto = require('crypto');
+const cron = require('node-cron');
 const { Resend } = require('resend');
 const { sendEmail } = require('./email');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
 const BACKEND_URL = process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app';
+
+function htmlToPlainText(html) {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<a[^>]+href="([^"]*)"[^>]*>([^<]*)<\/a>/gi, '$2 ($1)')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 class OutreachEngine {
   constructor(pool) {
@@ -108,6 +125,10 @@ class OutreachEngine {
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
           AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE recipient_type = 'cpa')
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails)
+          AND COALESCE(sc.enriched_email, sc.email) NOT IN (
+            SELECT DISTINCT recipient_email FROM outreach_emails
+            WHERE sent_at > NOW() - INTERVAL '30 days' AND status IN ('sent','delivered','opened','clicked')
+          )
       `;
       const params = [];
       let paramIdx = 1;
@@ -149,6 +170,10 @@ class OutreachEngine {
           AND ss.contact_email NOT IN (SELECT email FROM outreach_unsubscribes)
           AND ss.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE recipient_type = 'sme')
           AND ss.contact_email NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails)
+          AND ss.contact_email NOT IN (
+            SELECT DISTINCT recipient_email FROM outreach_emails
+            WHERE sent_at > NOW() - INTERVAL '30 days' AND status IN ('sent','delivered','opened','clicked')
+          )
       `;
       const params = [];
       let paramIdx = 1;
@@ -184,19 +209,35 @@ class OutreachEngine {
   }
 
   // =====================================================
-  // QUEUE PROCESSOR — runs every 5 minutes
+  // QUEUE PROCESSOR — 9 AM & 2 PM ET daily
   // =====================================================
 
   startQueueProcessor() {
-    this.interval = setInterval(() => this.processQueue(), 5 * 60 * 1000);
-    console.log('[Outreach] Queue processor started (every 5 min)');
+    // 9 AM ET and 2 PM ET daily
+    this.morningJob = cron.schedule('0 9 * * *', () => this.processQueue(), { timezone: 'America/Toronto' });
+    this.afternoonJob = cron.schedule('0 14 * * *', () => this.processQueue(), { timezone: 'America/Toronto' });
+    // Backup: hourly during business hours in case deployment killed the main crons
+    this.backupJob = cron.schedule('0 10,11,12,13,15,16 * * *', () => this.processQueue(), { timezone: 'America/Toronto' });
+    // Keep delivery status polling every 30 min
+    this.deliveryPoll = setInterval(() => this._pollEmailStatuses(), 30 * 60 * 1000);
+    console.log('[Outreach] Scheduled: 9 AM & 2 PM ET daily + hourly backup 10-16 ET');
+
+    // Startup catch-up: if we booted during business hours, process queue immediately
+    setTimeout(async () => {
+      const now = new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' });
+      const hour = new Date(now).getHours();
+      if (hour >= 9 && hour < 17) {
+        console.log('[Outreach] Startup catch-up: business hours detected, processing queue...');
+        await this.processQueue();
+      }
+    }, 30000);
   }
 
   stopQueueProcessor() {
-    if (this.interval) {
-      clearInterval(this.interval);
-      this.interval = null;
-    }
+    if (this.morningJob) { this.morningJob.stop(); this.morningJob = null; }
+    if (this.afternoonJob) { this.afternoonJob.stop(); this.afternoonJob = null; }
+    if (this.backupJob) { this.backupJob.stop(); this.backupJob = null; }
+    if (this.deliveryPoll) { clearInterval(this.deliveryPoll); this.deliveryPoll = null; }
   }
 
   async processQueue() {
@@ -346,10 +387,10 @@ class OutreachEngine {
               );
             }
 
-            if (newStatus === 'complained') {
+            if (newStatus === 'bounced' || newStatus === 'complained') {
               await this.pool.query(
-                `INSERT INTO outreach_unsubscribes (email, reason) VALUES ($1, 'complaint') ON CONFLICT (email) DO NOTHING`,
-                [email.recipient_email]
+                `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at) VALUES ($1, $2, NOW()) ON CONFLICT (email) DO NOTHING`,
+                [email.recipient_email, newStatus]
               );
             }
             updated++;
@@ -424,6 +465,17 @@ class OutreachEngine {
           email.match(/^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|abuse|fraud|spam|bounce|info@info|support@support)@/i) ||
           email.match(/^(w4bsupport|accessibility|webmaster|hostmaster|admin@admin)@/i) ||
           email.match(/^(info|contact|hello|office|admin|support|sales|marketing|hr|careers|jobs|reception|general|enquiries|inquiries|billing|privacy|legal|compliance|media|press|communications|feedback|team|service|accounting|remittance|corporatemarketing|webenquiry|centrecontact|crm|community|newsletter|events?|customerservice|mail|signs|donations?|frontdesk|connect|kontakt|foi\.?privacy)@/i) ||
+          // Template placeholder emails
+          email.match(/@email\.com$/i) ||
+          email.match(/^(your|youre?mail|your\.?address|your\.?email|your\.?name|name|email|someone|sampleemail|test|user|username|example)@/i) ||
+          // Generic non-professional prefixes
+          email.match(/^(shop|news|relais|ventas|pomoc|talent|web|people|appsupport|salesfire|newbusiness|notification|partnerships|right\.info|secretariat|secretary|vancouver|northyork|toronto|montreal|calgary|ottawa|staplestax|taxman|teamparmelee|order|leisure|lending|investors|corp|contactus|contact_us|recruitment|reservations|shipping|warehouse|dispatch|returns|booking|socam|rotterdam)@/i) ||
+          // Obvious junk: xxx@, single/double char locals, ROT13-like gibberish
+          email.match(/^x{2,}@/i) ||
+          email.split('@')[0].length < 3 ||
+          email.match(/^u003e/i) ||
+          // Non-vowel-heavy local parts (ROT13/gibberish detection: >8 chars with <15% vowels)
+          (email.split('@')[0].length > 8 && (email.split('@')[0].match(/[aeiou]/gi) || []).length / email.split('@')[0].length < 0.15) ||
           email.length > 80 ||
           email.includes('..') ||
           !email.match(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)) {
@@ -451,6 +503,7 @@ class OutreachEngine {
         to: emailRecord.recipient_email,
         subject,
         html: bodyWithUnsub,
+        text: htmlToPlainText(bodyWithUnsub),
       });
 
       if (result.success) {
@@ -656,11 +709,11 @@ class OutreachEngine {
       );
     }
 
-    // Auto-unsubscribe on complaint
-    if (newStatus === 'complained') {
+    // Auto-unsubscribe on bounce or complaint
+    if (newStatus === 'bounced' || newStatus === 'complained') {
       await this.pool.query(
-        `INSERT INTO outreach_unsubscribes (email, reason) VALUES ($1, 'complaint') ON CONFLICT (email) DO NOTHING`,
-        [outreachEmail.recipient_email]
+        `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at) VALUES ($1, $2, NOW()) ON CONFLICT (email) DO NOTHING`,
+        [outreachEmail.recipient_email, newStatus]
       );
     }
   }
