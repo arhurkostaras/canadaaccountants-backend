@@ -4,7 +4,8 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail } = require('./services/email');
+const rateLimit = require('express-rate-limit');
+const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const crypto = require('crypto');
 
@@ -37,6 +38,38 @@ app.use(cors({
 
 // JSON parsing middleware
 app.use(express.json());
+
+// Rate limiting
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later' }
+});
+app.use(globalLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many authentication attempts' }
+});
+app.use('/api/auth', authLimiter);
+
+const contactLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many submissions, please try again later' }
+});
+app.use('/api/contact', contactLimiter);
+
+const resetLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  message: { error: 'Too many password reset attempts' }
+});
+app.use('/api/auth/forgot-password', resetLimiter);
+app.use('/api/auth/reset-password', resetLimiter);
 
 // JWT Authentication Middleware
 const authenticateToken = (req, res, next) => {
@@ -429,6 +462,39 @@ outreachEngine.startQueueProcessor();
     console.log('[Migration] Outreach email columns verified');
   } catch (err) {
     console.error('[Migration] Column migration error (non-fatal):', err.message);
+  }
+})();
+
+// Auto-migrate: referral system + profile claiming
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS referrals (
+        id SERIAL PRIMARY KEY,
+        referrer_id INTEGER NOT NULL,
+        referee_email VARCHAR(255) NOT NULL,
+        referee_name VARCHAR(255),
+        referee_firm VARCHAR(255),
+        status VARCHAR(20) DEFAULT 'pending',
+        referral_code VARCHAR(50) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        converted_at TIMESTAMP,
+        UNIQUE(referrer_id, referee_email)
+      );
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_credits INTEGER DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by INTEGER;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(50);
+    `);
+    // Profile claiming columns on scraped_cpas
+    await pool.query(`
+      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claimed_by INTEGER;
+      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claim_status VARCHAR(20) DEFAULT 'unclaimed';
+      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claim_token VARCHAR(100);
+      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claim_requested_at TIMESTAMP;
+    `);
+    console.log('[Migration] Referral + claim columns verified');
+  } catch (err) {
+    console.error('[Migration] Referral/claim migration error (non-fatal):', err.message);
   }
 })();
 
@@ -1742,6 +1808,179 @@ app.get('/api/outreach/health', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// =====================================================
+// REFERRAL SYSTEM
+// =====================================================
+
+const referralLimiter = rateLimit({ windowMs: 24 * 60 * 60 * 1000, max: 10, message: { error: 'Referral limit reached (10/day)' } });
+
+app.post('/api/referrals/send', authenticateToken, referralLimiter, async (req, res) => {
+  try {
+    const { email, name, message } = req.body;
+    if (!email) return res.status(400).json({ error: 'Referee email is required' });
+
+    const referralCode = `ref_${crypto.randomBytes(6).toString('hex')}`;
+
+    // Get referrer info
+    const referrer = await pool.query(
+      `SELECT u.id, cp.first_name, cp.last_name FROM users u LEFT JOIN cpa_profiles cp ON u.id = cp.user_id WHERE u.id = $1`,
+      [req.user.userId]
+    );
+    const referrerName = referrer.rows[0] ? `${referrer.rows[0].first_name || ''} ${referrer.rows[0].last_name || ''}`.trim() || 'A colleague' : 'A colleague';
+
+    await pool.query(
+      `INSERT INTO referrals (referrer_id, referee_email, referee_name, referee_firm, referral_code) VALUES ($1, $2, $3, $4, $5)`,
+      [req.user.userId, email, name || null, req.body.firm || null, referralCode]
+    );
+
+    sendReferralEmail({ referrerName, refereeName: name, refereeEmail: email, referralCode, message }).catch(err => {
+      console.error('[Referral] Email send error:', err.message);
+    });
+
+    res.json({ success: true, referralCode, message: 'Referral invitation sent' });
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: 'You have already referred this email' });
+    console.error('[Referral] Error:', error.message);
+    res.status(500).json({ error: 'Failed to send referral' });
+  }
+});
+
+app.get('/api/referrals/mine', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, referee_email, referee_name, status, referral_code, created_at, converted_at FROM referrals WHERE referrer_id = $1 ORDER BY created_at DESC`,
+      [req.user.userId]
+    );
+    const credits = await pool.query(`SELECT referral_credits FROM users WHERE id = $1`, [req.user.userId]);
+    res.json({ referrals: result.rows, credits: credits.rows[0]?.referral_credits || 0 });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch referrals' });
+  }
+});
+
+app.get('/api/referrals/verify/:code', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.referee_name, r.status, u.id as referrer_user_id, cp.first_name, cp.last_name, cp.firm_name
+       FROM referrals r JOIN users u ON r.referrer_id = u.id LEFT JOIN cpa_profiles cp ON u.id = cp.user_id
+       WHERE r.referral_code = $1`,
+      [req.params.code]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Invalid referral code' });
+    const row = result.rows[0];
+    res.json({ valid: true, referrerName: `${row.first_name || ''} ${row.last_name || ''}`.trim(), referrerFirm: row.firm_name });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to verify referral code' });
+  }
+});
+
+// =====================================================
+// PROFILE CLAIMING
+// =====================================================
+
+app.get('/api/professionals/search', async (req, res) => {
+  try {
+    const { name, city, province } = req.query;
+    if (!name || name.length < 2) return res.status(400).json({ error: 'Name must be at least 2 characters' });
+
+    let query = `SELECT id, first_name, last_name, firm_name, city, province, designation, claim_status FROM scraped_cpas WHERE (first_name || ' ' || last_name) ILIKE $1`;
+    const params = [`%${name}%`];
+    if (city) { params.push(`%${city}%`); query += ` AND city ILIKE $${params.length}`; }
+    if (province) { params.push(province); query += ` AND province = $${params.length}`; }
+    query += ` LIMIT 20`;
+
+    const result = await pool.query(query, params);
+    res.json({ results: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+app.post('/api/professionals/claim/:id', authenticateToken, async (req, res) => {
+  try {
+    const professionalId = parseInt(req.params.id);
+    const professional = await pool.query(`SELECT * FROM scraped_cpas WHERE id = $1`, [professionalId]);
+    if (professional.rows.length === 0) return res.status(404).json({ error: 'Professional not found' });
+    if (professional.rows[0].claim_status === 'claimed') return res.status(409).json({ error: 'Profile already claimed' });
+
+    const claimToken = crypto.randomBytes(32).toString('hex');
+    await pool.query(
+      `UPDATE scraped_cpas SET claim_status = 'pending', claim_token = $1, claimed_by = $2, claim_requested_at = NOW() WHERE id = $3`,
+      [claimToken, req.user.userId, professionalId]
+    );
+
+    const prof = professional.rows[0];
+    const enrichedEmail = prof.enriched_email || prof.email;
+    if (enrichedEmail) {
+      sendClaimVerificationEmail({
+        email: enrichedEmail,
+        firstName: prof.first_name,
+        claimToken,
+        professionalName: `${prof.first_name || ''} ${prof.last_name || ''}`.trim()
+      }).catch(err => console.error('[Claim] Email error:', err.message));
+      res.json({ success: true, verification: 'email_sent', message: 'Verification email sent to the professional email on file' });
+    } else {
+      res.json({ success: true, verification: 'admin_review', message: 'Claim submitted for admin review (no email on file)' });
+    }
+  } catch (error) {
+    console.error('[Claim] Error:', error.message);
+    res.status(500).json({ error: 'Failed to process claim' });
+  }
+});
+
+app.get('/api/professionals/verify-claim/:token', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL WHERE claim_token = $1 AND claim_status = 'pending' RETURNING id, first_name, last_name, claimed_by`,
+      [req.params.token]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Invalid or expired claim token' });
+    res.json({ success: true, message: 'Profile claimed successfully', professionalId: result.rows[0].id });
+  } catch (error) {
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+app.post('/api/admin/claims/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL WHERE id = $1 AND claim_status = 'pending' RETURNING id, claimed_by`,
+      [parseInt(req.params.id)]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'No pending claim found' });
+    res.json({ success: true, message: 'Claim approved', professionalId: result.rows[0].id });
+  } catch (error) {
+    res.status(500).json({ error: 'Approval failed' });
+  }
+});
+
+app.get('/api/admin/claims/pending', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT sc.id, sc.first_name, sc.last_name, sc.firm_name, sc.city, sc.province, sc.claimed_by, sc.claim_requested_at, u.email as claimant_email
+       FROM scraped_cpas sc LEFT JOIN users u ON sc.claimed_by = u.id WHERE sc.claim_status = 'pending' ORDER BY sc.claim_requested_at DESC`
+    );
+    res.json({ pendingClaims: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pending claims' });
+  }
+});
+
+// 404 catch-all
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Custom error handler — returns JSON, hides internals on 500
+app.use((err, req, res, next) => {
+  console.error(`[ERROR] ${req.method} ${req.path}:`, err.message);
+  if (res.headersSent) return next(err);
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    error: status === 500 ? 'Internal server error' : err.message
+  });
 });
 
 // Sentry error handler (must be before app.listen, after all routes)

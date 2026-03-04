@@ -252,6 +252,43 @@ async function sendPasswordResetEmail({ email, resetUrl, firstName }) {
   });
 }
 
+async function sendReferralEmail({ referrerName, refereeName, refereeEmail, referralCode, message }) {
+  const registerUrl = `https://canadaaccountants.app/join-as-cpa.html?ref=${referralCode}`;
+  await sendEmail({
+    to: refereeEmail,
+    subject: `${referrerName} thinks you'd benefit from CanadaAccountants`,
+    html: `
+      <h2>You've been referred by a colleague</h2>
+      <p>Hi${refereeName ? ` ${refereeName}` : ''},</p>
+      <p>Your colleague <strong>${referrerName}</strong> thinks you'd benefit from CanadaAccountants — Canada's AI-powered CPA-to-client matching platform.</p>
+      ${message ? `<p><em>"${message}"</em></p>` : ''}
+      <p>As a referred professional, you'll get priority onboarding and access to AI-matched client leads from day one.</p>
+      <p><a href="${registerUrl}" style="display:inline-block;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">Apply to Join CanadaAccountants</a></p>
+      <br>
+      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+      <p style="color:#999;font-size:12px;">This is a one-time referral invitation. You will not receive further emails unless you register.</p>
+    `,
+  });
+}
+
+async function sendClaimVerificationEmail({ email, firstName, claimToken, professionalName }) {
+  const verifyUrl = `https://canadaaccountants.app/verify-claim.html?token=${claimToken}`;
+  await sendEmail({
+    to: email,
+    subject: 'Verify Your Profile Claim — CanadaAccountants',
+    html: `
+      <h2>Profile Claim Verification</h2>
+      <p>Hi ${firstName || 'there'},</p>
+      <p>You've requested to claim the profile for <strong>${professionalName}</strong> on CanadaAccountants.</p>
+      <p>Click below to verify ownership:</p>
+      <p><a href="${verifyUrl}" style="display:inline-block;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">Verify My Profile</a></p>
+      <p>This link expires in 48 hours. If you didn't request this, you can safely ignore this email.</p>
+      <br>
+      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `,
+  });
+}
+
 module.exports = {
   sendEmail,
   sendFrictionMatchNotification,
@@ -260,4 +297,6 @@ module.exports = {
   sendContactFormEmail,
   sendCPAVerificationEmail,
   sendPasswordResetEmail,
+  sendReferralEmail,
+  sendClaimVerificationEmail,
 };
