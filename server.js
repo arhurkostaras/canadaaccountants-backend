@@ -459,7 +459,16 @@ outreachEngine.startQueueProcessor();
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
-    console.log('[Migration] Outreach email columns verified');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS email_validations (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        status VARCHAR(50),
+        sub_status VARCHAR(100),
+        validated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('[Migration] Outreach email columns + email_validations table verified');
   } catch (err) {
     console.error('[Migration] Column migration error (non-fatal):', err.message);
   }
@@ -1691,6 +1700,19 @@ app.get('/api/admin/outreach/stats', async (req, res) => {
   }
 });
 
+// ZeroBounce validation stats
+app.get('/api/admin/validation-stats', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT status, COUNT(*) AS count FROM email_validations GROUP BY status ORDER BY count DESC`
+    );
+    const total = result.rows.reduce((sum, r) => sum + parseInt(r.count), 0);
+    res.json({ success: true, total, statuses: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get validation stats', details: error.message });
+  }
+});
+
 // =====================================================
 // PUBLIC OUTREACH ENDPOINTS
 // =====================================================
@@ -1786,6 +1808,16 @@ app.post('/api/contact', async (req, res) => {
   } catch (error) {
     console.error('❌ Contact form error:', error);
     res.status(500).json({ error: 'Failed to process contact form', details: error.message });
+  }
+});
+
+// Manual queue trigger (admin only)
+app.post('/api/admin/outreach/process-queue', async (req, res) => {
+  try {
+    outreachEngine.processQueue().catch(err => console.error('[Outreach] Manual queue error:', err.message));
+    res.json({ success: true, message: 'Queue processing triggered' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

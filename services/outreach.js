@@ -484,6 +484,17 @@ class OutreachEngine {
         return;
       }
 
+      // ZeroBounce email validation (if API key configured)
+      const validation = await this._validateEmail(email);
+      if (!validation.valid) {
+        console.warn(`[Outreach] ZeroBounce blocked: ${email} (${validation.status}/${validation.sub_status})`);
+        await this.pool.query(
+          `UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = $1`,
+          [emailRecord.id]
+        );
+        return;
+      }
+
       // Render template
       const { subject, body } = await this._renderTemplate(campaign, emailRecord);
 
@@ -540,6 +551,62 @@ class OutreachEngine {
       }
     } catch (error) {
       console.error(`[Outreach] Send error for email ${emailRecord.id}:`, error.message);
+    }
+  }
+
+  // =====================================================
+  // ZEROBOUNCE EMAIL VALIDATION
+  // =====================================================
+
+  async _validateEmail(email) {
+    const apiKey = process.env.ZEROBOUNCE_API_KEY;
+    if (!apiKey) return { valid: true, status: 'skipped', sub_status: '' };
+
+    try {
+      // Check cache first (valid for 30 days)
+      const cached = await this.pool.query(
+        `SELECT status, sub_status FROM email_validations WHERE email = $1 AND validated_at > NOW() - INTERVAL '30 days'`,
+        [email]
+      );
+      if (cached.rows.length > 0) {
+        const row = cached.rows[0];
+        const valid = ['valid', 'catch-all', 'unknown'].includes(row.status);
+        console.log(`[Outreach] ZeroBounce (cached): ${email} → ${row.status}`);
+        return { valid, status: row.status, sub_status: row.sub_status || '' };
+      }
+
+      // Call ZeroBounce API
+      const https = require('https');
+      const url = `https://api.zerobounce.net/v2/validate?api_key=${encodeURIComponent(apiKey)}&email=${encodeURIComponent(email)}&ip_address=`;
+
+      const data = await new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+          let body = '';
+          res.on('data', chunk => body += chunk);
+          res.on('end', () => {
+            try { resolve(JSON.parse(body)); }
+            catch (e) { reject(new Error('Invalid ZeroBounce response')); }
+          });
+        }).on('error', reject);
+      });
+
+      const status = (data.status || 'unknown').toLowerCase();
+      const sub_status = (data.sub_status || '').toLowerCase();
+
+      // Cache result
+      await this.pool.query(
+        `INSERT INTO email_validations (email, status, sub_status) VALUES ($1, $2, $3)
+         ON CONFLICT (email) DO UPDATE SET status = $2, sub_status = $3, validated_at = NOW()`,
+        [email, status, sub_status]
+      );
+
+      const valid = ['valid', 'catch-all', 'unknown'].includes(status);
+      console.log(`[Outreach] ZeroBounce: ${email} → ${status}${sub_status ? '/' + sub_status : ''}`);
+      return { valid, status, sub_status };
+    } catch (err) {
+      console.error(`[Outreach] ZeroBounce error for ${email}: ${err.message}`);
+      // On API error, allow the email through (don't block on validation failure)
+      return { valid: true, status: 'error', sub_status: err.message };
     }
   }
 
