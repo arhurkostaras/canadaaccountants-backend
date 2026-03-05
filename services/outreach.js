@@ -493,7 +493,7 @@ class OutreachEngine {
       const bodyWithUnsub = body + `
         <hr style="margin-top:40px;border:none;border-top:1px solid #ddd;">
         <p style="font-size:12px;color:#999;margin-top:16px;">
-          You're receiving this because your professional profile was found in a Canadian CPA or business directory.
+          You're receiving this because your profile appears in a Canadian professional directory.
           <br><a href="${unsubUrl}" style="color:#999;">Unsubscribe</a> from future emails.
         </p>
       `;
@@ -562,6 +562,7 @@ class OutreachEngine {
         vars.city = c.city || '';
         vars.province = c.province || '';
         vars.firm_name = c.firm_name || '';
+        vars.firm_name_line = c.firm_name ? ` (listed under ${c.firm_name})` : '';
 
         // Get real SME count in their area
         const smeCount = await this.pool.query(
@@ -569,6 +570,10 @@ class OutreachEngine {
           [c.province]
         );
         vars.sme_count = smeCount.rows[0].count || '0';
+
+        // Get total CPAs count for social proof
+        const totalCpas = await this.pool.query('SELECT COUNT(*) FROM scraped_cpas');
+        vars.total_cpas = parseInt(totalCpas.rows[0].count).toLocaleString('en-CA');
 
         // Get active friction requests count
         const activeRequests = await this.pool.query(
@@ -601,9 +606,14 @@ class OutreachEngine {
       body = body.replace(re, val);
     }
 
-    // Replace platform URL
+    // Replace platform URL and year
     body = body.replace(/\{\{platform_url\}\}/g, FRONTEND_URL);
     subject = subject.replace(/\{\{platform_url\}\}/g, FRONTEND_URL);
+    body = body.replace(/\{\{current_year\}\}/g, new Date().getFullYear().toString());
+
+    // Safety net: strip any unreplaced {{variables}} so raw code never shows in emails
+    subject = subject.replace(/\{\{[a-z_]+\}\}/g, '');
+    body = body.replace(/\{\{[a-z_]+\}\}/g, '');
 
     return { subject, body };
   }
@@ -613,8 +623,15 @@ class OutreachEngine {
     if (!campaign) throw new Error('Campaign not found');
 
     // Use sample data for preview
+    // Get real total CPA count for social proof
+    let totalCpasCount = '94,517';
+    try {
+      const totalCpas = await this.pool.query('SELECT COUNT(*) FROM scraped_cpas');
+      totalCpasCount = parseInt(totalCpas.rows[0].count).toLocaleString('en-CA');
+    } catch (e) { /* fallback */ }
+
     const sampleVars = campaign.type === 'cpa'
-      ? { cpa_name: 'Jane Smith', city: 'Vancouver', province: 'BC', firm_name: 'Smith & Associates', sme_count: '1,247', active_requests: '38' }
+      ? { cpa_name: 'Jane Smith', city: 'Vancouver', province: 'BC', firm_name: 'Smith & Associates', firm_name_line: ' (listed under Smith & Associates)', sme_count: '1,247', total_cpas: totalCpasCount, active_requests: '38' }
       : { business_name: 'Maple Tech Solutions Inc.', industry: 'Technology', province: 'ON', cpa_count: '3,845' };
 
     let subject = campaign.subject_template;
@@ -817,29 +834,30 @@ class OutreachEngine {
 // =====================================================
 
 const CPA_ACQUISITION_TEMPLATE = {
-  subject: '{{sme_count}} businesses in {{province}} are looking for a CPA — are you available?',
+  subject: 'Your CPA profile on CanadaAccountants.app is live — claim it before clients see it',
   body: `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
       <h2 style="color:#1e293b;">Hi {{cpa_name}},</h2>
-      <p>The average Canadian SME spends <strong>585 days</strong> searching for the right accountant. Meanwhile, qualified CPAs like you spend thousands on marketing that delivers inconsistent results.</p>
-      <p>We built <strong>CanadaAccountants</strong> to solve both sides of that equation.</p>
-      <p>Our AI-powered matching platform connects <strong>{{sme_count}} businesses</strong> in {{province}} directly with CPAs based on specialization, location, and client fit — eliminating the guesswork for both sides.</p>
+      <p>Your professional profile is now listed on <strong>CanadaAccountants.app</strong> — a platform where Canadian businesses search for and get matched with CPAs.</p>
+      <p>Right now, your listing shows basic information pulled from your provincial CPA directory{{firm_name_line}}. Business owners in {{province}} are already using the platform to find accountants, and your profile is visible to them.</p>
+      <p><strong>Here's why that matters:</strong> unclaimed profiles show limited information. When a business searches for a CPA in {{city}}, they see your name — but not your specializations, availability, or what makes your practice different.</p>
       <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:20px 0;">
-        <p style="margin:0 0 12px 0;font-weight:bold;">What makes this different:</p>
+        <p style="margin:0 0 12px 0;font-weight:bold;">When you claim your profile, you can:</p>
         <ul style="margin:0;padding-left:20px;">
-          <li><strong>AI-qualified leads</strong> — matched to your specialization, not random inquiries</li>
-          <li><strong>Verified client demand</strong> — {{active_requests}} active requests from real business owners</li>
-          <li><strong>Remote-friendly</strong> — serve clients in {{city}} or anywhere in Canada</li>
-          <li><strong>Professional trust profile</strong> — verified credentials that set you apart</li>
+          <li><strong>Control your listing</strong> — add your specializations, bio, and credentials</li>
+          <li><strong>Receive AI-matched leads</strong> — get introduced to businesses that fit your practice</li>
+          <li><strong>Appear in priority search results</strong> — claimed profiles rank higher than unclaimed ones</li>
+          <li><strong>Build your verified trust profile</strong> — stand out from the {{total_cpas}}+ other CPAs listed</li>
         </ul>
       </div>
-      <p>We're onboarding a limited number of CPAs per region to maintain match quality. If you'd like to be considered, you can apply below.</p>
+      <p>Claiming takes under 2 minutes. You'll verify your identity and can immediately update what business owners see when they find you.</p>
       <p style="text-align:center;margin:30px 0;">
-        <a href="{{platform_url}}/join-as-cpa.html" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
-          Apply to Join
+        <a href="{{platform_url}}/join-as-cpa.html" style="display:inline-block;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;">
+          Claim Your Profile
         </a>
       </p>
-      <p style="color:#666;font-size:14px;">Best regards,<br>Arthur Kostaras, CPA, CF<br>Founder, CanadaAccountants</p>
+      <p style="color:#888;font-size:13px;">If you don't wish to claim your profile, no action is needed — your basic listing will remain as-is.</p>
+      <p style="color:#666;font-size:14px;margin-top:24px;">Best regards,<br>The CanadaAccountants Team</p>
     </div>
   `
 };
