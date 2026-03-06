@@ -1821,6 +1821,16 @@ app.post('/api/admin/outreach/process-queue', async (req, res) => {
   }
 });
 
+// Reconcile email delivery statuses from Resend API
+app.post('/api/admin/outreach/reconcile', async (req, res) => {
+  try {
+    const result = await outreachEngine.reconcileStatuses();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Outreach pipeline health
 app.get('/api/outreach/health', async (req, res) => {
   try {

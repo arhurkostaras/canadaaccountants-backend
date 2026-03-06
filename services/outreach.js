@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const cron = require('node-cron');
 const { Resend } = require('resend');
 const { sendEmail } = require('./email');
+const { buildClaimEmail } = require('../utils/email-template');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
 const BACKEND_URL = process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app';
@@ -29,6 +30,7 @@ class OutreachEngine {
     this.interval = null;
     this.resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
     this.canPollStatus = null; // null = unknown, true/false after first check
+    this.zbConsecutiveErrors = 0;
   }
 
   // =====================================================
@@ -495,32 +497,24 @@ class OutreachEngine {
         return;
       }
 
-      // Render template
-      const { subject, body } = await this._renderTemplate(campaign, emailRecord);
-
-      // Add unsubscribe link
+      // Generate unsubscribe token before rendering (template has {{unsubscribe_url}} in footer)
       const unsubToken = crypto.randomBytes(24).toString('hex');
-      const unsubUrl = `${BACKEND_URL}/api/unsubscribe/${unsubToken}`;
-      const bodyWithUnsub = body + `
-        <hr style="margin-top:40px;border:none;border-top:1px solid #ddd;">
-        <p style="font-size:12px;color:#999;margin-top:16px;">
-          You're receiving this because your profile appears in a Canadian professional directory.
-          <br><a href="${unsubUrl}" style="color:#999;">Unsubscribe</a> from future emails.
-        </p>
-      `;
+
+      // Render template (unsubscribe_url is injected as a template variable)
+      const { subject, body } = await this._renderTemplate(campaign, emailRecord, unsubToken);
 
       // Send via Resend
       const result = await sendEmail({
         to: emailRecord.recipient_email,
         subject,
-        html: bodyWithUnsub,
-        text: htmlToPlainText(bodyWithUnsub),
+        html: body,
+        text: htmlToPlainText(body),
       });
 
       if (result.success) {
         await this.pool.query(
           `UPDATE outreach_emails SET status = 'sent', sent_at = NOW(), resend_email_id = $2, rendered_subject = $3, rendered_body = $4 WHERE id = $1`,
-          [emailRecord.id, result.id, subject, bodyWithUnsub]
+          [emailRecord.id, result.id, subject, body]
         );
         await this.pool.query(
           `UPDATE outreach_campaigns SET total_sent = total_sent + 1, updated_at = NOW() WHERE id = $1`,
@@ -601,11 +595,16 @@ class OutreachEngine {
       );
 
       const valid = ['valid', 'catch-all', 'unknown'].includes(status);
+      this.zbConsecutiveErrors = 0;
       console.log(`[Outreach] ZeroBounce: ${email} → ${status}${sub_status ? '/' + sub_status : ''}`);
       return { valid, status, sub_status };
     } catch (err) {
-      console.error(`[Outreach] ZeroBounce error for ${email}: ${err.message}`);
-      // On API error, allow the email through (don't block on validation failure)
+      this.zbConsecutiveErrors++;
+      console.error(`[Outreach] ZeroBounce error for ${email}: ${err.message} (consecutive: ${this.zbConsecutiveErrors})`);
+      if (this.zbConsecutiveErrors >= 3) {
+        console.warn(`[Outreach] ZeroBounce circuit breaker: ${this.zbConsecutiveErrors} consecutive errors — blocking email`);
+        return { valid: false, status: 'validation_unavailable', sub_status: err.message };
+      }
       return { valid: true, status: 'error', sub_status: err.message };
     }
   }
@@ -614,11 +613,18 @@ class OutreachEngine {
   // TEMPLATE RENDERER
   // =====================================================
 
-  async _renderTemplate(campaign, emailRecord) {
+  async _renderTemplate(campaign, emailRecord, unsubToken) {
     let subject = campaign.subject_template;
     let body = campaign.body_template;
 
     const vars = {};
+
+    // Build unsubscribe URL from token (template footer has {{unsubscribe_url}})
+    if (unsubToken) {
+      vars.unsubscribe_url = `${BACKEND_URL}/api/unsubscribe/${unsubToken}`;
+    } else {
+      vars.unsubscribe_url = `${FRONTEND_URL}/unsubscribe`;
+    }
 
     if (campaign.type === 'cpa' && emailRecord.recipient_type === 'cpa') {
       // Get CPA data
@@ -733,6 +739,8 @@ class OutreachEngine {
     const emailId = data?.email_id;
 
     if (!emailId) return;
+
+    console.log(`[Outreach] Webhook: ${type} for ${emailId}`);
 
     // Find the outreach email by resend_email_id
     const emailResult = await this.pool.query(
@@ -872,6 +880,77 @@ class OutreachEngine {
   }
 
   // =====================================================
+  // RECONCILIATION — bulk status sync from Resend API
+  // =====================================================
+
+  async reconcileStatuses() {
+    if (!this.resend) throw new Error('Resend API key not configured');
+
+    const emails = await this.pool.query(
+      `SELECT id, resend_email_id, status, campaign_id, recipient_email
+       FROM outreach_emails
+       WHERE resend_email_id IS NOT NULL
+         AND status IN ('sent', 'delivered')
+         AND sent_at >= NOW() - INTERVAL '30 days'
+       ORDER BY sent_at DESC`
+    );
+
+    console.log(`[Outreach] Reconciling ${emails.rows.length} emails...`);
+    let reconciled = 0;
+    let updated = 0;
+    const statuses = {};
+
+    for (const email of emails.rows) {
+      try {
+        const { data } = await this.resend.emails.get(email.resend_email_id);
+        reconciled++;
+        if (!data || !data.last_event) continue;
+
+        const event = data.last_event;
+        const eventToStatus = { delivered: 'delivered', opened: 'opened', clicked: 'clicked', bounced: 'bounced', complained: 'complained' };
+        const newStatus = eventToStatus[event];
+        if (!newStatus) continue;
+
+        statuses[newStatus] = (statuses[newStatus] || 0) + 1;
+
+        const statusOrder = ['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'];
+        const currentIdx = statusOrder.indexOf(email.status);
+        const newIdx = statusOrder.indexOf(newStatus);
+
+        if (newStatus === 'bounced' || newStatus === 'complained' || newIdx > currentIdx) {
+          await this.pool.query(
+            `UPDATE outreach_emails SET status = $2, updated_at = NOW() WHERE id = $1`,
+            [email.id, newStatus]
+          );
+
+          const counterMap = { delivered: 'total_delivered', opened: 'total_opened', clicked: 'total_clicked', bounced: 'total_bounced', complained: 'total_complained' };
+          if (counterMap[newStatus]) {
+            await this.pool.query(
+              `UPDATE outreach_campaigns SET ${counterMap[newStatus]} = ${counterMap[newStatus]} + 1, updated_at = NOW() WHERE id = $1`,
+              [email.campaign_id]
+            );
+          }
+
+          if (newStatus === 'bounced' || newStatus === 'complained') {
+            await this.pool.query(
+              `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at) VALUES ($1, $2, NOW()) ON CONFLICT (email) DO NOTHING`,
+              [email.recipient_email, newStatus]
+            );
+          }
+          updated++;
+        }
+
+        await new Promise(r => setTimeout(r, 200));
+      } catch (err) {
+        // Skip individual errors
+      }
+    }
+
+    console.log(`[Outreach] Reconciliation complete: ${reconciled} checked, ${updated} updated`);
+    return { reconciled, updated, statuses };
+  }
+
+  // =====================================================
   // STATS
   // =====================================================
 
@@ -886,7 +965,8 @@ class OutreachEngine {
         (SELECT COALESCE(SUM(total_clicked), 0) FROM outreach_campaigns) AS total_clicked,
         (SELECT COALESCE(SUM(total_bounced), 0) FROM outreach_campaigns) AS total_bounced,
         (SELECT COALESCE(SUM(total_converted), 0) FROM outreach_campaigns) AS total_converted,
-        (SELECT COUNT(*) FROM outreach_unsubscribes WHERE reason != 'pending') AS total_unsubscribes,
+        (SELECT COUNT(*) FROM outreach_unsubscribes WHERE reason = 'user_request') AS total_unsubscribes,
+        (SELECT COUNT(*) FROM outreach_unsubscribes WHERE reason IN ('bounced', 'complained')) AS total_bounce_unsubs,
         (SELECT COUNT(*) FROM scraped_cpas) AS total_scraped_cpas,
         (SELECT COUNT(*) FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL) AS cpas_with_email,
         (SELECT COUNT(*) FROM scraped_smes) AS total_scraped_smes,
@@ -900,34 +980,27 @@ class OutreachEngine {
 // DEFAULT EMAIL TEMPLATES
 // =====================================================
 
-const CPA_ACQUISITION_TEMPLATE = {
+const CPA_ACQUISITION_TEMPLATE = buildClaimEmail({
+  platformName: 'CanadaAccountants',
+  tagline: 'CPA-Client Matching Platform',
   subject: 'Your CPA profile on CanadaAccountants.app is live — claim it before clients see it',
-  body: `
-    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
-      <h2 style="color:#1e293b;">Hi {{cpa_name}},</h2>
-      <p>Your professional profile is now listed on <strong>CanadaAccountants.app</strong> — a platform where Canadian businesses search for and get matched with CPAs.</p>
-      <p>Right now, your listing shows basic information pulled from your provincial CPA directory{{firm_name_line}}. Business owners in {{province}} are already using the platform to find accountants, and your profile is visible to them.</p>
-      <p><strong>Here's why that matters:</strong> unclaimed profiles show limited information. When a business searches for a CPA in {{city}}, they see your name — but not your specializations, availability, or what makes your practice different.</p>
-      <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:20px 0;">
-        <p style="margin:0 0 12px 0;font-weight:bold;">When you claim your profile, you can:</p>
-        <ul style="margin:0;padding-left:20px;">
-          <li><strong>Control your listing</strong> — add your specializations, bio, and credentials</li>
-          <li><strong>Receive AI-matched leads</strong> — get introduced to businesses that fit your practice</li>
-          <li><strong>Appear in priority search results</strong> — claimed profiles rank higher than unclaimed ones</li>
-          <li><strong>Build your verified trust profile</strong> — stand out from the {{total_cpas}}+ other CPAs listed</li>
-        </ul>
-      </div>
-      <p>Claiming takes under 2 minutes. You'll verify your identity and can immediately update what business owners see when they find you.</p>
-      <p style="text-align:center;margin:30px 0;">
-        <a href="{{platform_url}}/join-as-cpa.html" style="display:inline-block;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;">
-          Claim Your Profile
-        </a>
-      </p>
-      <p style="color:#888;font-size:13px;">If you don't wish to claim your profile, no action is needed — your basic listing will remain as-is.</p>
-      <p style="color:#666;font-size:14px;margin-top:24px;">Best regards,<br>The CanadaAccountants Team</p>
-    </div>
-  `
-};
+  greeting: 'Hi {{cpa_name}},',
+  bodyParagraphs: [
+    'Your professional profile is now listed on <strong>CanadaAccountants.app</strong> — a platform where Canadian businesses search for and get matched with CPAs.',
+    'Right now, your listing shows basic information pulled from your provincial CPA directory{{firm_name_line}}. Business owners in {{province}} are already using the platform to find accountants, and your profile is visible to them.',
+    "<strong>Here's why that matters:</strong> unclaimed profiles show limited information. When a business searches for a CPA in {{city}}, they see your name — but not your specializations, availability, or what makes your practice different.",
+  ],
+  features: [
+    { bold: 'Control your listing', text: 'add your specializations, bio, and credentials' },
+    { bold: 'Receive AI-matched leads', text: 'get introduced to businesses that fit your practice' },
+    { bold: 'Appear in priority search results', text: 'claimed profiles rank higher than unclaimed ones' },
+    { bold: 'Build your verified trust profile', text: 'stand out from the {{total_cpas}}+ other CPAs listed' },
+  ],
+  closingLine: "Claiming takes under 2 minutes. You'll verify your identity and can immediately update what business owners see when they find you.",
+  ctaUrl: 'https://canadaaccountants.app/join-as-cpa.html',
+  privacyUrl: 'https://canadaaccountants.app/privacy',
+  copyrightName: 'CanadaAccountants.app',
+});
 
 const SME_ACQUISITION_TEMPLATE = {
   subject: '{{business_name}} — your AI-matched CPA is waiting',
