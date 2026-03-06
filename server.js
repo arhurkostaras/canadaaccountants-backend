@@ -1831,6 +1831,18 @@ app.post('/api/admin/outreach/reconcile', async (req, res) => {
   }
 });
 
+// Validate all queued emails via ZeroBounce before sending
+app.post('/api/admin/outreach/validate-queued', async (req, res) => {
+  try {
+    outreachEngine.validateQueued().catch(err =>
+      console.error('[Outreach] Queue validation error:', err.message)
+    );
+    res.json({ success: true, message: 'Queue validation started' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Outreach pipeline health
 app.get('/api/outreach/health', async (req, res) => {
   try {

@@ -951,6 +951,46 @@ class OutreachEngine {
   }
 
   // =====================================================
+  // QUEUE VALIDATION
+  // =====================================================
+
+  async validateQueued() {
+    const queued = await this.pool.query(
+      `SELECT id, recipient_email FROM outreach_emails WHERE status = 'queued' ORDER BY queued_at ASC`
+    );
+
+    let valid = 0, invalid = 0, errors = 0;
+
+    for (const row of queued.rows) {
+      try {
+        const result = await this._validateEmail(row.recipient_email);
+
+        if (result.status === 'skipped') { valid++; }
+        else if (result.status !== 'error' && result.status !== 'validation_unavailable') {
+          if (result.valid) { valid++; }
+          else {
+            invalid++;
+            await this.pool.query(
+              `UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = $1`,
+              [row.id]
+            );
+          }
+        } else {
+          errors++;
+        }
+      } catch (err) {
+        errors++;
+        console.error(`[Outreach] Validate error for ${row.recipient_email}:`, err.message);
+      }
+
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    console.log(`[Outreach] Queue validation complete: ${valid} valid, ${invalid} invalid, ${errors} errors out of ${queued.rows.length}`);
+    return { total: queued.rows.length, valid, invalid, errors };
+  }
+
+  // =====================================================
   // STATS
   // =====================================================
 
