@@ -8,6 +8,14 @@ const rateLimit = require('express-rate-limit');
 const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const crypto = require('crypto');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
+const STRIPE_PRICES = {
+  associate: process.env.STRIPE_PRICE_ASSOCIATE || '',
+  professional: process.env.STRIPE_PRICE_PROFESSIONAL || '',
+  enterprise: process.env.STRIPE_PRICE_ENTERPRISE || '',
+};
 
 // Initialize Sentry before anything else
 if (process.env.SENTRY_DSN) {
@@ -35,6 +43,72 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Stripe webhook — must be before JSON parser (needs raw body)
+app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret || !sig) {
+    return res.status(400).json({ error: 'Missing webhook secret or signature' });
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    console.error('Stripe webhook signature verification failed:', err.message);
+    return res.status(400).json({ error: 'Webhook signature verification failed' });
+  }
+
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        const cpaProfileId = session.metadata?.cpa_profile_id;
+        const planType = session.metadata?.plan_type;
+        if (cpaProfileId && session.subscription) {
+          await pool.query(
+            `UPDATE cpa_subscriptions SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', current_period_start = NOW(), updated_at = NOW() WHERE cpa_profile_id = $3`,
+            [session.subscription, session.customer, cpaProfileId]
+          );
+        }
+        console.log(`Checkout completed for CPA ${cpaProfileId}, plan: ${planType}`);
+        break;
+      }
+      case 'customer.subscription.updated': {
+        const sub = event.data.object;
+        await pool.query(
+          `UPDATE cpa_subscriptions SET status = $1, current_period_start = $2, current_period_end = $3, updated_at = NOW() WHERE stripe_subscription_id = $4`,
+          [sub.status === 'active' ? 'active' : sub.status, new Date(sub.current_period_start * 1000), new Date(sub.current_period_end * 1000), sub.id]
+        );
+        break;
+      }
+      case 'customer.subscription.deleted': {
+        const sub = event.data.object;
+        await pool.query(
+          `UPDATE cpa_subscriptions SET status = 'canceled', updated_at = NOW() WHERE stripe_subscription_id = $1`,
+          [sub.id]
+        );
+        break;
+      }
+      case 'invoice.payment_failed': {
+        const invoice = event.data.object;
+        if (invoice.subscription) {
+          await pool.query(
+            `UPDATE cpa_subscriptions SET status = 'past_due', updated_at = NOW() WHERE stripe_subscription_id = $1`,
+            [invoice.subscription]
+          );
+        }
+        break;
+      }
+    }
+    res.json({ received: true });
+  } catch (error) {
+    console.error('Stripe webhook processing error:', error);
+    res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
 
 // JSON parsing middleware
 app.use(express.json());
@@ -258,7 +332,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     const firstName = profileResult.rows.length > 0 ? profileResult.rows[0].first_name : null;
 
     // Send reset email
-    const frontendUrl = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
+    const frontendUrl = FRONTEND_URL;
     const resetUrl = `${frontendUrl}/reset-password.html?token=${resetToken}`;
 
     sendPasswordResetEmail({ email: user.email, resetUrl, firstName }).catch(err => {
@@ -2019,6 +2093,65 @@ app.get('/api/admin/claims/pending', authenticateToken, requireAdmin, async (req
     res.json({ pendingClaims: result.rows });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch pending claims' });
+  }
+});
+
+// =====================================================
+// STRIPE SUBSCRIPTION ROUTES
+// =====================================================
+
+app.post('/api/stripe/create-checkout-session', authenticateToken, async (req, res) => {
+  try {
+    const { planType } = req.body;
+    const priceId = STRIPE_PRICES[planType];
+    if (!priceId) return res.status(400).json({ error: 'Invalid plan type' });
+
+    const profileResult = await pool.query('SELECT id FROM cpa_profiles WHERE user_id = $1', [req.user.userId]);
+    if (profileResult.rows.length === 0) return res.status(404).json({ error: 'CPA profile not found' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: `${FRONTEND_URL}/checkout-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/pricing`,
+      metadata: { cpa_profile_id: profileResult.rows[0].id.toString(), plan_type: planType },
+      customer_email: req.user.email
+    });
+
+    res.json({ success: true, sessionId: session.id, url: session.url });
+  } catch (error) {
+    console.error('Stripe checkout error:', error);
+    res.status(500).json({ error: 'Failed to create checkout session', details: error.message });
+  }
+});
+
+app.get('/api/stripe/subscription-status', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT cs.* FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1`,
+      [req.user.userId]
+    );
+    res.json({ success: true, subscription: result.rows[0] || null });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch subscription', details: error.message });
+  }
+});
+
+app.post('/api/stripe/create-portal-session', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT cs.stripe_customer_id FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1`,
+      [req.user.userId]
+    );
+    if (!result.rows[0]?.stripe_customer_id) return res.status(400).json({ error: 'No Stripe customer found' });
+    const session = await stripe.billingPortal.sessions.create({
+      customer: result.rows[0].stripe_customer_id,
+      return_url: `${FRONTEND_URL}/cpa-dashboard`
+    });
+    res.json({ success: true, url: session.url });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create portal session', details: error.message });
   }
 });
 
