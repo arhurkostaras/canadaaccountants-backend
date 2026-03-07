@@ -14,8 +14,8 @@ function buildClaimEmail(config) {
   const {
     platformName,
     tagline,
-    primaryColor = '#667eea',
-    gradientEnd = '#764ba2',
+    primaryColor = '#2563eb',
+    gradientEnd = '#1e3a8a',
     subject,
     greeting,
     bodyParagraphs,
