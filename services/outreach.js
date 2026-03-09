@@ -31,6 +31,8 @@ class OutreachEngine {
     this.resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
     this.canPollStatus = null; // null = unknown, true/false after first check
     this.zbConsecutiveErrors = 0;
+    this.zbCreditsRemaining = null; // cached ZeroBounce credit count
+    this.zbCreditsCheckedAt = null; // when credits were last checked
   }
 
   // =====================================================
@@ -113,6 +115,7 @@ class OutreachEngine {
 
   async _queueEmailsForCampaign(campaign) {
     let queued = 0;
+    let skippedByValidation = 0;
 
     if (campaign.type === 'cpa') {
       // Find scraped CPAs with email (direct or enriched) not already contacted
@@ -153,6 +156,14 @@ class OutreachEngine {
       const cpas = await this.pool.query(query, params);
 
       for (const cpa of cpas.rows) {
+        // ZeroBounce pre-validation before queuing
+        const validation = await this._validateEmailForQueue(cpa.email);
+        if (!validation.valid) {
+          console.log(`[Outreach] Pre-queue rejected: ${cpa.email} (${validation.status}/${validation.sub_status})`);
+          skippedByValidation++;
+          continue;
+        }
+
         const name = cpa.full_name || `${cpa.first_name || ''} ${cpa.last_name || ''}`.trim();
         await this.pool.query(
           `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status)
@@ -198,6 +209,14 @@ class OutreachEngine {
       const smes = await this.pool.query(query, params);
 
       for (const sme of smes.rows) {
+        // ZeroBounce pre-validation before queuing
+        const validation = await this._validateEmailForQueue(sme.email);
+        if (!validation.valid) {
+          console.log(`[Outreach] Pre-queue rejected: ${sme.email} (${validation.status}/${validation.sub_status})`);
+          skippedByValidation++;
+          continue;
+        }
+
         await this.pool.query(
           `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status)
            VALUES ($1, 'sme', $2, $3, $4, 'queued')`,
@@ -205,6 +224,10 @@ class OutreachEngine {
         );
         queued++;
       }
+    }
+
+    if (skippedByValidation > 0) {
+      console.log(`[Outreach] Queue build complete: ${queued} queued, ${skippedByValidation} rejected by ZeroBounce pre-validation`);
     }
 
     return queued;
@@ -607,6 +630,86 @@ class OutreachEngine {
       }
       return { valid: true, status: 'error', sub_status: err.message };
     }
+  }
+
+  // =====================================================
+  // ZEROBOUNCE CREDIT CHECK
+  // =====================================================
+
+  async _checkZeroBounceCredits() {
+    const apiKey = process.env.ZEROBOUNCE_API_KEY;
+    if (!apiKey) return { available: true, credits: null };
+
+    // Cache credits for 1 hour
+    if (this.zbCreditsRemaining !== null && this.zbCreditsCheckedAt &&
+        (Date.now() - this.zbCreditsCheckedAt) < 3600000) {
+      return { available: this.zbCreditsRemaining >= 100, credits: this.zbCreditsRemaining };
+    }
+
+    try {
+      const https = require('https');
+      const url = `https://api.zerobounce.net/v2/getcredits?api_key=${encodeURIComponent(apiKey)}`;
+
+      const data = await new Promise((resolve, reject) => {
+        https.get(url, (res) => {
+          let body = '';
+          res.on('data', chunk => body += chunk);
+          res.on('end', () => {
+            try { resolve(JSON.parse(body)); }
+            catch (e) { reject(new Error('Invalid ZeroBounce credits response')); }
+          });
+        }).on('error', reject);
+      });
+
+      const credits = parseInt(data.Credits, 10) || 0;
+      this.zbCreditsRemaining = credits;
+      this.zbCreditsCheckedAt = Date.now();
+      console.log(`[Outreach] ZeroBounce credits remaining: ${credits}`);
+
+      if (credits < 100) {
+        console.warn(`[Outreach] ZeroBounce credits low (${credits}) — falling back to sending without pre-validation`);
+        return { available: false, credits };
+      }
+
+      return { available: true, credits };
+    } catch (err) {
+      console.error(`[Outreach] ZeroBounce credit check failed: ${err.message}`);
+      return { available: false, credits: null };
+    }
+  }
+
+  async _validateEmailForQueue(email) {
+    const apiKey = process.env.ZEROBOUNCE_API_KEY;
+    if (!apiKey) return { valid: true, status: 'skipped', sub_status: '' };
+
+    // Check credits first
+    const creditCheck = await this._checkZeroBounceCredits();
+    if (!creditCheck.available) {
+      console.log(`[Outreach] Skipping pre-validation for ${email} — insufficient ZeroBounce credits`);
+      return { valid: true, status: 'credits_low', sub_status: '' };
+    }
+
+    // Use the existing _validateEmail method (which has caching built in)
+    const result = await this._validateEmail(email);
+
+    // Decrement cached credits if we made an actual API call (not cached)
+    if (result.status !== 'skipped' && result.status !== 'error' &&
+        result.status !== 'validation_unavailable' && this.zbCreditsRemaining !== null) {
+      // Only decrement if this was a fresh API call (check if it was cached)
+      const cached = await this.pool.query(
+        `SELECT validated_at FROM email_validations WHERE email = $1`,
+        [email]
+      );
+      // If validated in last 2 seconds, it was likely a fresh call
+      if (cached.rows.length > 0) {
+        const validatedAt = new Date(cached.rows[0].validated_at);
+        if ((Date.now() - validatedAt.getTime()) < 2000) {
+          this.zbCreditsRemaining = Math.max(0, this.zbCreditsRemaining - 1);
+        }
+      }
+    }
+
+    return result;
   }
 
   // =====================================================
