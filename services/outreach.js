@@ -60,7 +60,7 @@ class OutreachEngine {
   }
 
   async updateCampaign(id, updates) {
-    const allowed = ['name', 'subject_template', 'body_template', 'target_provinces', 'target_cities', 'target_naics_codes', 'daily_limit', 'total_limit'];
+    const allowed = ['name', 'subject_template', 'body_template', 'target_provinces', 'target_cities', 'target_naics_codes', 'daily_limit', 'total_limit', 'subject_variants', 'follow_up_delay_days', 'max_sequence', 'follow_up_subjects'];
     const sets = [];
     const values = [];
     let idx = 1;
@@ -116,6 +116,7 @@ class OutreachEngine {
   async _queueEmailsForCampaign(campaign) {
     let queued = 0;
     let skippedByValidation = 0;
+    const variantCount = (campaign.subject_variants && Array.isArray(campaign.subject_variants)) ? campaign.subject_variants.length + 1 : 1;
 
     if (campaign.type === 'cpa') {
       // Find scraped CPAs with email (direct or enriched) not already contacted
@@ -166,10 +167,11 @@ class OutreachEngine {
 
         const name = cpa.full_name || `${cpa.first_name || ''} ${cpa.last_name || ''}`.trim();
         const unsubToken = crypto.randomBytes(24).toString('hex');
+        const variantIndex = variantCount > 1 ? Math.floor(Math.random() * variantCount) : 0;
         await this.pool.query(
-          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token)
-           VALUES ($1, 'cpa', $2, $3, $4, 'queued', $5)`,
-          [campaign.id, cpa.id, cpa.email, name, unsubToken]
+          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token, variant_index)
+           VALUES ($1, 'cpa', $2, $3, $4, 'queued', $5, $6)`,
+          [campaign.id, cpa.id, cpa.email, name, unsubToken, variantIndex]
         );
         queued++;
       }
@@ -219,10 +221,11 @@ class OutreachEngine {
         }
 
         const unsubToken = crypto.randomBytes(24).toString('hex');
+        const variantIndex = variantCount > 1 ? Math.floor(Math.random() * variantCount) : 0;
         await this.pool.query(
-          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token)
-           VALUES ($1, 'sme', $2, $3, $4, 'queued', $5)`,
-          [campaign.id, sme.id, sme.email, sme.contact_name || sme.business_name, unsubToken]
+          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token, variant_index)
+           VALUES ($1, 'sme', $2, $3, $4, 'queued', $5, $6)`,
+          [campaign.id, sme.id, sme.email, sme.contact_name || sme.business_name, unsubToken, variantIndex]
         );
         queued++;
       }
@@ -272,6 +275,13 @@ class OutreachEngine {
     this.processing = true;
 
     try {
+      // Bounce rate circuit breaker
+      const bounceCheck = await this._checkBounceRate();
+      if (bounceCheck.paused) {
+        console.log('[Outreach] Bounce rate circuit breaker triggered — all campaigns paused');
+        return;
+      }
+
       // Get active campaigns
       const campaigns = await this.pool.query(
         `SELECT * FROM outreach_campaigns WHERE status = 'active'`
@@ -332,12 +342,71 @@ class OutreachEngine {
           }
         }
       }
+      // Queue follow-up emails for drip sequences
+      await this._queueFollowUps();
       // Poll Resend for delivery status of recently sent emails
       await this._pollEmailStatuses();
     } catch (error) {
       console.error('[Outreach] Queue processing error:', error.message);
     } finally {
       this.processing = false;
+    }
+  }
+
+  // =====================================================
+  // FOLLOW-UP DRIP SEQUENCE
+  // =====================================================
+
+  async _queueFollowUps() {
+    try {
+      const campaigns = await this.pool.query(
+        `SELECT * FROM outreach_campaigns WHERE status IN ('active', 'completed') AND max_sequence > 1`
+      );
+
+      let totalQueued = 0;
+      for (const campaign of campaigns.rows) {
+        const delayDays = campaign.follow_up_delay_days || 5;
+
+        const eligibleEmails = await this.pool.query(
+          `SELECT oe.* FROM outreach_emails oe
+           WHERE oe.campaign_id = $1
+             AND oe.status IN ('sent', 'delivered')
+             AND oe.sent_at < NOW() - INTERVAL '1 day' * $2
+             AND oe.sequence_number < $3
+             AND NOT EXISTS (
+               SELECT 1 FROM outreach_emails oe2
+               WHERE oe2.campaign_id = oe.campaign_id
+                 AND oe2.recipient_email = oe.recipient_email
+                 AND oe2.sequence_number = oe.sequence_number + 1
+             )
+             AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)`,
+          [campaign.id, delayDays, campaign.max_sequence]
+        );
+
+        for (const email of eligibleEmails.rows) {
+          const newToken = crypto.randomBytes(24).toString('hex');
+          await this.pool.query(
+            `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token, sequence_number)
+             VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7)`,
+            [campaign.id, email.recipient_type, email.recipient_id, email.recipient_email, email.recipient_name, newToken, email.sequence_number + 1]
+          );
+          totalQueued++;
+        }
+
+        // Re-activate completed campaigns that now have follow-ups queued
+        if (totalQueued > 0 && campaign.status === 'completed') {
+          await this.pool.query(
+            `UPDATE outreach_campaigns SET status = 'active', total_queued = total_queued + $2, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
+            [campaign.id, totalQueued]
+          );
+        }
+      }
+
+      if (totalQueued > 0) {
+        console.log(`[Outreach] Queued ${totalQueued} follow-up emails`);
+      }
+    } catch (err) {
+      console.error('[Outreach] Follow-up queue error:', err.message);
     }
   }
 
@@ -720,6 +789,18 @@ class OutreachEngine {
 
   async _renderTemplate(campaign, emailRecord, unsubToken) {
     let subject = campaign.subject_template;
+    // A/B subject line testing: use variant subject if assigned
+    if (emailRecord.variant_index > 0 && campaign.subject_variants && campaign.subject_variants[emailRecord.variant_index - 1]) {
+      subject = campaign.subject_variants[emailRecord.variant_index - 1];
+    }
+    // Follow-up subject override
+    if (emailRecord.sequence_number > 1 && campaign.follow_up_subjects && Array.isArray(campaign.follow_up_subjects)) {
+      const fuSubject = campaign.follow_up_subjects[emailRecord.sequence_number - 2];
+      if (fuSubject) subject = fuSubject;
+      else subject = `Following up: ${subject}`;
+    } else if (emailRecord.sequence_number > 1) {
+      subject = `Following up: ${subject}`;
+    }
     let body = campaign.body_template;
 
     const vars = {};
@@ -792,8 +873,8 @@ class OutreachEngine {
     // Append ref tracking token to CTA links for conversion attribution
     if (unsubToken) {
       body = body.replace(
-        /href="https:\/\/canadaaccountants\.app\/join-as-cpa\.html"/g,
-        `href="https://canadaaccountants.app/join-as-cpa.html?ref=${unsubToken}"`
+        /href="https:\/\/canadaaccountants\.app\/(join-as-cpa|claim-profile)\.html"/g,
+        `href="https://canadaaccountants.app/claim-profile.html?ref=${unsubToken}"`
       );
     }
 
@@ -1125,6 +1206,66 @@ class OutreachEngine {
   }
 
   // =====================================================
+  // BOUNCE RATE CIRCUIT BREAKER
+  // =====================================================
+
+  async _checkBounceRate() {
+    try {
+      const result = await this.pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'bounced') AS bounced,
+          COUNT(*) AS total
+        FROM outreach_emails
+        WHERE sent_at >= NOW() - INTERVAL '24 hours'
+          AND status IN ('sent','delivered','opened','clicked','bounced','complained')
+      `);
+
+      const bounced = parseInt(result.rows[0].bounced, 10);
+      const total = parseInt(result.rows[0].total, 10);
+
+      if (total < 20) {
+        return { bounceRate: total > 0 ? bounced / total : 0, paused: false, reason: 'insufficient_volume' };
+      }
+
+      const bounceRate = bounced / total;
+
+      if (bounceRate > 0.05) {
+        console.error(`[Outreach] BOUNCE RATE CIRCUIT BREAKER: ${(bounceRate * 100).toFixed(1)}% bounce rate (${bounced}/${total} in 24h) — pausing ALL active campaigns`);
+
+        // Pause all active campaigns
+        await this.pool.query(
+          `UPDATE outreach_campaigns SET status = 'paused', paused_at = NOW(), updated_at = NOW() WHERE status = 'active'`
+        );
+
+        // Send admin alert
+        const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
+        try {
+          await sendEmail({
+            to: adminEmail,
+            subject: '[CanadaAccountants] ALERT: Bounce rate circuit breaker triggered',
+            html: `<h2>Bounce Rate Circuit Breaker Triggered</h2>
+              <p><strong>Bounce rate:</strong> ${(bounceRate * 100).toFixed(1)}% (${bounced} bounced out of ${total} sent in last 24h)</p>
+              <p><strong>Threshold:</strong> 5%</p>
+              <p><strong>Action taken:</strong> All active campaigns have been automatically paused.</p>
+              <p>Please investigate the bounce reasons and resume campaigns manually once resolved.</p>
+              <p style="color:#999;font-size:12px;">This is an automated alert from the CanadaAccountants outreach engine.</p>`,
+          });
+          console.log(`[Outreach] Bounce rate alert sent to ${adminEmail}`);
+        } catch (emailErr) {
+          console.error(`[Outreach] Failed to send bounce rate alert: ${emailErr.message}`);
+        }
+
+        return { bounceRate, paused: true };
+      }
+
+      return { bounceRate, paused: false };
+    } catch (err) {
+      console.error('[Outreach] Bounce rate check error:', err.message);
+      return { bounceRate: 0, paused: false, error: err.message };
+    }
+  }
+
+  // =====================================================
   // STATS
   // =====================================================
 
@@ -1147,6 +1288,49 @@ class OutreachEngine {
         (SELECT COUNT(*) FROM scraped_smes WHERE contact_email IS NOT NULL) AS smes_with_email
     `);
     return result.rows[0];
+  }
+
+  // =====================================================
+  // A/B VARIANT STATS
+  // =====================================================
+
+  async getVariantStats(campaignId) {
+    const result = await this.pool.query(
+      `SELECT
+        COALESCE(variant_index, 0) AS variant_index,
+        COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','complained')) AS sent,
+        COUNT(*) FILTER (WHERE status IN ('delivered','opened','clicked')) AS delivered,
+        COUNT(*) FILTER (WHERE status IN ('opened','clicked')) AS opened,
+        COUNT(*) FILTER (WHERE status = 'clicked') AS clicked,
+        COUNT(*) FILTER (WHERE status = 'bounced') AS bounced
+      FROM outreach_emails
+      WHERE campaign_id = $1
+      GROUP BY COALESCE(variant_index, 0)
+      ORDER BY COALESCE(variant_index, 0)`,
+      [campaignId]
+    );
+
+    const campaign = await this.getCampaign(campaignId);
+    const variants = result.rows.map(row => {
+      const idx = parseInt(row.variant_index, 10);
+      let subjectLabel = idx === 0 ? (campaign?.subject_template || 'Original') : 'Unknown';
+      if (idx > 0 && campaign?.subject_variants && campaign.subject_variants[idx - 1]) {
+        subjectLabel = campaign.subject_variants[idx - 1];
+      }
+      return {
+        variant_index: idx,
+        subject: subjectLabel,
+        sent: parseInt(row.sent, 10),
+        delivered: parseInt(row.delivered, 10),
+        opened: parseInt(row.opened, 10),
+        clicked: parseInt(row.clicked, 10),
+        bounced: parseInt(row.bounced, 10),
+        open_rate: parseInt(row.delivered, 10) > 0 ? (parseInt(row.opened, 10) / parseInt(row.delivered, 10) * 100).toFixed(1) + '%' : '0.0%',
+        click_rate: parseInt(row.delivered, 10) > 0 ? (parseInt(row.clicked, 10) / parseInt(row.delivered, 10) * 100).toFixed(1) + '%' : '0.0%',
+      };
+    });
+
+    return variants;
   }
 }
 
@@ -1171,7 +1355,7 @@ const CPA_ACQUISITION_TEMPLATE = buildClaimEmail({
     { bold: 'Build your verified trust profile', text: 'stand out from the {{total_cpas}}+ other CPAs listed' },
   ],
   closingLine: "Claiming takes under 2 minutes. You'll verify your identity and can immediately update what business owners see when they find you.",
-  ctaUrl: 'https://canadaaccountants.app/join-as-cpa.html',
+  ctaUrl: 'https://canadaaccountants.app/claim-profile.html',
   privacyUrl: 'https://canadaaccountants.app/privacy',
   copyrightName: 'CanadaAccountants.app',
 });

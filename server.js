@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
-const { sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
+const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
@@ -533,6 +533,12 @@ outreachEngine.startQueueProcessor();
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS sequence_number INTEGER DEFAULT 1`);
+    await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS follow_up_delay_days INTEGER DEFAULT 5`);
+    await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS max_sequence INTEGER DEFAULT 1`);
+    await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS follow_up_subjects JSONB`);
+    await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS subject_variants JSONB`);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS variant_index INTEGER DEFAULT 0`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_validations (
         id SERIAL PRIMARY KEY,
@@ -1705,6 +1711,17 @@ app.post('/api/admin/outreach/campaigns/:id/test-send', async (req, res) => {
   }
 });
 
+// A/B subject variant stats
+app.get('/api/admin/outreach/campaigns/:id/variants', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const variants = await outreachEngine.getVariantStats(parseInt(req.params.id));
+    res.json({ success: true, variants });
+  } catch (error) {
+    console.error('Variant stats error:', error);
+    res.status(500).json({ error: 'Failed to get variant stats', details: error.message });
+  }
+});
+
 // Browse scraped CPAs (admin)
 app.get('/api/admin/outreach/scraped-cpas', authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -1771,6 +1788,42 @@ app.get('/api/admin/outreach/stats', async (req, res) => {
   } catch (error) {
     console.error('Outreach stats error:', error);
     res.status(500).json({ error: 'Failed to get outreach stats', details: error.message });
+  }
+});
+
+// Outreach quality — bounce/complaint rates for 24h, 7d, 30d
+app.get('/api/admin/outreach/quality', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const windows = ['24 hours', '7 days', '30 days'];
+    const labels = ['24h', '7d', '30d'];
+    const quality = {};
+
+    for (let i = 0; i < windows.length; i++) {
+      const result = await pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'bounced') AS bounced,
+          COUNT(*) FILTER (WHERE status = 'complained') AS complained,
+          COUNT(*) AS total
+        FROM outreach_emails
+        WHERE sent_at >= NOW() - INTERVAL '${windows[i]}'
+          AND status IN ('sent','delivered','opened','clicked','bounced','complained')
+      `);
+      const row = result.rows[0];
+      const total = parseInt(row.total, 10);
+      const bounced = parseInt(row.bounced, 10);
+      const complained = parseInt(row.complained, 10);
+      quality[labels[i]] = {
+        total,
+        bounced,
+        complained,
+        bounce_rate: total > 0 ? (bounced / total * 100).toFixed(2) + '%' : '0.00%',
+        complaint_rate: total > 0 ? (complained / total * 100).toFixed(2) + '%' : '0.00%',
+      };
+    }
+
+    res.json({ success: true, quality, threshold: '5% bounce rate triggers auto-pause' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get quality metrics', details: error.message });
   }
 });
 
@@ -2152,6 +2205,142 @@ app.post('/api/stripe/create-portal-session', authenticateToken, async (req, res
     res.json({ success: true, url: session.url });
   } catch (error) {
     res.status(500).json({ error: 'Failed to create portal session', details: error.message });
+  }
+});
+
+// =====================================================
+// CLAIM PROFILE ENDPOINTS (free claim flow)
+// =====================================================
+
+// GET /api/claim/profile/:refToken — look up scraped profile by outreach unsubscribe_token
+app.get('/api/claim/profile/:refToken', async (req, res) => {
+  try {
+    const { refToken } = req.params;
+
+    // Look up outreach email by unsubscribe_token
+    const outreach = await pool.query(
+      `SELECT id, recipient_id, recipient_type, recipient_email FROM outreach_emails WHERE unsubscribe_token = $1`,
+      [refToken]
+    );
+    if (outreach.rows.length === 0) return res.status(404).json({ error: 'Token not found' });
+
+    const { recipient_id, recipient_email } = outreach.rows[0];
+
+    // Fetch scraped CPA profile
+    const profile = await pool.query(
+      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email FROM scraped_cpas WHERE id = $1`,
+      [recipient_id]
+    );
+    if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const p = profile.rows[0];
+    const rawEmail = p.enriched_email || p.email || recipient_email || '';
+    const maskedEmail = rawEmail
+      ? rawEmail.replace(/^(.)(.*)(@.*)$/, (m, first, middle, domain) => first + '*'.repeat(Math.min(middle.length, 5)) + domain)
+      : '';
+
+    res.json({
+      name: p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim(),
+      firstName: p.first_name,
+      lastName: p.last_name,
+      firmName: p.firm_name,
+      city: p.city,
+      province: p.province,
+      credentials: p.designation,
+      email: maskedEmail
+    });
+  } catch (error) {
+    console.error('[Claim Profile] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// POST /api/claim/instant — instant free claim: create account + claim profile
+app.post('/api/claim/instant', async (req, res) => {
+  try {
+    const { refToken, email } = req.body;
+    if (!refToken || !email) return res.status(400).json({ error: 'refToken and email are required' });
+
+    // Validate refToken
+    const outreach = await pool.query(
+      `SELECT id, recipient_id, recipient_type, recipient_email FROM outreach_emails WHERE unsubscribe_token = $1`,
+      [refToken]
+    );
+    if (outreach.rows.length === 0) return res.status(404).json({ error: 'Invalid token' });
+
+    const { recipient_id } = outreach.rows[0];
+
+    // Fetch scraped profile
+    const profile = await pool.query(
+      `SELECT id, first_name, last_name, full_name, firm_name, email, enriched_email, claim_status FROM scraped_cpas WHERE id = $1`,
+      [recipient_id]
+    );
+    if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+    if (profile.rows[0].claim_status === 'claimed') return res.status(409).json({ error: 'Profile already claimed' });
+
+    // Check if user already exists
+    const existingUser = await pool.query(`SELECT id FROM users WHERE email = $1`, [email]);
+    let userId;
+    let tempPassword;
+
+    if (existingUser.rows.length > 0) {
+      userId = existingUser.rows[0].id;
+      tempPassword = null; // existing user, no new password
+    } else {
+      // Create new user account
+      tempPassword = crypto.randomBytes(8).toString('hex');
+      const passwordHash = await bcrypt.hash(tempPassword, 10);
+      const newUser = await pool.query(
+        `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA') RETURNING id`,
+        [email, passwordHash]
+      );
+      userId = newUser.rows[0].id;
+    }
+
+    // Mark profile as claimed
+    await pool.query(
+      `UPDATE scraped_cpas SET claim_status = 'claimed', claimed_by = $1 WHERE id = $2`,
+      [userId, recipient_id]
+    );
+
+    // Track conversion
+    outreachEngine.trackConversion(email, userId, refToken).catch(err => {
+      console.error('[Claim] trackConversion error:', err.message);
+    });
+
+    // Generate JWT
+    const token = jwt.sign(
+      { userId, email, userType: 'CPA' },
+      process.env.JWT_SECRET || 'your_jwt_secret_key',
+      { expiresIn: '30d' }
+    );
+
+    // Send welcome email with credentials
+    if (tempPassword) {
+      const loginUrl = `${FRONTEND_URL}/cpa-login`;
+      sendEmail({
+        to: email,
+        subject: 'Welcome to CanadaAccountants — Your Profile is Live!',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #1e3a8a;">Your CanadaAccountants Profile Has Been Claimed</h2>
+            <p>Hello ${profile.rows[0].first_name || 'there'},</p>
+            <p>Your professional profile on <strong>CanadaAccountants.app</strong> has been successfully claimed. Here are your login credentials:</p>
+            <div style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0;">
+              <p style="margin: 5px 0;"><strong>Email:</strong> ${email}</p>
+              <p style="margin: 5px 0;"><strong>Temporary Password:</strong> ${tempPassword}</p>
+            </div>
+            <p>Please <a href="${loginUrl}" style="color: #2563eb;">log in here</a> and change your password at your earliest convenience.</p>
+            <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">If you did not request this, please contact us at support@canadaaccountants.app</p>
+          </div>
+        `
+      }).catch(err => console.error('[Claim] Welcome email error:', err.message));
+    }
+
+    res.json({ success: true, token, userId, tempPassword });
+  } catch (error) {
+    console.error('[Claim Instant] Error:', error.message);
+    res.status(500).json({ error: 'Failed to process instant claim' });
   }
 });
 
