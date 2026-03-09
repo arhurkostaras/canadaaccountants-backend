@@ -165,10 +165,11 @@ class OutreachEngine {
         }
 
         const name = cpa.full_name || `${cpa.first_name || ''} ${cpa.last_name || ''}`.trim();
+        const unsubToken = crypto.randomBytes(24).toString('hex');
         await this.pool.query(
-          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status)
-           VALUES ($1, 'cpa', $2, $3, $4, 'queued')`,
-          [campaign.id, cpa.id, cpa.email, name]
+          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token)
+           VALUES ($1, 'cpa', $2, $3, $4, 'queued', $5)`,
+          [campaign.id, cpa.id, cpa.email, name, unsubToken]
         );
         queued++;
       }
@@ -217,10 +218,11 @@ class OutreachEngine {
           continue;
         }
 
+        const unsubToken = crypto.randomBytes(24).toString('hex');
         await this.pool.query(
-          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status)
-           VALUES ($1, 'sme', $2, $3, $4, 'queued')`,
-          [campaign.id, sme.id, sme.email, sme.contact_name || sme.business_name]
+          `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token)
+           VALUES ($1, 'sme', $2, $3, $4, 'queued', $5)`,
+          [campaign.id, sme.id, sme.email, sme.contact_name || sme.business_name, unsubToken]
         );
         queued++;
       }
@@ -520,8 +522,8 @@ class OutreachEngine {
         return;
       }
 
-      // Generate unsubscribe token before rendering (template has {{unsubscribe_url}} in footer)
-      const unsubToken = crypto.randomBytes(24).toString('hex');
+      // Use existing unsubscribe token from queue time, or generate one for backward compatibility
+      const unsubToken = emailRecord.unsubscribe_token || crypto.randomBytes(24).toString('hex');
 
       // Render template (unsubscribe_url is injected as a template variable)
       const { subject, body } = await this._renderTemplate(campaign, emailRecord, unsubToken);
@@ -787,6 +789,14 @@ class OutreachEngine {
     subject = subject.replace(/\{\{platform_url\}\}/g, FRONTEND_URL);
     body = body.replace(/\{\{current_year\}\}/g, new Date().getFullYear().toString());
 
+    // Append ref tracking token to CTA links for conversion attribution
+    if (unsubToken) {
+      body = body.replace(
+        /href="https:\/\/canadaaccountants\.app\/join-as-cpa\.html"/g,
+        `href="https://canadaaccountants.app/join-as-cpa.html?ref=${unsubToken}"`
+      );
+    }
+
     // Safety net: strip any unreplaced {{variables}} so raw code never shows in emails
     subject = subject.replace(/\{\{[a-z_]+\}\}/g, '');
     body = body.replace(/\{\{[a-z_]+\}\}/g, '');
@@ -953,8 +963,32 @@ class OutreachEngine {
   // CONVERSION TRACKING
   // =====================================================
 
-  async trackConversion(email, userId) {
-    // Check if this email matches any outreach records
+  async trackConversion(email, userId, refToken = null) {
+    // First try: lookup by ref token (most precise — links to exact outreach email)
+    if (refToken) {
+      const refResult = await this.pool.query(
+        `SELECT oe.id, oe.campaign_id FROM outreach_emails oe
+         WHERE oe.unsubscribe_token = $1 AND oe.converted = false
+         ORDER BY oe.sent_at DESC LIMIT 1`,
+        [refToken]
+      );
+
+      if (refResult.rows.length > 0) {
+        const outreachEmail = refResult.rows[0];
+        await this.pool.query(
+          `UPDATE outreach_emails SET converted = true, converted_at = NOW(), converted_user_id = $2 WHERE id = $1`,
+          [outreachEmail.id, userId]
+        );
+        await this.pool.query(
+          `UPDATE outreach_campaigns SET total_converted = total_converted + 1, updated_at = NOW() WHERE id = $1`,
+          [outreachEmail.campaign_id]
+        );
+        console.log(`[Outreach] Conversion tracked via ref token: ${email} -> user ${userId} (campaign ${outreachEmail.campaign_id})`);
+        return true;
+      }
+    }
+
+    // Fallback: lookup by email address
     const result = await this.pool.query(
       `SELECT oe.id, oe.campaign_id FROM outreach_emails oe
        WHERE oe.recipient_email = $1 AND oe.converted = false
@@ -964,18 +998,15 @@ class OutreachEngine {
 
     if (result.rows.length > 0) {
       const outreachEmail = result.rows[0];
-
       await this.pool.query(
         `UPDATE outreach_emails SET converted = true, converted_at = NOW(), converted_user_id = $2 WHERE id = $1`,
         [outreachEmail.id, userId]
       );
-
       await this.pool.query(
         `UPDATE outreach_campaigns SET total_converted = total_converted + 1, updated_at = NOW() WHERE id = $1`,
         [outreachEmail.campaign_id]
       );
-
-      console.log(`[Outreach] Conversion tracked: ${email} -> user ${userId} (campaign ${outreachEmail.campaign_id})`);
+      console.log(`[Outreach] Conversion tracked via email: ${email} -> user ${userId} (campaign ${outreachEmail.campaign_id})`);
       return true;
     }
 

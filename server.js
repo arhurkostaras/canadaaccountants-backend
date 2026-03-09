@@ -503,7 +503,7 @@ RETURNING *;
 
     // Track outreach conversion (async, non-blocking)
     if (registrationData.email) {
-      outreachEngine.trackConversion(registrationData.email, result.rows[0]?.id).catch(err => {
+      outreachEngine.trackConversion(registrationData.email, result.rows[0]?.id, registrationData.ref).catch(err => {
         console.error('Outreach conversion tracking error (non-fatal):', err.message);
       });
     }
