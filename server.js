@@ -681,17 +681,16 @@ const crmIntelligence = new CRMIntelligence({
     console.error('[CRM] Migration error:', err.message);
   }
 
-  // Seed core sequences (idempotent — skips if they already exist)
+  // Seed core sequences (creates new or updates existing with new steps)
   try {
     const existing = await sequenceEngine.getSequences();
-    const names = existing.map(s => s.name);
+    const seqMap = {};
+    for (const s of existing) {
+      const steps = typeof s.steps === 'string' ? JSON.parse(s.steps) : s.steps;
+      seqMap[s.name] = { id: s.id, stepCount: steps.length };
+    }
 
-    if (!names.includes('Engaged No-Claim')) {
-      await sequenceEngine.createSequence({
-        name: 'Engaged No-Claim',
-        description: 'High-conversion sequence for CPAs who opened/clicked emails but haven\'t claimed their profile yet.',
-        triggerStatus: 'engaged',
-        steps: [
+    const engagedSteps = [
           {
             delay_days: 0,
             subject_line: '{{first_name}}, your CanadaAccountants profile is getting attention',
@@ -727,18 +726,22 @@ const crmIntelligence = new CRMIntelligence({
 <p>If not, no worries — we won't email you about this again.</p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
           }
-        ],
+    ];
+    if (!seqMap['Engaged No-Claim']) {
+      await sequenceEngine.createSequence({
+        name: 'Engaged No-Claim',
+        description: 'High-conversion sequence for CPAs who opened/clicked emails but haven\'t claimed their profile yet.',
+        triggerStatus: 'engaged',
+        steps: engagedSteps,
         active: true
       });
       console.log('[CRM] Seeded sequence: Engaged No-Claim');
+    } else if (seqMap['Engaged No-Claim'].stepCount < engagedSteps.length) {
+      await sequenceEngine.updateSequence(seqMap['Engaged No-Claim'].id, { steps: engagedSteps });
+      console.log('[CRM] Updated sequence: Engaged No-Claim (' + seqMap['Engaged No-Claim'].stepCount + ' → ' + engagedSteps.length + ' steps)');
     }
 
-    if (!names.includes('Initial Outreach')) {
-      await sequenceEngine.createSequence({
-        name: 'Initial Outreach',
-        description: 'First-contact sequence for newly validated CPAs. Introduces the platform and invites them to claim their profile.',
-        triggerStatus: 'validated',
-        steps: [
+    const outreachSteps = [
           {
             delay_days: 0,
             subject_line: '{{first_name}}, your accountant profile is live on CanadaAccountants',
@@ -798,18 +801,22 @@ const crmIntelligence = new CRMIntelligence({
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
             send_condition: 'only_if_not_claimed'
           }
-        ],
+    ];
+    if (!seqMap['Initial Outreach']) {
+      await sequenceEngine.createSequence({
+        name: 'Initial Outreach',
+        description: 'First-contact sequence for newly validated CPAs. Introduces the platform and invites them to claim their profile.',
+        triggerStatus: 'validated',
+        steps: outreachSteps,
         active: true
       });
       console.log('[CRM] Seeded sequence: Initial Outreach');
+    } else if (seqMap['Initial Outreach'].stepCount < outreachSteps.length) {
+      await sequenceEngine.updateSequence(seqMap['Initial Outreach'].id, { steps: outreachSteps });
+      console.log('[CRM] Updated sequence: Initial Outreach (' + seqMap['Initial Outreach'].stepCount + ' → ' + outreachSteps.length + ' steps)');
     }
 
-    if (!names.includes('Post-Claim Welcome')) {
-      await sequenceEngine.createSequence({
-        name: 'Post-Claim Welcome',
-        description: 'Onboarding sequence for CPAs who just claimed their profile. Guides them to complete their listing and upgrade.',
-        triggerStatus: 'claimed',
-        steps: [
+    const welcomeSteps = [
           {
             delay_days: 0,
             subject_line: 'Welcome to CanadaAccountants, {{first_name}}!',
@@ -839,10 +846,19 @@ const crmIntelligence = new CRMIntelligence({
 <p><a href="{{platform_url}}/pricing" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">View Membership Options</a></p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
           }
-        ],
+    ];
+    if (!seqMap['Post-Claim Welcome']) {
+      await sequenceEngine.createSequence({
+        name: 'Post-Claim Welcome',
+        description: 'Onboarding sequence for CPAs who just claimed their profile. Guides them to complete their listing and upgrade.',
+        triggerStatus: 'claimed',
+        steps: welcomeSteps,
         active: true
       });
       console.log('[CRM] Seeded sequence: Post-Claim Welcome');
+    } else if (seqMap['Post-Claim Welcome'].stepCount < welcomeSteps.length) {
+      await sequenceEngine.updateSequence(seqMap['Post-Claim Welcome'].id, { steps: welcomeSteps });
+      console.log('[CRM] Updated sequence: Post-Claim Welcome (' + seqMap['Post-Claim Welcome'].stepCount + ' → ' + welcomeSteps.length + ' steps)');
     }
   } catch (err) {
     console.error('[CRM] Sequence seeding error:', err.message);
