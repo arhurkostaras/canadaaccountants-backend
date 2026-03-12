@@ -7,6 +7,7 @@ const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
 const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
+const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 
@@ -15,6 +16,12 @@ const STRIPE_PRICES = {
   associate: process.env.STRIPE_PRICE_ASSOCIATE || '',
   professional: process.env.STRIPE_PRICE_PROFESSIONAL || '',
   enterprise: process.env.STRIPE_PRICE_ENTERPRISE || '',
+  associate_monthly: process.env.STRIPE_PRICE_ASSOCIATE || '',
+  professional_monthly: process.env.STRIPE_PRICE_PROFESSIONAL || '',
+  enterprise_monthly: process.env.STRIPE_PRICE_ENTERPRISE || '',
+  associate_yearly: process.env.STRIPE_PRICE_ASSOCIATE_YEARLY || '',
+  professional_yearly: process.env.STRIPE_PRICE_PROFESSIONAL_YEARLY || '',
+  enterprise_yearly: process.env.STRIPE_PRICE_ENTERPRISE_YEARLY || '',
 };
 
 // Initialize Sentry before anything else
@@ -527,9 +534,83 @@ const pool = new Pool({
 const outreachEngine = new OutreachEngine(pool);
 outreachEngine.startQueueProcessor();
 
-// Auto-migrate: add missing columns for outreach improvements
+// Initialize CRM
+const crm = new CRMService({ db: pool, professionalsTable: 'scraped_cpas', platform: 'accountants' });
+
+const OUTREACH_FROM = 'Arthur Kostaras <connect@canadaaccountants.app>';
+const sequenceEngine = new SequenceEngine({
+  db: pool, professionalsTable: 'scraped_cpas', platform: 'accountants',
+  sendEmail: (opts) => sendEmail({ ...opts, from: OUTREACH_FROM }),
+  renderTemplate: (template, vars) => {
+    let s = template;
+    for (const [k, v] of Object.entries(vars)) s = s.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), v || '');
+    return s;
+  }
+});
+
+const crmIntelligence = new CRMIntelligence({
+  db: pool, professionalsTable: 'scraped_cpas', platform: 'accountants', sendAlert: sendEmail
+});
+
+// Auto-migrate: create outreach tables + add missing columns
 (async () => {
   try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS outreach_campaigns (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        type VARCHAR(50),
+        subject_template TEXT,
+        body_template TEXT,
+        target_provinces TEXT[],
+        target_cities TEXT[],
+        daily_limit INTEGER DEFAULT 50,
+        total_limit INTEGER DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'paused',
+        total_queued INTEGER DEFAULT 0,
+        total_sent INTEGER DEFAULT 0,
+        total_delivered INTEGER DEFAULT 0,
+        total_opened INTEGER DEFAULT 0,
+        total_clicked INTEGER DEFAULT 0,
+        total_bounced INTEGER DEFAULT 0,
+        total_complained INTEGER DEFAULT 0,
+        total_unsubscribed INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS outreach_emails (
+        id SERIAL PRIMARY KEY,
+        campaign_id INTEGER NOT NULL,
+        recipient_type VARCHAR(20) NOT NULL,
+        recipient_id INTEGER NOT NULL,
+        recipient_email VARCHAR(255) NOT NULL,
+        recipient_name VARCHAR(500),
+        resend_email_id VARCHAR(255),
+        status VARCHAR(20) DEFAULT 'queued',
+        rendered_subject TEXT,
+        rendered_body TEXT,
+        converted BOOLEAN DEFAULT FALSE,
+        converted_at TIMESTAMP,
+        retry_count INTEGER DEFAULT 0,
+        unsubscribe_token TEXT,
+        queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sent_at TIMESTAMP,
+        delivered_at TIMESTAMP,
+        opened_at TIMESTAMP,
+        clicked_at TIMESTAMP,
+        bounced_at TIMESTAMP,
+        complained_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS outreach_unsubscribes (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        unsubscribe_token VARCHAR(255),
+        reason TEXT,
+        unsubscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
@@ -581,9 +662,190 @@ outreachEngine.startQueueProcessor();
       ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claim_token VARCHAR(100);
       ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claim_requested_at TIMESTAMP;
     `);
-    console.log('[Migration] Referral + claim columns verified');
+    // CASL compliance: consent basis tracking and first contact timestamp
+    await pool.query(`
+      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS consent_basis VARCHAR(50) DEFAULT 'professional_directory';
+      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS first_contacted_at TIMESTAMP;
+    `);
+    console.log('[Migration] Referral + claim + CASL columns verified');
+
   } catch (err) {
     console.error('[Migration] Referral/claim migration error (non-fatal):', err.message);
+  }
+
+  try {
+    await crm.migrate();
+    await crm.backfill();
+    await crmIntelligence.migrate();
+  } catch (err) {
+    console.error('[CRM] Migration error:', err.message);
+  }
+
+  // Seed core sequences (idempotent — skips if they already exist)
+  try {
+    const existing = await sequenceEngine.getSequences();
+    const names = existing.map(s => s.name);
+
+    if (!names.includes('Engaged No-Claim')) {
+      await sequenceEngine.createSequence({
+        name: 'Engaged No-Claim',
+        description: 'High-conversion sequence for CPAs who opened/clicked emails but haven\'t claimed their profile yet.',
+        triggerStatus: 'engaged',
+        steps: [
+          {
+            delay_days: 0,
+            subject_line: '{{first_name}}, your CanadaAccountants profile is getting attention',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>We noticed you checked out your profile on <strong>CanadaAccountants</strong> — and you're not alone. Prospective clients in {{city}} are actively searching for accountants like you.</p>
+<p>Right now, your listing shows basic directory info. Claiming your profile lets you:</p>
+<ul>
+<li><strong>Control your narrative</strong> — add specialties, credentials, and a personal bio</li>
+<li><strong>Appear in priority search results</strong> — claimed profiles rank higher</li>
+<li><strong>Receive warm leads</strong> — clients can contact you directly through the platform</li>
+</ul>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p style="color:#888;font-size:13px;">Takes under 2 minutes.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 3,
+            subject_line: 'Quick question, {{first_name}}',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>I noticed you opened our last email but haven't claimed your profile yet on CanadaAccountants.</p>
+<p>Is there something holding you back? Many accountants tell us they weren't sure what "claiming" means — it simply means verifying you're the real {{first_name}} {{last_name}} so clients know your profile is authentic.</p>
+<p>No cost, no obligation. You can update or remove it anytime.</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 7,
+            subject_line: 'Last call: your profile on CanadaAccountants',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>This is our final reminder. Your unclaimed profile on CanadaAccountants will remain as-is — basic directory info only.</p>
+<p>Accountants who've claimed their profiles see <strong>3x more client inquiries</strong> on average. If you'd like that visibility, claim yours today:</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p>If not, no worries — we won't email you about this again.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          }
+        ],
+        active: true
+      });
+      console.log('[CRM] Seeded sequence: Engaged No-Claim');
+    }
+
+    if (!names.includes('Initial Outreach')) {
+      await sequenceEngine.createSequence({
+        name: 'Initial Outreach',
+        description: 'First-contact sequence for newly validated CPAs. Introduces the platform and invites them to claim their profile.',
+        triggerStatus: 'validated',
+        steps: [
+          {
+            delay_days: 0,
+            subject_line: '{{first_name}}, your accountant profile is live on CanadaAccountants',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>Your professional profile is now listed on <strong>CanadaAccountants</strong> — Canada's new platform connecting businesses with qualified accountants and CPAs.</p>
+<p>We pulled your details from public CPA directory records. Here's what claiming your profile gets you:</p>
+<ul>
+<li><strong>Verified badge</strong> — builds instant trust with prospective clients</li>
+<li><strong>Full profile control</strong> — add your photo, bio, specialties, and designations</li>
+<li><strong>Client inquiries</strong> — receive contact requests directly through the platform</li>
+</ul>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p style="color:#888;font-size:13px;">If you don't wish to claim, no action needed — your basic listing remains as-is.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 5,
+            subject_line: 'Businesses in {{city}} are searching — is your profile ready?',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>We wanted to follow up — your profile on CanadaAccountants is live but unclaimed.</p>
+<p>Claimed profiles appear higher in search results and include a verified badge that prospective clients look for when choosing an accountant.</p>
+<p>It takes less than 2 minutes:</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
+            send_condition: 'only_if_not_claimed'
+          },
+          {
+            delay_days: 12,
+            subject_line: '{{total_professionals}}+ CPAs are already listed on CanadaAccountants',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>Over <strong>{{total_professionals}} accountants and CPAs</strong> across Canada are already listed on CanadaAccountants — and many have claimed their profiles to stand out to prospective clients.</p>
+<p>Your {{city}} listing is still unclaimed. Verified accountants get priority placement in local search results and a trust badge that businesses look for.</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p style="color:#888;font-size:13px;">No cost. Takes under 2 minutes.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
+            send_condition: 'only_if_not_claimed'
+          },
+          {
+            delay_days: 19,
+            subject_line: 'Your {{city}} listing is still unclaimed',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>Businesses searching for accountants in {{city}} can see your profile on CanadaAccountants — but it's still unclaimed.</p>
+<p>Unclaimed profiles show only basic directory data. When you claim yours, you control what clients see: your bio, specialties, designations, and a verified badge.</p>
+<p>It's free and takes under 2 minutes:</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
+            send_condition: 'only_if_not_claimed'
+          },
+          {
+            delay_days: 28,
+            subject_line: 'Last note about your CanadaAccountants profile',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>This is our last email about your unclaimed profile on CanadaAccountants.</p>
+<p>If you'd like to claim it and get verified, the link below will always work. If not, no worries — your basic listing stays as-is and we won't email you about this again.</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p>All the best,<br>The CanadaAccountants Team</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
+            send_condition: 'only_if_not_claimed'
+          }
+        ],
+        active: true
+      });
+      console.log('[CRM] Seeded sequence: Initial Outreach');
+    }
+
+    if (!names.includes('Post-Claim Welcome')) {
+      await sequenceEngine.createSequence({
+        name: 'Post-Claim Welcome',
+        description: 'Onboarding sequence for CPAs who just claimed their profile. Guides them to complete their listing and upgrade.',
+        triggerStatus: 'claimed',
+        steps: [
+          {
+            delay_days: 0,
+            subject_line: 'Welcome to CanadaAccountants, {{first_name}}!',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>Congratulations — your profile on <strong>CanadaAccountants</strong> is now verified and live!</p>
+<p>Here are 3 things you can do right now to start attracting clients:</p>
+<ol>
+<li><strong>Complete your bio</strong> — accountants with a full bio get 2x more views</li>
+<li><strong>Add your specialties</strong> — help the right clients find you</li>
+<li><strong>Upload a professional photo</strong> — profiles with photos get 40% more engagement</li>
+</ol>
+<p><a href="{{platform_url}}/dashboard" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Go to Your Dashboard</a></p>
+<p>Questions? Just reply to this email.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 3,
+            subject_line: 'Maximize your visibility on CanadaAccountants',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>Now that your profile is claimed, here's how top accountants on CanadaAccountants stand out:</p>
+<ul>
+<li><strong>Professional members</strong> appear at the top of search results in their city</li>
+<li><strong>Featured profiles</strong> get a highlighted card that catches the eye</li>
+<li><strong>Priority placement</strong> means more client inquiries, faster</li>
+</ul>
+<p>See what a Professional membership can do for your practice:</p>
+<p><a href="{{platform_url}}/pricing" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">View Membership Options</a></p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          }
+        ],
+        active: true
+      });
+      console.log('[CRM] Seeded sequence: Post-Claim Welcome');
+    }
+  } catch (err) {
+    console.error('[CRM] Sequence seeding error:', err.message);
   }
 })();
 
@@ -1828,6 +2090,41 @@ app.get('/api/admin/outreach/quality', authenticateToken, requireAdmin, async (r
 });
 
 // ZeroBounce validation stats
+app.get('/api/admin/validation-analysis', async (req, res) => {
+  try {
+    const byEnrichmentSource = await pool.query(`
+      SELECT l.enrichment_source,
+        ev.status as zb_status,
+        COUNT(*) as count
+      FROM email_validations ev
+      JOIN scraped_cpas l ON COALESCE(l.enriched_email, l.email) = ev.email
+      GROUP BY l.enrichment_source, ev.status
+      ORDER BY l.enrichment_source, count DESC
+    `);
+    const byProvince = await pool.query(`
+      SELECT l.province,
+        ev.status as zb_status,
+        COUNT(*) as count
+      FROM email_validations ev
+      JOIN scraped_cpas l ON COALESCE(l.enriched_email, l.email) = ev.email
+      GROUP BY l.province, ev.status
+      ORDER BY l.province, count DESC
+    `);
+    const bySource = await pool.query(`
+      SELECT l.source,
+        ev.status as zb_status,
+        COUNT(*) as count
+      FROM email_validations ev
+      JOIN scraped_cpas l ON COALESCE(l.enriched_email, l.email) = ev.email
+      GROUP BY l.source, ev.status
+      ORDER BY l.source, count DESC
+    `);
+    res.json({ success: true, byEnrichmentSource: byEnrichmentSource.rows, byProvince: byProvince.rows, byScraperSource: bySource.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/admin/validation-stats', async (req, res) => {
   try {
     const result = await pool.query(
@@ -1840,6 +2137,122 @@ app.get('/api/admin/validation-stats', async (req, res) => {
   }
 });
 
+// Clicked professionals — who clicked but didn't claim
+app.get('/api/admin/clicked-no-claim', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT DISTINCT oe.recipient_email, oe.recipient_name, oe.clicked_at, oe.unsubscribe_token,
+             sc.first_name, sc.last_name, sc.firm_name, sc.city, sc.province, sc.designation, sc.claim_status
+      FROM outreach_emails oe
+      LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+      WHERE oe.clicked_at IS NOT NULL
+        AND (sc.claim_status IS NULL OR sc.claim_status != 'claimed')
+      ORDER BY oe.clicked_at DESC
+    `);
+    res.json({ success: true, count: result.rows.length, professionals: result.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Tag clicked SMEs as client prospects
+app.post('/api/admin/tag-sme-prospects', async (req, res) => {
+  try {
+    // Add crm_tag column if it doesn't exist
+    await pool.query(`ALTER TABLE scraped_smes ADD COLUMN IF NOT EXISTS crm_tag VARCHAR(50)`).catch(() => {});
+
+    // Find SMEs who clicked outreach emails
+    const result = await pool.query(`
+      SELECT DISTINCT oe.recipient_email, oe.recipient_name, oe.recipient_id
+      FROM outreach_emails oe
+      WHERE oe.clicked_at IS NOT NULL AND oe.recipient_type = 'sme'
+    `);
+
+    let tagged = 0;
+    for (const r of result.rows) {
+      try {
+        await pool.query(
+          `UPDATE scraped_smes SET crm_tag = 'sme_client_prospect' WHERE id = $1 OR email = $2`,
+          [r.recipient_id, r.recipient_email]
+        );
+        tagged++;
+      } catch (e) { /* skip */ }
+    }
+
+    res.json({ success: true, tagged, total_clicked: result.rows.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ZeroBounce bulk purge — validates all enriched CPAs without cached validation
+app.post('/api/admin/zerobounce-purge', async (req, res) => {
+  const limit = parseInt(req.query.limit) || 500;
+  const apiKey = process.env.ZEROBOUNCE_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: 'ZEROBOUNCE_API_KEY not configured' });
+
+  res.json({ success: true, message: `ZeroBounce purge started (limit: ${limit})` });
+
+  try {
+    const unvalidated = await pool.query(
+      `SELECT l.id, COALESCE(l.enriched_email, l.email) as email, l.crm_status
+       FROM scraped_cpas l
+       WHERE COALESCE(l.enriched_email, l.email) IS NOT NULL
+         AND COALESCE(l.enriched_email, l.email) != ''
+         AND NOT EXISTS (
+           SELECT 1 FROM email_validations ev
+           WHERE ev.email = COALESCE(l.enriched_email, l.email)
+             AND ev.validated_at > NOW() - INTERVAL '30 days'
+         )
+         AND (l.crm_status IN ('enriched', 'raw_import') OR l.crm_status IS NULL)
+       ORDER BY
+         CASE WHEN l.crm_status = 'enriched' THEN 0 ELSE 1 END,
+         l.scraped_at ASC
+       LIMIT $1`,
+      [limit]
+    );
+
+    console.log(`[ZB-Purge] Starting purge of ${unvalidated.rows.length} unvalidated CPAs...`);
+    let validated = 0, invalid = 0, errors = 0;
+
+    for (const row of unvalidated.rows) {
+      try {
+        const result = await outreachEngine._validateEmail(row.email);
+        validated++;
+
+        if (result.valid && row.crm_status === 'enriched') {
+          try {
+            await crm.transition(row.id, 'validated', {
+              triggeredBy: 'zerobounce_purge',
+              metadata: { zb_status: result.status, zb_sub_status: result.sub_status }
+            });
+          } catch (e) { /* transition may not be valid from current state */ }
+        } else if (!result.valid) {
+          invalid++;
+          try {
+            await crm.transition(row.id, 'invalid', {
+              triggeredBy: 'zerobounce_purge',
+              metadata: { zb_status: result.status, zb_sub_status: result.sub_status }
+            });
+          } catch (e) { /* transition may not be valid from current state */ }
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+        if (validated % 50 === 0) {
+          console.log(`[ZB-Purge] Progress: ${validated}/${unvalidated.rows.length} validated, ${invalid} invalid`);
+        }
+      } catch (err) {
+        errors++;
+        console.error(`[ZB-Purge] Error validating ${row.email}: ${err.message}`);
+      }
+    }
+
+    console.log(`[ZB-Purge] Complete: ${validated} validated, ${invalid} invalid, ${errors} errors`);
+  } catch (err) {
+    console.error('[ZB-Purge] Fatal error:', err.message);
+  }
+});
+
 // =====================================================
 // PUBLIC OUTREACH ENDPOINTS
 // =====================================================
@@ -1848,6 +2261,34 @@ app.get('/api/admin/validation-stats', async (req, res) => {
 app.post('/api/webhooks/resend', express.json(), async (req, res) => {
   try {
     await outreachEngine.handleResendWebhook(req.body);
+
+    // Wire Resend events into CRM pipeline transitions
+    const { type, data } = req.body || {};
+    if (data?.email_id && (type === 'email.opened' || type === 'email.clicked')) {
+      try {
+        const recipientRow = await pool.query(
+          `SELECT recipient_email FROM outreach_emails WHERE resend_email_id = $1 LIMIT 1`,
+          [data.email_id]
+        );
+        const recipientEmail = recipientRow.rows[0]?.recipient_email;
+        if (recipientEmail) {
+          const prof = await pool.query(
+            `SELECT id, crm_status FROM scraped_cpas WHERE enriched_email = $1 OR email = $1 LIMIT 1`,
+            [recipientEmail]
+          );
+          if (prof.rows.length > 0 && ['contacted', 'validated', 'enriched'].includes(prof.rows[0].crm_status)) {
+            await crm.transition(prof.rows[0].id, 'engaged', {
+              triggeredBy: 'resend_webhook',
+              metadata: { event: type, email_id: data.email_id }
+            });
+            console.log(`[CRM] ${type} → engaged transition for cpa ${prof.rows[0].id} (${recipientEmail})`);
+          }
+        }
+      } catch (crmErr) {
+        console.error('[CRM] Webhook transition error:', crmErr.message);
+      }
+    }
+
     res.json({ received: true });
   } catch (error) {
     console.error('Resend webhook error:', error);
@@ -2153,23 +2594,37 @@ app.get('/api/admin/claims/pending', authenticateToken, requireAdmin, async (req
 // STRIPE SUBSCRIPTION ROUTES
 // =====================================================
 
-app.post('/api/stripe/create-checkout-session', authenticateToken, async (req, res) => {
+app.post('/api/stripe/create-checkout-session', async (req, res) => {
   try {
-    const { planType } = req.body;
-    const priceId = STRIPE_PRICES[planType];
-    if (!priceId) return res.status(400).json({ error: 'Invalid plan type' });
+    const { priceId: frontendPriceId, planType, email, profileId, tier, interval } = req.body;
+    const lookupKey = frontendPriceId || planType || tier;
+    const stripePriceId = STRIPE_PRICES[lookupKey];
+    if (!stripePriceId) return res.status(400).json({ error: `Invalid plan: ${lookupKey}` });
 
-    const profileResult = await pool.query('SELECT id FROM cpa_profiles WHERE user_id = $1', [req.user.userId]);
-    if (profileResult.rows.length === 0) return res.status(404).json({ error: 'CPA profile not found' });
+    let customerEmail = email;
+    let cpaProfileId = profileId;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      try {
+        const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET || 'your_jwt_secret_key');
+        customerEmail = customerEmail || decoded.email;
+        if (!cpaProfileId) {
+          const profileResult = await pool.query('SELECT id FROM cpa_profiles WHERE user_id = $1', [decoded.userId]);
+          if (profileResult.rows.length > 0) cpaProfileId = profileResult.rows[0].id.toString();
+        }
+      } catch (e) { /* proceed with email */ }
+    }
+
+    if (!customerEmail) return res.status(400).json({ error: 'Email is required' });
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       payment_method_types: ['card'],
-      line_items: [{ price: priceId, quantity: 1 }],
+      line_items: [{ price: stripePriceId, quantity: 1 }],
       success_url: `${FRONTEND_URL}/checkout-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${FRONTEND_URL}/pricing`,
-      metadata: { cpa_profile_id: profileResult.rows[0].id.toString(), plan_type: planType },
-      customer_email: req.user.email
+      metadata: { cpa_profile_id: cpaProfileId || '', plan_type: tier || planType || lookupKey, interval: interval || 'monthly' },
+      customer_email: customerEmail
     });
 
     res.json({ success: true, sessionId: session.id, url: session.url });
@@ -2357,6 +2812,231 @@ app.use((err, req, res, next) => {
   res.status(status).json({
     error: status === 500 ? 'Internal server error' : err.message
   });
+});
+
+// Sequence scheduler — every 15 minutes
+setInterval(() => {
+  sequenceEngine.processScheduledSends().catch(err =>
+    console.error('[Sequences] Scheduled send error:', err.message)
+  );
+}, 15 * 60 * 1000);
+
+// CRM Intelligence — nightly at 3 AM ET (use setInterval every 24h with initial delay)
+setTimeout(() => {
+  crmIntelligence.runNightly().catch(err => console.error('[CRM:Intelligence] Nightly run error:', err.message));
+  setInterval(() => {
+    crmIntelligence.runNightly().catch(err => console.error('[CRM:Intelligence] Nightly run error:', err.message));
+  }, 24 * 60 * 60 * 1000);
+}, (() => { const now = new Date(); const next3am = new Date(); next3am.setHours(3, 0, 0, 0); if (next3am <= now) next3am.setDate(next3am.getDate() + 1); return next3am - now; })());
+
+// =====================================================
+// CRM API Routes
+// =====================================================
+
+app.get('/api/admin/crm/funnel', authenticateToken, requireAdmin, async (req, res) => {
+  try { res.json({ success: true, ...(await crm.getFunnelWithConversions()) }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/dashboard', authenticateToken, requireAdmin, async (req, res) => {
+  try { res.json({ success: true, ...(await crm.getDashboardStats()) }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/professionals/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const data = await crm.getProfessional(parseInt(req.params.id));
+    if (!data) return res.status(404).json({ success: false, error: 'Not found' });
+    res.json({ success: true, professional: data });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/professionals/:id/history', authenticateToken, requireAdmin, async (req, res) => {
+  try { res.json({ success: true, history: await crm.getHistory(parseInt(req.params.id)) }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/professionals/:id/transition', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { to_status, metadata } = req.body;
+    if (!to_status) return res.status(400).json({ success: false, error: 'to_status required' });
+    const result = await crm.transition(parseInt(req.params.id), to_status, { triggeredBy: 'admin', metadata: metadata || {} });
+    res.json({ success: true, ...result });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/professionals/:id/force-transition', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { to_status, metadata } = req.body;
+    if (!to_status) return res.status(400).json({ success: false, error: 'to_status required' });
+    const result = await crm.forceTransition(parseInt(req.params.id), to_status, { triggeredBy: 'admin', metadata: metadata || {} });
+    res.json({ success: true, ...result });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/segment', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { crm_status, province, designation, has_email, tag, limit, offset } = req.query;
+    const data = await crm.segment({
+      crm_status: crm_status ? crm_status.split(',') : undefined,
+      province, designation,
+      hasEmail: has_email === 'true' ? true : has_email === 'false' ? false : undefined,
+      tag, limit: parseInt(limit) || 100, offset: parseInt(offset) || 0
+    });
+    res.json({ success: true, ...data });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/bulk/transition', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { ids, to_status, metadata } = req.body;
+    if (!ids || !Array.isArray(ids) || !to_status) return res.status(400).json({ success: false, error: 'ids (array) and to_status required' });
+    res.json({ success: true, ...(await crm.bulkTransition(ids, to_status, { triggeredBy: 'admin', metadata: metadata || {} })) });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/bulk/tag', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { ids, tag } = req.body;
+    if (!ids || !Array.isArray(ids) || !tag) return res.status(400).json({ success: false, error: 'ids (array) and tag required' });
+    res.json({ success: true, ...(await crm.bulkTag(ids, tag)) });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/professionals/:id/tags', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { tag } = req.body;
+    if (!tag) return res.status(400).json({ success: false, error: 'tag required' });
+    await crm.addTag(parseInt(req.params.id), tag);
+    res.json({ success: true, tag });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.delete('/api/admin/crm/professionals/:id/tags/:tag', authenticateToken, requireAdmin, async (req, res) => {
+  try { await crm.removeTag(parseInt(req.params.id), req.params.tag); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/professionals/:id/notes', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { note } = req.body;
+    if (!note) return res.status(400).json({ success: false, error: 'note required' });
+    res.json({ success: true, note: await crm.addNote(parseInt(req.params.id), note, 'admin') });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/backfill', authenticateToken, requireAdmin, async (req, res) => {
+  try { res.json({ success: true, counts: await crm.backfill() }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// =====================================================
+// Sequence API Routes (Phase 2)
+// =====================================================
+
+app.get('/api/admin/crm/sequences', authenticateToken, requireAdmin, async (req, res) => {
+  try { res.json({ success: true, sequences: await sequenceEngine.getSequences() }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/sequences/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const seq = await sequenceEngine.getSequence(parseInt(req.params.id));
+    if (!seq) return res.status(404).json({ success: false, error: 'Not found' });
+    const stats = await sequenceEngine.getSequenceStats(seq.id);
+    res.json({ success: true, sequence: seq, stats });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/sequences', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, description, trigger_status, steps, active } = req.body;
+    if (!name || !steps) return res.status(400).json({ success: false, error: 'name and steps required' });
+    const seq = await sequenceEngine.createSequence({ name, description, triggerStatus: trigger_status, steps, active });
+    res.json({ success: true, sequence: seq });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.put('/api/admin/crm/sequences/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, description, trigger_status, steps, active } = req.body;
+    const seq = await sequenceEngine.updateSequence(parseInt(req.params.id), { name, description, triggerStatus: trigger_status, steps, active });
+    if (!seq) return res.status(404).json({ success: false, error: 'Not found' });
+    res.json({ success: true, sequence: seq });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/sequences/:id/enroll', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { professional_id, professional_ids } = req.body;
+    if (professional_ids && Array.isArray(professional_ids)) {
+      const result = await sequenceEngine.bulkEnroll(professional_ids, parseInt(req.params.id));
+      return res.json({ success: true, ...result });
+    }
+    if (!professional_id) return res.status(400).json({ success: false, error: 'professional_id required' });
+    const enrollment = await sequenceEngine.enroll(professional_id, parseInt(req.params.id));
+    res.json({ success: true, enrollment });
+  } catch (err) { res.status(400).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/sequences/:id/unenroll', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { professional_id, reason } = req.body;
+    if (!professional_id) return res.status(400).json({ success: false, error: 'professional_id required' });
+    await sequenceEngine.unenroll(professional_id, parseInt(req.params.id), reason || 'manual');
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/sequences/:id/enrollments', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { limit, offset } = req.query;
+    const enrollments = await sequenceEngine.getActiveEnrollments({
+      sequenceId: parseInt(req.params.id), limit: parseInt(limit) || 50, offset: parseInt(offset) || 0
+    });
+    res.json({ success: true, enrollments });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.post('/api/admin/crm/sequences/process', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    await sequenceEngine.processScheduledSends();
+    res.json({ success: true, message: 'Sequence processing triggered' });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// =====================================================
+// Intelligence API Routes (Phase 4)
+// =====================================================
+
+app.post('/api/admin/crm/intelligence/run', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const results = await crmIntelligence.runNightly();
+    res.json({ success: true, ...results });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/intelligence/engagement', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const distribution = await crmIntelligence.getEngagementDistribution();
+    const top = await crmIntelligence.getTopEngaged(parseInt(req.query.limit) || 25);
+    res.json({ success: true, distribution, topEngaged: top });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/intelligence/churn', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const atRisk = await crmIntelligence.getChurnRisk(parseInt(req.query.min_risk) || 50);
+    res.json({ success: true, atRisk });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+app.get('/api/admin/crm/intelligence/bounce-report', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const check = await crmIntelligence.checkBounceCluster({ windowHours: parseInt(req.query.hours) || 48 });
+    const domains = await crmIntelligence.getBounceReport(parseInt(req.query.hours) || 48);
+    res.json({ success: true, ...check, domains });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 // Sentry error handler (must be before app.listen, after all routes)

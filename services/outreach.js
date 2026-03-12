@@ -6,6 +6,44 @@ const { buildClaimEmail } = require('../utils/email-template');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
 const BACKEND_URL = process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app';
+const OUTREACH_FROM = 'Arthur Kostaras <connect@canadaaccountants.app>';
+
+// Role-based email prefixes that ZeroBounce always returns as do_not_mail
+const ROLE_BASED_PREFIXES = new Set([
+  'info', 'admin', 'office', 'support', 'sales', 'contact', 'hello', 'help',
+  'billing', 'accounts', 'enquiries', 'enquiry', 'hr', 'jobs', 'careers',
+  'marketing', 'press', 'media', 'webmaster', 'postmaster', 'noreply',
+  'no-reply', 'reception', 'general', 'team', 'staff'
+]);
+
+function isRoleBasedEmail(email) {
+  if (!email) return false;
+  const localPart = email.split('@')[0].toLowerCase();
+  return ROLE_BASED_PREFIXES.has(localPart);
+}
+
+// Province-to-timezone mapping for time-zone-aware sending (~10 AM local)
+const PROVINCE_TIMEZONE_UTC_HOUR = {
+  // Atlantic (UTC-4): 10 AM AT = 14:00 UTC
+  NL: 14, NS: 14, NB: 14, PE: 14,
+  // Eastern (UTC-5): 10 AM ET = 15:00 UTC
+  ON: 15, QC: 15,
+  // Central (UTC-6): 10 AM CT = 16:00 UTC
+  MB: 16, SK: 16,
+  // Mountain (UTC-7): 10 AM MT = 17:00 UTC
+  AB: 17,
+  // Pacific (UTC-8): 10 AM PT = 18:00 UTC
+  BC: 18,
+};
+
+function _isInSendWindow(province) {
+  if (!province) return true; // unknown province — send anyway
+  const targetHour = PROVINCE_TIMEZONE_UTC_HOUR[province.toUpperCase()];
+  if (targetHour === undefined) return true; // unrecognized province — send anyway
+  const nowUTC = new Date().getUTCHours();
+  // Allow ±30 min window: if target is 15, accept hours 14 and 15
+  return nowUTC === targetHour || nowUTC === targetHour - 1;
+}
 
 function htmlToPlainText(html) {
   return html
@@ -272,6 +310,14 @@ class OutreachEngine {
 
   async processQueue() {
     if (this.processing) return;
+
+    // Skip weekends
+    const day = new Date().getDay();
+    if (day === 0 || day === 6) {
+      console.log('[Outreach] Skipping - weekend');
+      return;
+    }
+
     this.processing = true;
 
     try {
@@ -580,6 +626,18 @@ class OutreachEngine {
         return;
       }
 
+      // Time-zone-aware sending: look up recipient province and check send window
+      if (emailRecord.recipient_type === 'cpa' && emailRecord.recipient_id) {
+        try {
+          const provResult = await this.pool.query('SELECT province FROM scraped_cpas WHERE id = $1', [emailRecord.recipient_id]);
+          const recipientProvince = provResult.rows[0]?.province;
+          if (!_isInSendWindow(recipientProvince)) {
+            // Not in this province's send window — skip, will retry next cycle
+            return;
+          }
+        } catch (e) { /* proceed if lookup fails */ }
+      }
+
       // ZeroBounce email validation (if API key configured)
       const validation = await this._validateEmail(email);
       if (!validation.valid) {
@@ -597,12 +655,20 @@ class OutreachEngine {
       // Render template (unsubscribe_url is injected as a template variable)
       const { subject, body } = await this._renderTemplate(campaign, emailRecord, unsubToken);
 
+      // Build unsubscribe URL for RFC 8058 headers
+      const unsubscribeUrl = `${BACKEND_URL}/api/unsubscribe/${unsubToken}`;
+
       // Send via Resend
       const result = await sendEmail({
         to: emailRecord.recipient_email,
         subject,
         html: body,
         text: htmlToPlainText(body),
+        from: OUTREACH_FROM,
+        headers: {
+          'List-Unsubscribe': `<${unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+        },
       });
 
       if (result.success) {
@@ -620,6 +686,14 @@ class OutreachEngine {
           `UPDATE outreach_emails SET unsubscribe_token = $2 WHERE id = $1`,
           [emailRecord.id, unsubToken]
         ).catch(() => {});
+
+        // CASL compliance: track first contact timestamp for 2-year expiry
+        if (emailRecord.recipient_type === 'cpa' && emailRecord.recipient_id) {
+          await this.pool.query(
+            `UPDATE scraped_cpas SET first_contacted_at = NOW() WHERE id = $1 AND first_contacted_at IS NULL`,
+            [emailRecord.recipient_id]
+          ).catch(() => {});
+        }
       } else {
         // Increment retry count; mark as 'failed' after 5 attempts
         const retries = (emailRecord.retry_count || 0) + 1;
@@ -650,6 +724,20 @@ class OutreachEngine {
     const apiKey = process.env.ZEROBOUNCE_API_KEY;
     if (!apiKey) return { valid: true, status: 'skipped', sub_status: '' };
 
+    // Pre-filter role-based emails — saves ZeroBounce credits
+    if (isRoleBasedEmail(email)) {
+      console.log(`[Outreach] Role-based email skipped (no ZB credit used): ${email}`);
+      // Cache as do_not_mail so downstream code treats it consistently
+      try {
+        await this.pool.query(
+          `INSERT INTO email_validations (email, status, sub_status) VALUES ($1, 'do_not_mail', 'role_based_pre_filter')
+           ON CONFLICT (email) DO UPDATE SET status = 'do_not_mail', sub_status = 'role_based_pre_filter', validated_at = NOW()`,
+          [email]
+        );
+      } catch (e) { /* cache save non-critical */ }
+      return { valid: false, status: 'do_not_mail', sub_status: 'role_based_pre_filter' };
+    }
+
     try {
       // Check cache first (valid for 30 days)
       const cached = await this.pool.query(
@@ -659,8 +747,11 @@ class OutreachEngine {
       if (cached.rows.length > 0) {
         const row = cached.rows[0];
         const valid = ['valid', 'catch-all', 'unknown'].includes(row.status);
+        if (row.status === 'catch-all') {
+          console.log(`[Outreach] Warning: catch-all email ${email} - monitoring bounce rate`);
+        }
         console.log(`[Outreach] ZeroBounce (cached): ${email} → ${row.status}`);
-        return { valid, status: row.status, sub_status: row.sub_status || '' };
+        return { valid, status: row.status, sub_status: row.sub_status || '', catchAll: row.status === 'catch-all' };
       }
 
       // Call ZeroBounce API
@@ -689,9 +780,12 @@ class OutreachEngine {
       );
 
       const valid = ['valid', 'catch-all', 'unknown'].includes(status);
+      if (status === 'catch-all') {
+        console.log(`[Outreach] Warning: catch-all email ${email} - monitoring bounce rate`);
+      }
       this.zbConsecutiveErrors = 0;
       console.log(`[Outreach] ZeroBounce: ${email} → ${status}${sub_status ? '/' + sub_status : ''}`);
-      return { valid, status, sub_status };
+      return { valid, status, sub_status, catchAll: status === 'catch-all' };
     } catch (err) {
       this.zbConsecutiveErrors++;
       console.error(`[Outreach] ZeroBounce error for ${email}: ${err.message} (consecutive: ${this.zbConsecutiveErrors})`);
@@ -793,13 +887,20 @@ class OutreachEngine {
     if (emailRecord.variant_index > 0 && campaign.subject_variants && campaign.subject_variants[emailRecord.variant_index - 1]) {
       subject = campaign.subject_variants[emailRecord.variant_index - 1];
     }
-    // Follow-up subject override
+    // Follow-up subject override — unique angles per step (avoids spam-signal "Following up:" prefix)
     if (emailRecord.sequence_number > 1 && campaign.follow_up_subjects && Array.isArray(campaign.follow_up_subjects)) {
       const fuSubject = campaign.follow_up_subjects[emailRecord.sequence_number - 2];
       if (fuSubject) subject = fuSubject;
-      else subject = `Following up: ${subject}`;
-    } else if (emailRecord.sequence_number > 1) {
-      subject = `Following up: ${subject}`;
+      // else fall through to generic per-step subjects below
+    }
+    if (emailRecord.sequence_number > 1 && !campaign.follow_up_subjects?.[emailRecord.sequence_number - 2]) {
+      const stepFallbacks = [
+        'Quick question about your practice in {{city}}',
+        'Your {{province}} profile — last reminder',
+        '{{first_name}}, businesses in {{city}} are searching now',
+        'Last note about your CanadaAccountants profile'
+      ];
+      subject = stepFallbacks[emailRecord.sequence_number - 2] || subject;
     }
     let body = campaign.body_template;
 
@@ -920,6 +1021,7 @@ class OutreachEngine {
       to: testEmail,
       subject: `[TEST] ${subject}`,
       html: body,
+      from: OUTREACH_FROM,
     });
     return result;
   }
@@ -1341,7 +1443,7 @@ class OutreachEngine {
 const CPA_ACQUISITION_TEMPLATE = buildClaimEmail({
   platformName: 'CanadaAccountants',
   tagline: 'CPA-Client Matching Platform',
-  subject: 'Your CPA profile on CanadaAccountants.app is live — claim it before clients see it',
+  subject: 'Your CPA profile is live — claim it now',
   greeting: 'Hi {{cpa_name}},',
   bodyParagraphs: [
     'Your professional profile is now listed on <strong>CanadaAccountants.app</strong> — a platform where Canadian businesses search for and get matched with CPAs.',
@@ -1361,11 +1463,11 @@ const CPA_ACQUISITION_TEMPLATE = buildClaimEmail({
 });
 
 const SME_ACQUISITION_TEMPLATE = {
-  subject: '{{business_name}} — your AI-matched CPA is waiting',
+  subject: '{{business_name}} — meet your matched CPA',
   body: `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
       <h2 style="color:#1e293b;">Hi there,</h2>
-      <p>Canadian businesses spend an average of <strong>585 days</strong> searching for the right CPA. That's time and money you can't afford to lose.</p>
+      <p>Canadian businesses spend <strong>months</strong> searching for the right CPA. That's time and money you can't afford to lose.</p>
       <p>CanadaAccountants is an AI-powered platform that matches {{industry}} businesses like {{business_name}} with pre-verified CPAs in <strong>under 24 hours</strong>.</p>
       <p>We've already onboarded <strong>{{cpa_count}} qualified CPAs</strong> in {{province}} — covering tax planning, bookkeeping, advisory, and more.</p>
       <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:20px 0;">

@@ -98,6 +98,9 @@ function buildClaimEmail(config) {
   <p style="margin:0 0 4px;color:#999999;font-size:11px;text-align:center;">
     ${footerNote}
   </p>
+  <p style="margin:0 0 4px;color:#999999;font-size:11px;text-align:center;">
+    ${copyrightName} | Toronto, ON, Canada
+  </p>
   <p style="margin:0;color:#999999;font-size:11px;text-align:center;">
     <a href="{{unsubscribe_url}}" style="color:#999999;text-decoration:underline;">Unsubscribe</a>
     &nbsp;&middot;&nbsp;

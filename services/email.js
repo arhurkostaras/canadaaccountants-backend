@@ -7,21 +7,81 @@ const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@canadaaccountants.app';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
 
 /**
+ * Wraps HTML content in the shared branded email layout.
+ * Table-based, mobile-responsive, matches outreach template style.
+ */
+function wrapInBrandTemplate(content, platformName = 'CanadaAccountants') {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    @media only screen and (max-width: 600px) {
+      .email-container { width: 100% !important; }
+      .email-body { padding: 24px 20px !important; }
+      .email-header { padding: 20px 20px !important; }
+      .email-footer { padding: 16px 20px !important; }
+    }
+  </style>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f7;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7;">
+<tr><td align="center" style="padding:32px 16px;">
+<table role="presentation" class="email-container" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+
+<!-- Header -->
+<tr><td class="email-header" style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);padding:28px 40px;text-align:center;">
+  <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;letter-spacing:-0.3px;">${platformName}</h1>
+  <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">Canada's AI-Powered CPA Matching Platform</p>
+</td></tr>
+
+<!-- Body -->
+<tr><td class="email-body" style="padding:36px 40px;">
+  ${content}
+</td></tr>
+
+<!-- Footer -->
+<tr><td class="email-footer" style="padding:20px 40px;border-top:1px solid #eeeeee;background-color:#fafafa;">
+  <p style="margin:0 0 4px;color:#999999;font-size:11px;text-align:center;">
+    ${platformName} | Toronto, ON, Canada
+  </p>
+  <p style="margin:0;color:#999999;font-size:11px;text-align:center;">
+    <a href="https://canadaaccountants.app/privacy-policy.html" style="color:#999999;text-decoration:underline;">Privacy Policy</a>
+    &nbsp;&middot;&nbsp;
+    &copy; 2026 ${platformName}
+  </p>
+</td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+/**
  * Shared email sender with graceful fallback
  */
-async function sendEmail({ to, subject, html }) {
+async function sendEmail({ to, subject, html, text, headers, from }) {
   if (!resend) {
     console.log(`[Email] RESEND_API_KEY not set. Would send to ${to}: "${subject}"`);
     return { success: false, reason: 'api_key_missing' };
   }
 
   try {
-    const { data, error } = await resend.emails.send({
-      from: FROM_EMAIL,
+    // Auto-generate plain-text fallback if not provided
+    const plainText = text || html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+    const payload = {
+      from: from || FROM_EMAIL,
       to: Array.isArray(to) ? to : [to],
       subject,
       html,
-    });
+      text: plainText,
+    };
+    if (headers) payload.headers = headers;
+    const { data, error } = await resend.emails.send(payload);
 
     if (error) {
       console.error('[Email] Resend API error:', error);
@@ -49,16 +109,16 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
   await sendEmail({
     to: ADMIN_EMAIL,
     subject: `New SME Match Request: ${contactInfo.name || requestId}`,
-    html: `
-      <h2>New Friction Elimination Match Request</h2>
-      <p><strong>Request ID:</strong> ${requestId}</p>
-      <p><strong>Contact:</strong> ${contactInfo.name || 'N/A'} (${contactInfo.email || 'N/A'})</p>
-      <p><strong>Pain Point:</strong> ${request.painPoint || request.pain_point || 'N/A'}</p>
-      <p><strong>Business Type:</strong> ${request.businessType || request.business_type || 'N/A'}</p>
-      <p><strong>Urgency:</strong> ${request.urgencyLevel || request.urgency_level || 'N/A'}</p>
-      <h3>Matches Generated (${matches.length})</h3>
-      <ul>${matchList}</ul>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">New Friction Elimination Match Request</h2>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Request ID:</strong> ${requestId}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Contact:</strong> ${contactInfo.name || 'N/A'} (${contactInfo.email || 'N/A'})</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Pain Point:</strong> ${request.painPoint || request.pain_point || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Business Type:</strong> ${request.businessType || request.business_type || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Urgency:</strong> ${request.urgencyLevel || request.urgency_level || 'N/A'}</p>
+      <h3 style="margin:18px 0 12px;color:#1a1a1a;font-size:17px;font-weight:600;">Matches Generated (${matches.length})</h3>
+      <ul style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">${matchList}</ul>
+    `),
   });
 
   // Confirmation to SME (if we have their email)
@@ -66,15 +126,14 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
     await sendEmail({
       to: contactInfo.email,
       subject: 'Your CPA Matches Are Ready — CanadaAccountants',
-      html: `
-        <h2>Great news, ${contactInfo.name || 'there'}!</h2>
-        <p>Our AI has finished analyzing your needs and found <strong>${matches.length} CPA matches</strong> for you.</p>
-        <p>You can view your matches anytime at:<br>
-        <a href="https://canadaaccountants.app/cpa-matches.html?request=${requestId}">View My CPA Matches</a></p>
-        <p>A member of our team will also follow up within 24 hours.</p>
-        <br>
-        <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-      `,
+      html: wrapInBrandTemplate(`
+        <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Great news, ${contactInfo.name || 'there'}!</h2>
+        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Our AI has finished analyzing your needs and found <strong>${matches.length} CPA matches</strong> for you.</p>
+        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">You can view your matches anytime at:<br>
+        <a href="https://canadaaccountants.app/cpa-matches.html?request=${requestId}" style="color:#2563eb;text-decoration:none;">View My CPA Matches</a></p>
+        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">A member of our team will also follow up within 24 hours.</p>
+        <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+      `),
     });
   }
 }
@@ -89,40 +148,39 @@ async function sendCPAOnboardingEmail(registrationId, request, potentialClients)
   await sendEmail({
     to: contactInfo.email,
     subject: 'Welcome to CanadaAccountants — Onboarding Next Steps',
-    html: `
-      <h2>Welcome to CanadaAccountants!</h2>
-      <p>Hi ${contactInfo.name || 'there'},</p>
-      <p>Your friction elimination registration is complete. Here's what happens next:</p>
-      <ol>
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Welcome to CanadaAccountants!</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${contactInfo.name || 'there'},</p>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Your friction elimination registration is complete. Here's what happens next:</p>
+      <ol style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
         <li><strong>Onboarding call</strong> — within 24 hours</li>
         <li><strong>First client match</strong> — within 72 hours</li>
         <li><strong>Full integration</strong> — within 1 week</li>
       </ol>
-      <p>We've already identified <strong>${potentialClients.length} potential client matches</strong> for your profile.</p>
-      <p>Our projected improvements for you:</p>
-      <ul>
-        <li>Sales cycle: <strong>585 days → 24 hours</strong></li>
-        <li>Win rate: <strong>25% → 70%+</strong></li>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">We've already identified <strong>${potentialClients.length} potential client matches</strong> for your profile.</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;">Our projected improvements for you:</p>
+      <ul style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
+        <li>Sales cycle: <strong>months &rarr; 24 hours</strong></li>
+        <li>Win rate: <strong>significantly improved</strong></li>
         <li>Marketing waste savings: <strong>$${parseInt(request.marketingWasteAmount || 30000).toLocaleString()}</strong></li>
       </ul>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-    `,
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `),
   });
 
   // Notify admin
   await sendEmail({
     to: ADMIN_EMAIL,
     subject: `New CPA Registration: ${contactInfo.name || registrationId}`,
-    html: `
-      <h2>New CPA Friction Registration</h2>
-      <p><strong>Registration ID:</strong> ${registrationId}</p>
-      <p><strong>Name:</strong> ${contactInfo.name || 'N/A'}</p>
-      <p><strong>Email:</strong> ${contactInfo.email || 'N/A'}</p>
-      <p><strong>Biggest Challenge:</strong> ${request.biggestChallenge || 'N/A'}</p>
-      <p><strong>Target Client Size:</strong> ${request.targetClientSize || 'N/A'}</p>
-      <p><strong>Potential Matches:</strong> ${potentialClients.length}</p>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">New CPA Friction Registration</h2>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Registration ID:</strong> ${registrationId}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Name:</strong> ${contactInfo.name || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Email:</strong> ${contactInfo.email || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Biggest Challenge:</strong> ${request.biggestChallenge || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Target Client Size:</strong> ${request.targetClientSize || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Potential Matches:</strong> ${potentialClients.length}</p>
+    `),
   });
 }
 
@@ -136,34 +194,33 @@ async function sendCPARegistrationConfirmation(registrationData) {
   await sendEmail({
     to: email,
     subject: 'CPA Registration Received — CanadaAccountants',
-    html: `
-      <h2>Registration Received!</h2>
-      <p>Hi ${registrationData.firstName || 'there'},</p>
-      <p>Thank you for registering on CanadaAccountants. We've received your CPA profile and it's now under review.</p>
-      <p><strong>What happens next:</strong></p>
-      <ol>
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Registration Received!</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${registrationData.firstName || 'there'},</p>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Thank you for registering on CanadaAccountants. We've received your CPA profile and it's now under review.</p>
+      <p style="margin:0 0 12px;color:#1a1a1a;font-size:15px;font-weight:600;">What happens next:</p>
+      <ol style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
         <li>Our team reviews your credentials (1-2 business days)</li>
         <li>Your profile goes live on the marketplace</li>
         <li>You start receiving AI-matched client leads</li>
       </ol>
-      <p>If you have questions, reply to this email or call us at <strong>1.647.956.7290</strong>.</p>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-    `,
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">If you have questions, reply to this email or call us at <strong>1.647.956.7290</strong>.</p>
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `),
   });
 
   // Notify admin
   await sendEmail({
     to: ADMIN_EMAIL,
     subject: `New CPA Registration: ${registrationData.firstName || ''} ${registrationData.lastName || ''}`,
-    html: `
-      <h2>New Standard CPA Registration</h2>
-      <p><strong>Name:</strong> ${registrationData.firstName || ''} ${registrationData.lastName || ''}</p>
-      <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Firm:</strong> ${registrationData.firmName || 'N/A'}</p>
-      <p><strong>Province:</strong> ${registrationData.province || 'N/A'}</p>
-      <p><strong>Experience:</strong> ${registrationData.experience || 'N/A'} years</p>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">New Standard CPA Registration</h2>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Name:</strong> ${registrationData.firstName || ''} ${registrationData.lastName || ''}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Email:</strong> ${email}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Firm:</strong> ${registrationData.firmName || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Province:</strong> ${registrationData.province || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Experience:</strong> ${registrationData.experience || 'N/A'} years</p>
+    `),
   });
 }
 
@@ -175,33 +232,32 @@ async function sendContactFormEmail({ name, email, phone, company, subject, mess
   await sendEmail({
     to: ADMIN_EMAIL,
     subject: `Contact Form: ${subject || 'New Inquiry'} — from ${name}`,
-    html: `
-      <h2>New Contact Form Submission</h2>
-      <p><strong>Name:</strong> ${name}</p>
-      <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Phone:</strong> ${phone || 'N/A'}</p>
-      <p><strong>Company:</strong> ${company || 'N/A'}</p>
-      <p><strong>Subject:</strong> ${subject || 'N/A'}</p>
-      <hr>
-      <p>${message}</p>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">New Contact Form Submission</h2>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Name:</strong> ${name}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Email:</strong> ${email}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Phone:</strong> ${phone || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Company:</strong> ${company || 'N/A'}</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Subject:</strong> ${subject || 'N/A'}</p>
+      <hr style="border:none;border-top:1px solid #eeeeee;margin:18px 0;">
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">${message}</p>
+    `),
   });
 
   // Auto-reply to user
   await sendEmail({
     to: email,
     subject: 'We received your message — CanadaAccountants',
-    html: `
-      <h2>Thanks for reaching out, ${name}!</h2>
-      <p>We've received your message and will get back to you within 1 business day.</p>
-      <p>In the meantime, you can:</p>
-      <ul>
-        <li><a href="https://canadaaccountants.app/find-cpa.html">Find a CPA now</a></li>
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Thanks for reaching out, ${name}!</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">We've received your message and will get back to you within 1 business day.</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;">In the meantime, you can:</p>
+      <ul style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
+        <li><a href="https://canadaaccountants.app/find-cpa.html" style="color:#2563eb;text-decoration:none;">Find a CPA now</a></li>
         <li>Call us directly at <strong>1.647.956.7290</strong></li>
       </ul>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-    `,
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `),
   });
 }
 
@@ -215,20 +271,23 @@ async function sendCPAVerificationEmail(cpaProfile) {
   await sendEmail({
     to: email,
     subject: 'Your CPA Profile is Verified — CanadaAccountants',
-    html: `
-      <h2>Congratulations, ${cpaProfile.first_name || 'there'}!</h2>
-      <p>Your CPA profile on CanadaAccountants has been <strong>verified</strong>.</p>
-      <p>This means:</p>
-      <ul>
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Congratulations, ${cpaProfile.first_name || 'there'}!</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Your CPA profile on CanadaAccountants has been <strong>verified</strong>.</p>
+      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;">This means:</p>
+      <ul style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
         <li>Your profile now has a verified badge</li>
         <li>You'll rank higher in AI-powered client matches</li>
         <li>Clients will see your verified status, increasing trust</li>
       </ul>
-      <p>Log in to your dashboard to see your latest leads and update your profile:</p>
-      <p><a href="https://canadaaccountants.app/cpa-dashboard.html">Go to My Dashboard</a></p>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-    `,
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Log in to your dashboard to see your latest leads and update your profile:</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+        <tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);border-radius:6px;padding:14px 36px;">
+          <a href="https://canadaaccountants.app/cpa-dashboard.html" style="color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;display:inline-block;">Go to My Dashboard</a>
+        </td></tr>
+      </table>
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `),
   });
 }
 
@@ -239,16 +298,19 @@ async function sendPasswordResetEmail({ email, resetUrl, firstName }) {
   await sendEmail({
     to: email,
     subject: 'Reset Your Password — CanadaAccountants',
-    html: `
-      <h2>Password Reset Request</h2>
-      <p>Hi ${firstName || 'there'},</p>
-      <p>We received a request to reset your password. Click the link below to set a new password:</p>
-      <p><a href="${resetUrl}" style="display:inline-block;background:#dc2626;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;">Reset My Password</a></p>
-      <p>This link will expire in <strong>1 hour</strong>.</p>
-      <p>If you didn't request this, you can safely ignore this email. Your password will remain unchanged.</p>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Password Reset Request</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${firstName || 'there'},</p>
+      <p style="margin:0 0 24px;color:#333333;font-size:15px;line-height:1.7;">We received a request to reset your password. Click the button below to set a new password:</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+        <tr><td style="background:#dc2626;border-radius:6px;padding:14px 36px;">
+          <a href="${resetUrl}" style="color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;display:inline-block;">Reset My Password</a>
+        </td></tr>
+      </table>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">This link will expire in <strong>1 hour</strong>.</p>
+      <p style="margin:0 0 16px;color:#888888;font-size:13px;line-height:1.6;">If you didn't request this, you can safely ignore this email. Your password will remain unchanged.</p>
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `),
   });
 }
 
@@ -257,35 +319,41 @@ async function sendReferralEmail({ referrerName, refereeName, refereeEmail, refe
   await sendEmail({
     to: refereeEmail,
     subject: `${referrerName} thinks you'd benefit from CanadaAccountants`,
-    html: `
-      <h2>You've been referred by a colleague</h2>
-      <p>Hi${refereeName ? ` ${refereeName}` : ''},</p>
-      <p>Your colleague <strong>${referrerName}</strong> thinks you'd benefit from CanadaAccountants — Canada's AI-powered CPA-to-client matching platform.</p>
-      ${message ? `<p><em>"${message}"</em></p>` : ''}
-      <p>As a referred professional, you'll get priority onboarding and access to AI-matched client leads from day one.</p>
-      <p><a href="${registerUrl}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">Apply to Join CanadaAccountants</a></p>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-      <p style="color:#999;font-size:12px;">This is a one-time referral invitation. You will not receive further emails unless you register.</p>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">You've been referred by a colleague</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi${refereeName ? ` ${refereeName}` : ''},</p>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Your colleague <strong>${referrerName}</strong> thinks you'd benefit from CanadaAccountants — Canada's AI-powered CPA-to-client matching platform.</p>
+      ${message ? `<p style="margin:0 0 16px;color:#555555;font-size:15px;line-height:1.7;font-style:italic;">"${message}"</p>` : ''}
+      <p style="margin:0 0 24px;color:#333333;font-size:15px;line-height:1.7;">As a referred professional, you'll get priority onboarding and access to AI-matched client leads from day one.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+        <tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);border-radius:6px;padding:14px 36px;">
+          <a href="${registerUrl}" style="color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;display:inline-block;">Apply to Join CanadaAccountants</a>
+        </td></tr>
+      </table>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+      <p style="margin:0;color:#888888;font-size:12px;line-height:1.6;">This is a one-time referral invitation. You will not receive further emails unless you register.</p>
+    `),
   });
 }
 
 async function sendClaimVerificationEmail({ email, firstName, claimToken, professionalName }) {
-  const verifyUrl = `https://canadaaccountants.app/verify-claim.html?token=${claimToken}`;
+  const verifyUrl = `https://canadaaccountants.app/claim-profile.html?token=${claimToken}`;
   await sendEmail({
     to: email,
     subject: 'Verify Your Profile Claim — CanadaAccountants',
-    html: `
-      <h2>Profile Claim Verification</h2>
-      <p>Hi ${firstName || 'there'},</p>
-      <p>You've requested to claim the profile for <strong>${professionalName}</strong> on CanadaAccountants.</p>
-      <p>Click below to verify ownership:</p>
-      <p><a href="${verifyUrl}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">Verify My Profile</a></p>
-      <p>This link expires in 48 hours. If you didn't request this, you can safely ignore this email.</p>
-      <br>
-      <p>Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
-    `,
+    html: wrapInBrandTemplate(`
+      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Profile Claim Verification</h2>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${firstName || 'there'},</p>
+      <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">You've requested to claim the profile for <strong>${professionalName}</strong> on CanadaAccountants.</p>
+      <p style="margin:0 0 24px;color:#333333;font-size:15px;line-height:1.7;">Click below to verify ownership:</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+        <tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);border-radius:6px;padding:14px 36px;">
+          <a href="${verifyUrl}" style="color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;display:inline-block;">Verify My Profile</a>
+        </td></tr>
+      </table>
+      <p style="margin:0 0 16px;color:#888888;font-size:13px;line-height:1.6;">This link expires in 48 hours. If you didn't request this, you can safely ignore this email.</p>
+      <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+    `),
   });
 }
 
