@@ -974,8 +974,8 @@ class OutreachEngine {
     // Append ref tracking token to CTA links for conversion attribution
     if (unsubToken) {
       body = body.replace(
-        /href="https:\/\/canadaaccountants\.app\/(join-as-cpa|claim-profile)\.html"/g,
-        `href="https://canadaaccountants.app/claim-profile.html?ref=${unsubToken}"`
+        /href="https:\/\/canadaaccountants\.app\/(join-as-cpa|claim-profile)"/g,
+        `href="https://canadaaccountants.app/claim-profile?ref=${unsubToken}"`
       );
     }
 
@@ -1457,8 +1457,8 @@ const CPA_ACQUISITION_TEMPLATE = buildClaimEmail({
     { bold: 'Build your verified trust profile', text: 'stand out from the {{total_cpas}}+ other CPAs listed' },
   ],
   closingLine: "Claiming takes under 2 minutes. You'll verify your identity and can immediately update what business owners see when they find you.",
-  ctaUrl: 'https://canadaaccountants.app/claim-profile.html',
-  privacyUrl: 'https://canadaaccountants.app/privacy',
+  ctaUrl: 'https://canadaaccountants.app/claim-profile',
+  privacyUrl: 'https://canadaaccountants.app/privacy-policy',
   copyrightName: 'CanadaAccountants.app',
 });
 
@@ -1481,7 +1481,7 @@ const SME_ACQUISITION_TEMPLATE = {
       </div>
       <p style="font-size:14px;color:#555;">There's no cost to your business — CPAs invest in the platform to reach qualified clients like you. Submit your needs and we'll personally match you with the right CPA for your situation.</p>
       <p style="text-align:center;margin:30px 0;">
-        <a href="{{platform_url}}/find-cpa.html" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
+        <a href="{{platform_url}}/find-cpa" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
           Get Matched With a CPA
         </a>
       </p>

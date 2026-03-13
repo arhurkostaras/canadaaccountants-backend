@@ -47,7 +47,7 @@ function wrapInBrandTemplate(content, platformName = 'CanadaAccountants') {
     ${platformName} | Toronto, ON, Canada
   </p>
   <p style="margin:0;color:#999999;font-size:11px;text-align:center;">
-    <a href="https://canadaaccountants.app/privacy-policy.html" style="color:#999999;text-decoration:underline;">Privacy Policy</a>
+    <a href="https://canadaaccountants.app/privacy-policy" style="color:#999999;text-decoration:underline;">Privacy Policy</a>
     &nbsp;&middot;&nbsp;
     &copy; 2026 ${platformName}
   </p>
@@ -130,7 +130,7 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
         <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Great news, ${contactInfo.name || 'there'}!</h2>
         <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Our AI has finished analyzing your needs and found <strong>${matches.length} CPA matches</strong> for you.</p>
         <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">You can view your matches anytime at:<br>
-        <a href="https://canadaaccountants.app/cpa-matches.html?request=${requestId}" style="color:#2563eb;text-decoration:none;">View My CPA Matches</a></p>
+        <a href="https://canadaaccountants.app/cpa-matches?request=${requestId}" style="color:#2563eb;text-decoration:none;">View My CPA Matches</a></p>
         <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">A member of our team will also follow up within 24 hours.</p>
         <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
       `),
@@ -284,7 +284,7 @@ async function sendCPAVerificationEmail(cpaProfile) {
       <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Log in to your dashboard to see your latest leads and update your profile:</p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
         <tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);border-radius:6px;padding:14px 36px;">
-          <a href="https://canadaaccountants.app/cpa-dashboard.html" style="color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;display:inline-block;">Go to My Dashboard</a>
+          <a href="https://canadaaccountants.app/cpa-dashboard" style="color:#ffffff;text-decoration:none;font-size:16px;font-weight:600;display:inline-block;">Go to My Dashboard</a>
         </td></tr>
       </table>
       <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
@@ -316,7 +316,7 @@ async function sendPasswordResetEmail({ email, resetUrl, firstName }) {
 }
 
 async function sendReferralEmail({ referrerName, refereeName, refereeEmail, referralCode, message }) {
-  const registerUrl = `https://canadaaccountants.app/join-as-cpa.html?ref=${referralCode}`;
+  const registerUrl = `https://canadaaccountants.app/join-as-cpa?ref=${referralCode}`;
   await sendEmail({
     to: refereeEmail,
     subject: `${referrerName} thinks you'd benefit from CanadaAccountants`,
@@ -338,7 +338,7 @@ async function sendReferralEmail({ referrerName, refereeName, refereeEmail, refe
 }
 
 async function sendClaimVerificationEmail({ email, firstName, claimToken, professionalName }) {
-  const verifyUrl = `https://canadaaccountants.app/claim-profile.html?token=${claimToken}`;
+  const verifyUrl = `https://canadaaccountants.app/claim-profile?token=${claimToken}`;
   await sendEmail({
     to: email,
     subject: 'Verify Your Profile Claim — CanadaAccountants',
