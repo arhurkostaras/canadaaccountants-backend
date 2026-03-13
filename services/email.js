@@ -253,11 +253,12 @@ async function sendContactFormEmail({ name, email, phone, company, subject, mess
       <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">We've received your message and will get back to you within 1 business day.</p>
       <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;">In the meantime, you can:</p>
       <ul style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
-        <li><a href="https://canadaaccountants.app/find-cpa.html" style="color:#2563eb;text-decoration:none;">Find a CPA now</a></li>
+        <li><a href="https://canadaaccountants.app/why-we-win" style="color:#2563eb;text-decoration:none;">See why CPAs choose us</a></li>
         <li>Call us directly at <strong>1.647.956.7290</strong></li>
       </ul>
       <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
     `),
+    from: 'Arthur Kostaras <connect@canadaaccountants.app>',
   });
 }
 
