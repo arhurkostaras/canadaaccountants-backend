@@ -117,6 +117,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
   }
 });
 
+// Trust Railway proxy
+app.set('trust proxy', 1);
+
 // JSON parsing middleware
 app.use(express.json());
 
@@ -611,6 +614,9 @@ const crmIntelligence = new CRMIntelligence({
         unsubscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS converted BOOLEAN DEFAULT FALSE`);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS converted_at TIMESTAMP`);
+    await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS converted_user_id INTEGER`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS unsubscribe_token TEXT`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`);
