@@ -669,10 +669,8 @@ const crmIntelligence = new CRMIntelligence({
       ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS claim_requested_at TIMESTAMP;
     `);
     // CASL compliance: consent basis tracking and first contact timestamp
-    await pool.query(`
-      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS consent_basis VARCHAR(50) DEFAULT 'professional_directory';
-      ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS first_contacted_at TIMESTAMP;
-    `);
+    await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS consent_basis VARCHAR(50) DEFAULT 'professional_directory'`);
+    await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS first_contacted_at TIMESTAMP`);
     console.log('[Migration] Referral + claim + CASL columns verified');
 
   } catch (err) {
