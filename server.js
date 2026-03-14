@@ -8,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
+const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
 const crypto = require('crypto');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 
@@ -343,7 +344,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     // Send reset email
     const frontendUrl = FRONTEND_URL;
-    const resetUrl = `${frontendUrl}/reset-password.html?token=${resetToken}`;
+    const resetUrl = `${frontendUrl}/reset-password?token=${resetToken}`;
 
     sendPasswordResetEmail({ email: user.email, resetUrl, firstName }).catch(err => {
       console.error('Password reset email error (non-fatal):', err.message);
@@ -832,7 +833,7 @@ const crmIntelligence = new CRMIntelligence({
 <li><strong>Add your specialties</strong> — help the right clients find you</li>
 <li><strong>Upload a professional photo</strong> — profiles with photos get 40% more engagement</li>
 </ol>
-<p><a href="{{platform_url}}/dashboard" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Go to Your Dashboard</a></p>
+<p><a href="{{platform_url}}/cpa-dashboard" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Go to Your Dashboard</a></p>
 <p>Questions? Just reply to this email.</p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
           },
@@ -1751,6 +1752,101 @@ app.get('/api/cpa/my-stats', authenticateToken, requireCPA, async (req, res) => 
 });
 
 // =====================================================
+// AI POST-CLAIM FEATURE ROUTES
+// =====================================================
+
+// Generate AI Bio
+app.post('/api/cpa/ai-bio', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const profile = await pool.query(
+      `SELECT cp.*, sc.first_name as scraped_first, sc.last_name as scraped_last, sc.designation as scraped_designation, sc.city as scraped_city, sc.province as scraped_province, sc.firm_name as scraped_firm
+       FROM cpa_profiles cp
+       LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
+       WHERE cp.user_id = $1`, [req.user.userId]
+    );
+    if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const p = profile.rows[0];
+    const merged = {
+      first_name: p.first_name || p.scraped_first,
+      last_name: p.last_name || p.scraped_last,
+      firm_name: p.firm_name || p.scraped_firm,
+      city: p.city || p.scraped_city,
+      province: p.province || p.scraped_province,
+      designation: p.designation || p.scraped_designation,
+      specializations: Array.isArray(p.specializations) ? p.specializations.join(', ') : (p.specializations || ''),
+      years_experience: p.years_experience
+    };
+
+    const bio = await generateBio(merged, 'accountants');
+    res.json({ success: true, bio });
+  } catch (error) {
+    console.error('AI bio error:', error.message);
+    res.status(500).json({ error: 'Failed to generate bio' });
+  }
+});
+
+// SEO / Profile Completeness Score
+app.get('/api/cpa/seo-score', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT cp.*, cs.plan_type as subscription_tier, sc.claim_status
+       FROM cpa_profiles cp
+       LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
+       LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
+       WHERE cp.user_id = $1`, [req.user.userId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const score = calculateSEOScore(result.rows[0]);
+    res.json({ success: true, ...score });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to calculate score' });
+  }
+});
+
+// Generate Outreach Announcement Template
+app.post('/api/cpa/outreach-template', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const profile = await pool.query(
+      `SELECT cp.*, sc.first_name as scraped_first, sc.last_name as scraped_last, sc.designation as scraped_designation, sc.city as scraped_city, sc.province as scraped_province, sc.firm_name as scraped_firm
+       FROM cpa_profiles cp
+       LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
+       WHERE cp.user_id = $1`, [req.user.userId]
+    );
+    if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const p = profile.rows[0];
+    const merged = {
+      first_name: p.first_name || p.scraped_first,
+      last_name: p.last_name || p.scraped_last,
+      firm_name: p.firm_name || p.scraped_firm,
+      city: p.city || p.scraped_city,
+      province: p.province || p.scraped_province,
+      specializations: Array.isArray(p.specializations) ? p.specializations.join(', ') : (p.specializations || '')
+    };
+
+    const template = await generateOutreachTemplate(merged, 'accountants');
+    res.json({ success: true, ...template });
+  } catch (error) {
+    console.error('Outreach template error:', error.message);
+    res.status(500).json({ error: 'Failed to generate template' });
+  }
+});
+
+// Save bio to profile
+app.put('/api/cpa/bio', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const { bio } = req.body;
+    if (!bio) return res.status(400).json({ error: 'Bio is required' });
+    await pool.query('UPDATE cpa_profiles SET bio = $1, updated_date = NOW() WHERE user_id = $2', [bio, req.user.userId]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save bio' });
+  }
+});
+
+// =====================================================
 // ADMIN DASHBOARD API ENDPOINTS
 // =====================================================
 
@@ -2161,13 +2257,15 @@ app.get('/api/admin/validation-stats', async (req, res) => {
 app.get('/api/admin/clicked-no-claim', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT DISTINCT oe.recipient_email, oe.recipient_name, oe.clicked_at, oe.unsubscribe_token,
-             sc.first_name, sc.last_name, sc.firm_name, sc.city, sc.province, sc.designation, sc.claim_status
+      SELECT oe.recipient_email, oe.recipient_name, MAX(oe.clicked_at) AS clicked_at, MIN(oe.unsubscribe_token) AS unsubscribe_token,
+             MAX(sc.first_name) AS first_name, MAX(sc.last_name) AS last_name, MAX(sc.firm_name) AS firm_name,
+             MAX(sc.city) AS city, MAX(sc.province) AS province, MAX(sc.designation) AS designation, MIN(sc.claim_status) AS claim_status
       FROM outreach_emails oe
       LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
       WHERE oe.clicked_at IS NOT NULL
         AND (sc.claim_status IS NULL OR sc.claim_status != 'claimed')
-      ORDER BY oe.clicked_at DESC
+      GROUP BY oe.recipient_email, oe.recipient_name
+      ORDER BY clicked_at DESC
     `);
     res.json({ success: true, count: result.rows.length, professionals: result.rows });
   } catch (error) {
