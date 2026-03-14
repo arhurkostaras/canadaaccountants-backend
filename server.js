@@ -730,6 +730,22 @@ const crmIntelligence = new CRMIntelligence({
 <p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
 <p>If not, no worries — we won't email you about this again.</p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 10,
+            subject_line: '{{first_name}}, we just launched 3 AI-powered tools for accountants',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>Big news — we've just launched <strong>3 AI-powered tools</strong> exclusively for claimed accountants on CanadaAccountants:</p>
+<ul>
+<li><strong>AI Bio Generator</strong> — a professionally written bio created from your credentials in seconds</li>
+<li><strong>Profile SEO Score</strong> — see exactly how your profile ranks and what to improve to attract more clients</li>
+<li><strong>Outreach Email Template</strong> — a ready-to-send announcement email to let your network know about your verified profile</li>
+</ul>
+<p>These tools are <strong>free for all claimed profiles</strong> and available the moment you claim.</p>
+<p>CPAs with complete profiles and strong SEO scores get <strong>up to 5x more visibility</strong> in client searches.</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim & Access AI Tools</a></p>
+<p style="color:#888;font-size:13px;">Takes under 2 minutes. No cost, no obligation.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
           }
     ];
     if (!seqMap['Engaged No-Claim']) {
@@ -1790,17 +1806,19 @@ app.post('/api/cpa/ai-bio', authenticateToken, requireCPA, async (req, res) => {
 app.get('/api/cpa/seo-score', authenticateToken, requireCPA, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT cp.*, cs.plan_type as subscription_tier, sc.claim_status
+      `SELECT cp.*, cs.plan_type as subscription_tier, sc.claim_status, sc.designation
        FROM cpa_profiles cp
        LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
        LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
-       WHERE cp.user_id = $1`, [req.user.userId]
+       WHERE cp.user_id = $1
+       LIMIT 1`, [req.user.userId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
 
     const score = calculateSEOScore(result.rows[0]);
     res.json({ success: true, ...score });
   } catch (error) {
+    console.error('SEO score error:', error.message);
     res.status(500).json({ error: 'Failed to calculate score' });
   }
 });
