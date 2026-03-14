@@ -698,41 +698,6 @@ const crmIntelligence = new CRMIntelligence({
     const engagedSteps = [
           {
             delay_days: 0,
-            subject_line: '{{first_name}}, your CanadaAccountants profile is getting attention',
-            body_template: `<p>Hi {{first_name}},</p>
-<p>We noticed you checked out your profile on <strong>CanadaAccountants</strong> — and you're not alone. Prospective clients in {{city}} are actively searching for accountants like you.</p>
-<p>Right now, your listing shows basic directory info. Claiming your profile lets you:</p>
-<ul>
-<li><strong>Control your narrative</strong> — add specialties, credentials, and a personal bio</li>
-<li><strong>Appear in priority search results</strong> — claimed profiles rank higher</li>
-<li><strong>Receive warm leads</strong> — clients can contact you directly through the platform</li>
-</ul>
-<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
-<p style="color:#888;font-size:13px;">Takes under 2 minutes.</p>
-<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
-          },
-          {
-            delay_days: 3,
-            subject_line: 'Quick question, {{first_name}}',
-            body_template: `<p>Hi {{first_name}},</p>
-<p>I noticed you opened our last email but haven't claimed your profile yet on CanadaAccountants.</p>
-<p>Is there something holding you back? Many accountants tell us they weren't sure what "claiming" means — it simply means verifying you're the real {{first_name}} {{last_name}} so clients know your profile is authentic.</p>
-<p>No cost, no obligation. You can update or remove it anytime.</p>
-<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
-<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
-          },
-          {
-            delay_days: 7,
-            subject_line: 'Last call: your profile on CanadaAccountants',
-            body_template: `<p>Hi {{first_name}},</p>
-<p>This is our final reminder. Your unclaimed profile on CanadaAccountants will remain as-is — basic directory info only.</p>
-<p>Accountants who've claimed their profiles see <strong>3x more client inquiries</strong> on average. If you'd like that visibility, claim yours today:</p>
-<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
-<p>If not, no worries — we won't email you about this again.</p>
-<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
-          },
-          {
-            delay_days: 10,
             subject_line: '{{first_name}}, we just launched 3 AI-powered tools for accountants',
             body_template: `<p>Hi {{first_name}},</p>
 <p>Big news — we've just launched <strong>3 AI-powered tools</strong> exclusively for claimed accountants on CanadaAccountants:</p>
@@ -745,6 +710,41 @@ const crmIntelligence = new CRMIntelligence({
 <p>CPAs with complete profiles and strong SEO scores get <strong>up to 5x more visibility</strong> in client searches.</p>
 <p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim & Access AI Tools</a></p>
 <p style="color:#888;font-size:13px;">Takes under 2 minutes. No cost, no obligation.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 3,
+            subject_line: '{{first_name}}, your CanadaAccountants profile is getting attention',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>We noticed you checked out your profile on <strong>CanadaAccountants</strong> — and you're not alone. Prospective clients in {{city}} are actively searching for accountants like you.</p>
+<p>Right now, your listing shows basic directory info. Claiming your profile unlocks your <strong>AI-powered dashboard</strong> — including a professional bio generator, SEO score, and client outreach tools.</p>
+<ul>
+<li><strong>Control your narrative</strong> — add specialties, credentials, and an AI-generated bio</li>
+<li><strong>Appear in priority search results</strong> — claimed profiles rank higher</li>
+<li><strong>Receive warm leads</strong> — clients can contact you directly through the platform</li>
+</ul>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p style="color:#888;font-size:13px;">Takes under 2 minutes.</p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 7,
+            subject_line: 'Quick question, {{first_name}}',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>I noticed you opened our last email but haven't claimed your profile yet on CanadaAccountants.</p>
+<p>Is there something holding you back? Many accountants tell us they weren't sure what "claiming" means — it simply means verifying you're the real {{first_name}} {{last_name}} so clients know your profile is authentic.</p>
+<p>Once claimed, you get instant access to our <strong>AI tools</strong> — bio generator, SEO score, and outreach templates. No cost, no obligation. You can update or remove it anytime.</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
+<p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 12,
+            subject_line: 'Last call: your profile on CanadaAccountants',
+            body_template: `<p>Hi {{first_name}},</p>
+<p>This is our final reminder. Your unclaimed profile on CanadaAccountants will remain as-is — basic directory info only.</p>
+<p>Accountants who've claimed their profiles see <strong>3x more client inquiries</strong> on average. Plus, you'll get free access to our AI-powered dashboard tools.</p>
+<p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
+<p>If not, no worries — we won't email you about this again.</p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
           }
     ];
