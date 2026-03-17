@@ -2515,6 +2515,59 @@ app.post('/api/contact', async (req, res) => {
   }
 });
 
+// Re-engagement campaign: send apology to CPAs who clicked but hit 404
+app.post('/api/admin/outreach/reengage-clicked', async (req, res) => {
+  try {
+    const { subject_template, body_template, daily_limit = 300 } = req.body;
+    if (!subject_template || !body_template) {
+      return res.status(400).json({ error: 'subject_template and body_template required' });
+    }
+
+    // Create campaign
+    const campResult = await pool.query(
+      `INSERT INTO outreach_campaigns (name, type, subject_template, body_template, daily_limit, total_limit, status, max_sequence, follow_up_delay_days)
+       VALUES ($1, 'cpa', $2, $3, $4, 300, 'active', 1, 0) RETURNING id`,
+      ['CPA Re-engagement — Claim Page Fix', subject_template, body_template, daily_limit]
+    );
+    const campaignId = campResult.rows[0].id;
+
+    // Get clicked-no-claim CPAs with their recipient_id
+    const clicked = await pool.query(`
+      SELECT DISTINCT ON (oe.recipient_email)
+             oe.recipient_email, oe.recipient_name, oe.recipient_id
+      FROM outreach_emails oe
+      LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+      WHERE oe.clicked_at IS NOT NULL
+        AND oe.recipient_type = 'cpa'
+        AND (sc.claim_status IS NULL OR sc.claim_status != 'claimed')
+        AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
+      ORDER BY oe.recipient_email, oe.clicked_at DESC
+    `);
+
+    let queued = 0;
+    const crypto = require('crypto');
+    for (const r of clicked.rows) {
+      const unsubToken = crypto.randomBytes(24).toString('hex');
+      await pool.query(
+        `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token, variant_index, sequence_number)
+         VALUES ($1, 'cpa', $2, $3, $4, 'queued', $5, 0, 1)`,
+        [campaignId, r.recipient_id, r.recipient_email, r.recipient_name, unsubToken]
+      );
+      queued++;
+    }
+
+    // Update campaign queued count
+    await pool.query(
+      `UPDATE outreach_campaigns SET total_queued = $2, updated_at = NOW() WHERE id = $1`,
+      [campaignId, queued]
+    );
+
+    res.json({ success: true, campaignId, queued, message: `Campaign C${campaignId} created with ${queued} re-engagement emails queued` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Manual queue trigger (admin only)
 app.post('/api/admin/outreach/process-queue', async (req, res) => {
   try {
