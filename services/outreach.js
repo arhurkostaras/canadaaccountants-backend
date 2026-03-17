@@ -1318,20 +1318,20 @@ class OutreachEngine {
           COUNT(*) FILTER (WHERE status = 'bounced') AS bounced,
           COUNT(*) AS total
         FROM outreach_emails
-        WHERE sent_at >= NOW() - INTERVAL '24 hours'
+        WHERE sent_at >= CURRENT_DATE
           AND status IN ('sent','delivered','opened','clicked','bounced','complained')
       `);
 
       const bounced = parseInt(result.rows[0].bounced, 10);
       const total = parseInt(result.rows[0].total, 10);
 
-      if (total < 20) {
+      if (total < 50) {
         return { bounceRate: total > 0 ? bounced / total : 0, paused: false, reason: 'insufficient_volume' };
       }
 
       const bounceRate = bounced / total;
 
-      if (bounceRate > 0.05) {
+      if (bounceRate > 0.10) {
         console.error(`[Outreach] BOUNCE RATE CIRCUIT BREAKER: ${(bounceRate * 100).toFixed(1)}% bounce rate (${bounced}/${total} in 24h) — pausing ALL active campaigns`);
 
         // Pause all active campaigns
