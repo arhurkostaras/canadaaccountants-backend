@@ -1331,7 +1331,7 @@ class OutreachEngine {
           COUNT(*) FILTER (WHERE status = 'bounced') AS bounced,
           COUNT(*) AS total
         FROM outreach_emails
-        WHERE sent_at >= CURRENT_DATE
+        WHERE sent_at >= NOW() - INTERVAL '2 hours'
           AND status IN ('sent','delivered','opened','clicked','bounced','complained')
       `);
 
