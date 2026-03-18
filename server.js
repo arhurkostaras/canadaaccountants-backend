@@ -2853,6 +2853,42 @@ app.post('/api/stripe/create-portal-session', authenticateToken, async (req, res
 });
 
 // =====================================================
+// BOT CLICK FILTER — real human visit beacon
+// =====================================================
+
+// Add is_bot_click column if it doesn't exist
+pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS is_bot_click BOOLEAN DEFAULT false`).catch(() => {});
+pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS real_visit_at TIMESTAMPTZ`).catch(() => {});
+
+// POST /api/claim/real-visit — called by claim page JS to record a real human visit
+app.post('/api/claim/real-visit', async (req, res) => {
+  try {
+    const { ref } = req.body;
+    if (!ref) return res.status(400).json({ error: 'ref required' });
+
+    await pool.query(
+      `UPDATE outreach_emails SET real_visit_at = NOW(), is_bot_click = false WHERE unsubscribe_token = $1`,
+      [ref]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cleanup test claim records
+app.post('/api/admin/cleanup-test-claims', async (req, res) => {
+  try {
+    const r1 = await pool.query(`UPDATE scraped_cpas SET claim_status = 'unclaimed', claimed_by = NULL WHERE claimed_by IN (SELECT id FROM users WHERE email = 'test-dryrun-audit@example.com')`);
+    const r2 = await pool.query(`DELETE FROM users WHERE email = 'test-dryrun-audit@example.com'`);
+    res.json({ success: true, cpas_unclaimed: r1.rowCount, users_deleted: r2.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =====================================================
 // CLAIM PROFILE ENDPOINTS (free claim flow)
 // =====================================================
 

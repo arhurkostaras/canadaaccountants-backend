@@ -1062,6 +1062,18 @@ class OutreachEngine {
 
     const timestampCol = `${newStatus}_at`;
 
+    // Bot click detection: clicks within 60s of delivery are almost certainly email security scanners
+    let isBotClick = false;
+    if (newStatus === 'clicked' && outreachEmail.delivered_at) {
+      const deliveredAt = new Date(outreachEmail.delivered_at).getTime();
+      const now = Date.now();
+      const secondsSinceDelivery = (now - deliveredAt) / 1000;
+      if (secondsSinceDelivery < 60) {
+        isBotClick = true;
+        console.log(`[Outreach] Bot click detected: ${outreachEmail.recipient_email} clicked ${secondsSinceDelivery.toFixed(0)}s after delivery — flagging`);
+      }
+    }
+
     // Only update if the new status is "later" in the lifecycle
     const statusOrder = ['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'];
     const currentIdx = statusOrder.indexOf(outreachEmail.status);
@@ -1070,13 +1082,13 @@ class OutreachEngine {
     // Allow update for bounced/complained from any state, or for "forward" progression
     if (newStatus === 'bounced' || newStatus === 'complained' || newIdx > currentIdx) {
       await this.pool.query(
-        `UPDATE outreach_emails SET status = $2, ${timestampCol} = NOW() WHERE id = $1`,
+        `UPDATE outreach_emails SET status = $2, ${timestampCol} = NOW()${isBotClick ? ', is_bot_click = true' : ''} WHERE id = $1`,
         [outreachEmail.id, newStatus]
       );
     } else if (newStatus === 'opened' || newStatus === 'clicked') {
       // For opens/clicks, update the timestamp even if already in that status
       await this.pool.query(
-        `UPDATE outreach_emails SET ${timestampCol} = NOW() WHERE id = $1`,
+        `UPDATE outreach_emails SET ${timestampCol} = NOW()${isBotClick ? ', is_bot_click = true' : ''} WHERE id = $1`,
         [outreachEmail.id]
       );
     }
@@ -1090,7 +1102,8 @@ class OutreachEngine {
       'complained': 'total_complained',
     };
     const counterCol = counterMap[newStatus];
-    if (counterCol && newIdx > currentIdx) {
+    // Don't increment click counter for bot clicks
+    if (counterCol && newIdx > currentIdx && !(isBotClick && newStatus === 'clicked')) {
       await this.pool.query(
         `UPDATE outreach_campaigns SET ${counterCol} = ${counterCol} + 1, updated_at = NOW() WHERE id = $1`,
         [campaignId]
