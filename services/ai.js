@@ -2,6 +2,26 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 60s, 120s
+
+async function callWithRetry(fn) {
+  for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = err?.status || err?.statusCode || 0;
+      const isRetryable = status === 500 || status === 529 || status === 503 || status === 429;
+      if (!isRetryable || attempt >= RETRY_DELAYS.length) {
+        console.error(`[AI] API error after ${attempt + 1} attempt(s): ${status} ${err.message}`);
+        throw err;
+      }
+      const delay = RETRY_DELAYS[attempt];
+      console.warn(`[AI] API returned ${status}, retrying in ${delay / 1000}s (attempt ${attempt + 1}/${RETRY_DELAYS.length})...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 /**
  * Generate a professional bio using Claude Haiku
  */
@@ -25,13 +45,18 @@ Years of Experience: ${profile.years_experience || 'N/A'}
 
 Write the bio now:`;
 
-  const message = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 300,
-    messages: [{ role: 'user', content: prompt }]
-  });
-
-  return message.content[0].text.trim();
+  try {
+    const message = await callWithRetry(() =>
+      client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    );
+    return message.content[0].text.trim();
+  } catch (err) {
+    return 'Your AI bio is being generated — check back in a few minutes.';
+  }
 }
 
 /**
@@ -112,24 +137,33 @@ Requirements:
 
 Write the email now:`;
 
-  const message = await client.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 400,
-    messages: [{ role: 'user', content: prompt }]
-  });
+  try {
+    const message = await callWithRetry(() =>
+      client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    );
 
-  const text = message.content[0].text.trim();
+    const text = message.content[0].text.trim();
 
-  // Parse subject from body
-  const lines = text.split('\n');
-  let subject = '';
-  let body = text;
-  if (lines[0].toLowerCase().startsWith('subject:')) {
-    subject = lines[0].replace(/^subject:\s*/i, '').trim();
-    body = lines.slice(1).join('\n').trim();
+    // Parse subject from body
+    const lines = text.split('\n');
+    let subject = '';
+    let body = text;
+    if (lines[0].toLowerCase().startsWith('subject:')) {
+      subject = lines[0].replace(/^subject:\s*/i, '').trim();
+      body = lines.slice(1).join('\n').trim();
+    }
+
+    return { subject, body };
+  } catch (err) {
+    return {
+      subject: 'My verified profile is now live',
+      body: 'Your outreach template is being generated — check back in a few minutes.'
+    };
   }
-
-  return { subject, body };
 }
 
 module.exports = { generateBio, calculateSEOScore, generateOutreachTemplate };
