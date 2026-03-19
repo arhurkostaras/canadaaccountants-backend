@@ -328,6 +328,18 @@ class OutreachEngine {
         return;
       }
 
+      // Auto-relaunch: reactivate any paused or completed campaigns before processing
+      const stalled = await this.pool.query(
+        `SELECT id, name, status FROM outreach_campaigns WHERE status IN ('paused', 'completed')`
+      );
+      for (const camp of stalled.rows) {
+        await this.pool.query(
+          `UPDATE outreach_campaigns SET status = 'active', updated_at = NOW() WHERE id = $1`,
+          [camp.id]
+        );
+        console.log(`[Outreach] Auto-relaunched campaign ${camp.id} "${camp.name}" (was ${camp.status})`);
+      }
+
       // Get active campaigns
       const campaigns = await this.pool.query(
         `SELECT * FROM outreach_campaigns WHERE status = 'active'`
