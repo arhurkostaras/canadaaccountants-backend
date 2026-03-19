@@ -2176,6 +2176,24 @@ app.get('/api/admin/outreach/scraped-smes', authenticateToken, requireAdmin, asy
   }
 });
 
+// Bulk SME export for cross-platform sync (no auth — internal use)
+app.get('/api/admin/sme/export', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 5000, 10000);
+    const offset = parseInt(req.query.offset) || 0;
+    const result = await pool.query(
+      `SELECT business_name, contact_name, contact_email, industry, naics_code, province, city, website, phone, enrichment_source, source
+       FROM scraped_smes
+       WHERE contact_email IS NOT NULL AND contact_email != '' AND status != 'invalid'
+       ORDER BY id ASC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Outreach stats
 app.get('/api/admin/outreach/stats', async (req, res) => {
   try {
@@ -2512,6 +2530,26 @@ app.post('/api/contact', async (req, res) => {
   } catch (error) {
     console.error('❌ Contact form error:', error);
     res.status(500).json({ error: 'Failed to process contact form', details: error.message });
+  }
+});
+
+// Create a new campaign (no auth — admin use only)
+app.post('/api/admin/outreach/create-campaign', async (req, res) => {
+  try {
+    const { name, type, subject_template, body_template, daily_limit = 300, total_limit, subject_variants, follow_up_subjects } = req.body;
+    if (!name || !type || !subject_template || !body_template) {
+      return res.status(400).json({ error: 'name, type, subject_template, and body_template required' });
+    }
+    const result = await pool.query(
+      `INSERT INTO outreach_campaigns (name, type, subject_template, body_template, daily_limit, total_limit, status, max_sequence, follow_up_delay_days, subject_variants, follow_up_subjects)
+       VALUES ($1, $2, $3, $4, $5, $6, 'active', 3, 5, $7, $8) RETURNING id`,
+      [name, type, subject_template, body_template, daily_limit, total_limit || null,
+       subject_variants ? JSON.stringify(subject_variants) : null,
+       follow_up_subjects ? JSON.stringify(follow_up_subjects) : null]
+    );
+    res.json({ success: true, campaignId: result.rows[0].id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
