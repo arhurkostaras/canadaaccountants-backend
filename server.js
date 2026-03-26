@@ -3027,15 +3027,12 @@ app.post('/api/claim/instant', async (req, res) => {
     // Check if user already exists
     const existingUser = await pool.query(`SELECT id FROM users WHERE email = $1`, [email]);
     let userId;
-    let tempPassword;
 
     if (existingUser.rows.length > 0) {
       userId = existingUser.rows[0].id;
-      tempPassword = null; // existing user, no new password
     } else {
-      // Create new user account
-      tempPassword = crypto.randomBytes(8).toString('hex');
-      const passwordHash = await bcrypt.hash(tempPassword, 10);
+      // Create new user account with random password (magic link bypasses it)
+      const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10);
       const newUser = await pool.query(
         `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA') RETURNING id`,
         [email, passwordHash]
@@ -3054,36 +3051,35 @@ app.post('/api/claim/instant', async (req, res) => {
       console.error('[Claim] trackConversion error:', err.message);
     });
 
-    // Generate JWT
+    // Generate long-lived JWT for magic link (30 days)
     const token = jwt.sign(
       { userId, email, userType: 'CPA' },
       process.env.JWT_SECRET || 'your_jwt_secret_key',
       { expiresIn: '30d' }
     );
 
-    // Send welcome email with credentials
-    if (tempPassword) {
-      const loginUrl = `${FRONTEND_URL}/cpa-login`;
-      sendEmail({
-        to: email,
-        subject: 'Welcome to CanadaAccountants — Your Profile is Live!',
-        html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <h2 style="color: #1e3a8a;">Your CanadaAccountants Profile Has Been Claimed</h2>
-            <p>Hello ${profile.rows[0].first_name || 'there'},</p>
-            <p>Your professional profile on <strong>CanadaAccountants.app</strong> has been successfully claimed. Here are your login credentials:</p>
-            <div style="background: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0;">
-              <p style="margin: 5px 0;"><strong>Email:</strong> ${email}</p>
-              <p style="margin: 5px 0;"><strong>Temporary Password:</strong> ${tempPassword}</p>
-            </div>
-            <p>Please <a href="${loginUrl}" style="color: #2563eb;">log in here</a> and change your password at your earliest convenience.</p>
-            <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">If you did not request this, please contact us at support@canadaaccountants.app</p>
-          </div>
-        `
-      }).catch(err => console.error('[Claim] Welcome email error:', err.message));
-    }
+    // Generate magic login link — one click to access dashboard
+    const magicLink = `${FRONTEND_URL}/admin?token=${token}`;
 
-    res.json({ success: true, token, userId, tempPassword });
+    // Send magic link email — NO password, NO extra steps
+    sendEmail({
+      to: email,
+      subject: `You're in — access your CanadaAccountants dashboard`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <h2 style="color: #1e3a8a;">Your Profile is Claimed!</h2>
+          <p>Hello ${profile.rows[0].first_name || 'there'},</p>
+          <p>Your professional profile on <strong>CanadaAccountants.app</strong> is now live. Your AI bio is published and visible to clients searching for CPAs in ${profile.rows[0].province || 'your area'}.</p>
+          <p style="text-align: center; margin: 30px 0;">
+            <a href="${magicLink}" style="display: inline-block; background: linear-gradient(135deg, #2563eb, #1e3a8a); color: white; padding: 16px 40px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 16px;">Access Your Dashboard &rarr;</a>
+          </p>
+          <p style="color: #666; font-size: 14px;">This link logs you in automatically — no password needed. It expires in 30 days.</p>
+          <p style="color: #666; font-size: 14px;">From your dashboard you can edit your bio, update your specializations, and see client matches.</p>
+        </div>
+      `
+    }).catch(err => console.error('[Claim] Magic link email error:', err.message));
+
+    res.json({ success: true, token, userId, magicLink });
   } catch (error) {
     console.error('[Claim Instant] Error:', error.message);
     res.status(500).json({ error: 'Failed to process instant claim' });
