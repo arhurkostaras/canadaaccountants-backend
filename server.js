@@ -2953,9 +2953,6 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
 
     const p = profile.rows[0];
     const rawEmail = p.enriched_email || p.email || recipient_email || '';
-    const maskedEmail = rawEmail
-      ? rawEmail.replace(/^(.)(.*)(@.*)$/, (m, first, middle, domain) => first + '*'.repeat(Math.min(middle.length, 5)) + domain)
-      : '';
 
     res.json({
       name: p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim(),
@@ -2965,7 +2962,7 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
       city: p.city,
       province: p.province,
       credentials: p.designation,
-      email: maskedEmail
+      email: rawEmail
     });
   } catch (error) {
     console.error('[Claim Profile] Error:', error.message);
