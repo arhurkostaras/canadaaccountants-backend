@@ -2954,6 +2954,35 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
     const p = profile.rows[0];
     const rawEmail = p.enriched_email || p.email || recipient_email || '';
 
+    // Generate AI bio + SEO score on the fly — show value BEFORE claiming
+    let aiBio = null;
+    let seoScore = null;
+    try {
+      aiBio = await generateBio({
+        first_name: p.first_name,
+        last_name: p.last_name,
+        firm_name: p.firm_name,
+        city: p.city,
+        province: p.province,
+        designation: p.designation,
+      }, 'accountants');
+    } catch (e) { console.error('[Claim] AI bio generation error:', e.message); }
+
+    try {
+      seoScore = calculateSEOScore({
+        bio: aiBio,
+        phone: null,
+        specializations: null,
+        firm_name: p.firm_name,
+        designation: p.designation,
+        city: p.city,
+        province: p.province,
+        years_experience: null,
+        claim_status: 'unclaimed',
+        subscription_tier: null,
+      });
+    } catch (e) { /* non-critical */ }
+
     res.json({
       name: p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim(),
       firstName: p.first_name,
@@ -2962,7 +2991,9 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
       city: p.city,
       province: p.province,
       credentials: p.designation,
-      email: rawEmail
+      email: rawEmail,
+      aiBio,
+      seoScore,
     });
   } catch (error) {
     console.error('[Claim Profile] Error:', error.message);
