@@ -3090,6 +3090,22 @@ app.post('/api/claim/instant', async (req, res) => {
   }
 });
 
+// TEMPORARY: Admin password reset (remove after use)
+app.post('/api/admin/reset-password', async (req, res) => {
+  try {
+    const { email, newPassword } = req.body;
+    if (!email || !newPassword) return res.status(400).json({ error: 'email and newPassword required' });
+    const hash = await bcrypt.hash(newPassword, 10);
+    const result = await pool.query('UPDATE users SET password_hash = $1 WHERE email = $2 AND user_type = $3', [hash, email, 'admin']);
+    if (result.rowCount === 0) {
+      // Create admin if doesn't exist
+      await pool.query('INSERT INTO users (email, password_hash, user_type, email_verified, is_active) VALUES ($1, $2, $3, true, true)', [email, hash, 'admin']);
+      return res.json({ success: true, action: 'created' });
+    }
+    res.json({ success: true, action: 'updated', rowsAffected: result.rowCount });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
