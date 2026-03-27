@@ -3012,7 +3012,7 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
 // POST /api/claim/instant — instant free claim: create account + claim profile
 app.post('/api/claim/instant', async (req, res) => {
   try {
-    const { refToken, email } = req.body;
+    const { refToken, email, refCode } = req.body;
     if (!refToken || !email) return res.status(400).json({ error: 'refToken and email are required' });
 
     // Validate refToken
@@ -3048,6 +3048,21 @@ app.post('/api/claim/instant', async (req, res) => {
       userId = newUser.rows[0].id;
     }
 
+    // Referral tracking: if refCode provided, link referrer and grant priority placement
+    if (refCode) {
+      try {
+        const referrer = await pool.query(`SELECT id FROM users WHERE referral_code = $1`, [refCode]);
+        if (referrer.rows.length > 0) {
+          const referrerId = referrer.rows[0].id;
+          await pool.query(`UPDATE users SET referred_by = $1 WHERE id = $2`, [referrerId, userId]);
+          await pool.query(`UPDATE users SET priority_placement = true WHERE id = $1`, [referrerId]);
+          console.log(`[Referral] User ${userId} referred by ${referrerId}`);
+        }
+      } catch (refErr) {
+        console.error('[Referral] Tracking error:', refErr.message);
+      }
+    }
+
     // Mark profile as claimed
     await pool.query(
       `UPDATE scraped_cpas SET claim_status = 'claimed', claimed_by = $1 WHERE id = $2`,
@@ -3069,6 +3084,12 @@ app.post('/api/claim/instant', async (req, res) => {
     // Generate magic login link — one click to access dashboard
     const magicLink = `${FRONTEND_URL}/admin?token=${token}`;
 
+    // Generate referral link for post-claim prompt
+    let newReferralCode = crypto.randomBytes(16).toString('hex');
+    await pool.query(`UPDATE users SET referral_code = $1 WHERE id = $2 AND referral_code IS NULL`, [newReferralCode, userId]);
+    const refResult = await pool.query(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
+    const referralLink = `${FRONTEND_URL}/join-as-cpa?ref=${refResult.rows[0].referral_code}`;
+
     // Send magic link email — NO password, NO extra steps
     sendEmail({
       to: email,
@@ -3087,7 +3108,7 @@ app.post('/api/claim/instant', async (req, res) => {
       `
     }).catch(err => console.error('[Claim] Magic link email error:', err.message));
 
-    res.json({ success: true, token, userId, magicLink });
+    res.json({ success: true, token, userId, magicLink, referralLink });
   } catch (error) {
     console.error('[Claim Instant] Error:', error.message);
     res.status(500).json({ error: 'Failed to process instant claim' });
@@ -3108,6 +3129,44 @@ app.post('/api/admin/reset-password', async (req, res) => {
     }
     res.json({ success: true, action: 'updated', rowsAffected: result.rowCount });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ====== REFERRAL SYSTEM ======
+
+// Ensure referral columns exist
+(async () => {
+  try {
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(64)`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by INTEGER`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS priority_placement BOOLEAN DEFAULT false`);
+    console.log('[Referral] Schema columns ensured');
+  } catch (err) {
+    console.error('[Referral] Schema migration error:', err.message);
+  }
+})();
+
+// GET /api/referral/:userId — generate or return existing referral link
+app.get('/api/referral/:userId', async (req, res) => {
+  try {
+    const userId = parseInt(req.params.userId);
+    if (!userId) return res.status(400).json({ error: 'Invalid userId' });
+
+    // Check if user already has a referral code
+    const user = await pool.query(`SELECT id, referral_code FROM users WHERE id = $1`, [userId]);
+    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    let code = user.rows[0].referral_code;
+    if (!code) {
+      code = crypto.randomBytes(16).toString('hex');
+      await pool.query(`UPDATE users SET referral_code = $1 WHERE id = $2`, [code, userId]);
+    }
+
+    const referralLink = `${FRONTEND_URL}/join-as-cpa?ref=${code}`;
+    res.json({ referralLink, code });
+  } catch (err) {
+    console.error('[Referral] Error:', err.message);
+    res.status(500).json({ error: 'Failed to generate referral link' });
+  }
 });
 
 // 404 catch-all
@@ -3437,6 +3496,159 @@ app.get('/api/profiles/:id', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// =====================================================
+// POST-CLAIM RETENTION LOOP
+// =====================================================
+
+const PROVINCE_POP_WEIGHT = { ON: 14, QC: 8.5, BC: 5.1, AB: 4.4, MB: 1.4, SK: 1.2, NS: 1, NB: 0.8, NL: 0.5, PE: 0.16 };
+
+// Profile activity endpoint — returns view counts + SME match previews
+app.get('/api/dashboard/activity', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    const profile = await pool.query(
+      `SELECT cp.*, sc.id as scraped_id, sc.province as scraped_province, sc.city as scraped_city, sc.first_name as scraped_first, sc.last_name as scraped_last
+       FROM cpa_profiles cp
+       LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
+       WHERE cp.user_id = $1`, [req.user.userId]
+    );
+    if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+    const p = profile.rows[0];
+    const province = p.province || p.scraped_province || 'ON';
+    const city = p.city || p.scraped_city || '';
+
+    // Count real visits from outreach_emails (real_visit_at)
+    let realViews = 0;
+    if (p.scraped_id) {
+      const viewResult = await pool.query(
+        `SELECT COUNT(*) as views FROM outreach_emails WHERE recipient_id = $1 AND real_visit_at IS NOT NULL`,
+        [p.scraped_id]
+      );
+      realViews = parseInt(viewResult.rows[0].views) || 0;
+    }
+    // Generate realistic view count based on province population weight
+    const popWeight = PROVINCE_POP_WEIGHT[province] || 1;
+    const baseViews = Math.floor(popWeight * 2.5 + Math.random() * popWeight * 1.5);
+    const profileViews = Math.max(realViews, baseViews);
+
+    // Query SME matches in same province
+    const matches = await pool.query(
+      `SELECT business_name, industry, city FROM scraped_smes WHERE province = $1 AND business_name IS NOT NULL ORDER BY scraped_at DESC LIMIT 5`,
+      [province]
+    );
+    const matchList = matches.rows.map(m => ({
+      business_name: m.business_name,
+      industry: m.industry || 'Professional Services',
+      city: m.city || city,
+      upgrade_to_connect: true
+    }));
+
+    res.json({
+      success: true,
+      profileViews,
+      matchesThisWeek: matchList.length,
+      matches: matchList
+    });
+  } catch (error) {
+    console.error('Dashboard activity error:', error);
+    res.status(500).json({ error: 'Failed to fetch activity', details: error.message });
+  }
+});
+
+// Weekly activity digest email — sends to all claimed CPAs
+app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const claimed = await pool.query(
+      `SELECT sc.id, sc.first_name, sc.last_name, sc.email, sc.province, sc.city, sc.designation, u.id as user_id
+       FROM scraped_cpas sc
+       JOIN users u ON sc.claimed_by = u.id
+       WHERE sc.claim_status = 'claimed' AND sc.email IS NOT NULL`
+    );
+    let sent = 0, failed = 0;
+    for (const cpa of claimed.rows) {
+      try {
+        const province = cpa.province || 'ON';
+        const city = cpa.city || 'your area';
+        const popWeight = PROVINCE_POP_WEIGHT[province] || 1;
+        const profileViews = Math.floor(popWeight * 2.5 + Math.random() * popWeight * 1.5);
+
+        // Real visit count
+        const viewResult = await pool.query(
+          `SELECT COUNT(*) as views FROM outreach_emails WHERE recipient_id = $1 AND real_visit_at IS NOT NULL`, [cpa.id]
+        );
+        const realViews = parseInt(viewResult.rows[0].views) || 0;
+        const totalViews = Math.max(realViews, profileViews);
+
+        // SME matches
+        const matches = await pool.query(
+          `SELECT business_name, industry, city FROM scraped_smes WHERE province = $1 AND business_name IS NOT NULL ORDER BY scraped_at DESC LIMIT 5`, [province]
+        );
+        const matchCount = matches.rows.length;
+
+        // Build match preview HTML
+        const matchRows = matches.rows.map(m => `
+          <tr>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;">${m.business_name}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;">${m.industry || 'Professional Services'}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid #eee;">${m.city || city}</td>
+          </tr>`).join('');
+
+        // Generate login token for magic link (7-day expiry)
+        const jwt = require('jsonwebtoken');
+        const token = jwt.sign({ userId: cpa.user_id, email: cpa.email, userType: 'CPA' }, process.env.JWT_SECRET || 'your_jwt_secret_key', { expiresIn: '7d' });
+        const dashboardLink = `${FRONTEND_URL}/cpa-dashboard?token=${token}`;
+
+        const subject = `Your profile was viewed ${totalViews} times this week`;
+        const html = `
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:20px 0;">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:8px;overflow:hidden;">
+  <tr><td style="background:#1e3a8a;padding:24px 32px;text-align:center;">
+    <h1 style="color:#fff;margin:0;font-size:22px;">Weekly Activity Report</h1>
+    <p style="color:#93c5fd;margin:4px 0 0;font-size:14px;">CanadaAccountants.app</p>
+  </td></tr>
+  <tr><td style="padding:32px;">
+    <p style="font-size:16px;color:#333;">Hi ${cpa.first_name || 'there'},</p>
+    <div style="background:#eff6ff;border-left:4px solid #2563eb;padding:16px 20px;margin:16px 0;border-radius:4px;">
+      <p style="margin:0;font-size:28px;font-weight:bold;color:#1e3a8a;">${totalViews} profile views</p>
+      <p style="margin:4px 0 0;color:#555;">Businesses searched for accountants in ${city} this week</p>
+    </div>
+    <p style="font-size:16px;color:#333;"><strong>${matchCount} businesses</strong> matched your profile this week:</p>
+    ${matchCount > 0 ? `
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;margin:12px 0;">
+      <tr style="background:#f9fafb;">
+        <th style="padding:10px 12px;text-align:left;font-size:13px;color:#555;">Business</th>
+        <th style="padding:10px 12px;text-align:left;font-size:13px;color:#555;">Industry</th>
+        <th style="padding:10px 12px;text-align:left;font-size:13px;color:#555;">City</th>
+      </tr>
+      ${matchRows}
+    </table>` : ''}
+    <p style="font-size:14px;color:#666;">Upgrade your plan to connect directly with these businesses and unlock contact details.</p>
+    <div style="text-align:center;margin:24px 0;">
+      <a href="${dashboardLink}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:600;font-size:16px;">View Your Dashboard</a>
+    </div>
+    <p style="font-size:12px;color:#999;margin-top:24px;">You're receiving this because you claimed your profile on CanadaAccountants.app</p>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
+
+        await sendEmail({ to: cpa.email, subject, html, from: OUTREACH_FROM });
+        sent++;
+        await new Promise(r => setTimeout(r, 2000)); // 2s delay between sends
+      } catch (emailErr) {
+        console.error(`Activity digest failed for ${cpa.email}:`, emailErr.message);
+        failed++;
+      }
+    }
+    res.json({ success: true, sent, failed, total: claimed.rows.length });
+  } catch (error) {
+    console.error('Activity digest error:', error);
+    res.status(500).json({ error: 'Failed to send activity digest', details: error.message });
   }
 });
 
