@@ -1044,7 +1044,7 @@ class SequenceEngine {
       designation: professional.designation || '',
       platform_name: platformNames[this.platform] || this.platform,
       platform_url: baseUrl,
-      claim_url: unsubToken ? `${baseUrl}/claim-profile.html?ref=${unsubToken}` : `${baseUrl}/claim-profile.html`,
+      claim_url: unsubToken ? `${baseUrl}/claim-profile?ref=${unsubToken}` : `${baseUrl}/claim-profile`,
       unsubscribe_url: unsubToken ? `${backendUrl}/api/unsubscribe/${unsubToken}` : `${baseUrl}/unsubscribe/${professional.id}`
     };
   }
