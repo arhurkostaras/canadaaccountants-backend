@@ -686,6 +686,14 @@ const crmIntelligence = new CRMIntelligence({
     console.error('[CRM] Migration error:', err.message);
   }
 
+  // Add generated_bio column for SEO profile pages
+  try {
+    await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS generated_bio TEXT`);
+    console.log('[Migration] generated_bio column verified on scraped_cpas');
+  } catch (err) {
+    console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
+  }
+
   // Seed core sequences (creates new or updates existing with new steps)
   try {
     const existing = await sequenceEngine.getSequences();
@@ -3340,6 +3348,96 @@ app.get('/api/admin/crm/intelligence/bounce-report', authenticateToken, requireA
     const domains = await crmIntelligence.getBounceReport(parseInt(req.query.hours) || 48);
     res.json({ success: true, ...check, domains });
   } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ==================== BULK BIO GENERATION ====================
+app.post('/api/admin/generate-bios', authenticateToken, requireAdmin, async (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+  res.json({ success: true, message: `Bio generation started (limit: ${limit}). Processing in background.` });
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, first_name, last_name, firm_name, city, province, designation, specializations, years_experience
+       FROM scraped_cpas
+       WHERE generated_bio IS NULL AND first_name IS NOT NULL AND last_name IS NOT NULL
+       ORDER BY CASE WHEN claim_status = 'claimed' THEN 0 ELSE 1 END, id
+       LIMIT $1`,
+      [limit]
+    );
+
+    console.log(`[Bio] Starting bulk generation for ${rows.length} CPAs...`);
+    let generated = 0, errors = 0;
+
+    for (const row of rows) {
+      try {
+        const bio = await generateBio(row, 'accountants');
+        if (bio && !bio.includes('being generated')) {
+          await pool.query('UPDATE scraped_cpas SET generated_bio = $1 WHERE id = $2', [bio, row.id]);
+          generated++;
+        } else {
+          errors++;
+        }
+        if (generated % 10 === 0) console.log(`[Bio] Progress: ${generated}/${rows.length} generated`);
+        await new Promise(r => setTimeout(r, 1000));
+      } catch (err) {
+        errors++;
+        console.error(`[Bio] Error for CPA ${row.id}: ${err.message}`);
+      }
+    }
+
+    console.log(`[Bio] Complete: ${generated} generated, ${errors} errors out of ${rows.length} processed`);
+  } catch (err) {
+    console.error('[Bio] Bulk generation failed:', err.message);
+  }
+});
+
+// ==================== PUBLIC PROFILE PAGE (SEO) ====================
+app.get('/api/profiles/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, first_name, last_name, firm_name, city, province, designation, specializations,
+              years_experience, generated_bio, claim_status
+       FROM scraped_cpas WHERE id = $1`,
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const p = rows[0];
+    const fullName = `${p.first_name} ${p.last_name}`.trim();
+    const jobTitle = p.designation ? `${p.designation} — Chartered Professional Accountant` : 'Chartered Professional Accountant';
+    const location = [p.city, p.province].filter(Boolean).join(', ');
+
+    const jsonLd = {
+      '@context': 'https://schema.org',
+      '@type': 'Person',
+      name: fullName,
+      jobTitle,
+      ...(p.firm_name && { worksFor: { '@type': 'Organization', name: p.firm_name } }),
+      ...(location && { address: { '@type': 'PostalAddress', addressLocality: p.city || '', addressRegion: p.province || '', addressCountry: 'CA' } }),
+      ...(p.generated_bio && { description: p.generated_bio }),
+      url: `https://canadaaccountants.app/profile/${p.id}`
+    };
+
+    res.json({
+      profile: {
+        id: p.id,
+        name: fullName,
+        first_name: p.first_name,
+        last_name: p.last_name,
+        firm_name: p.firm_name,
+        city: p.city,
+        province: p.province,
+        designation: p.designation,
+        specializations: p.specializations,
+        years_experience: p.years_experience,
+        bio: p.generated_bio,
+        claimed: p.claim_status === 'claimed'
+      },
+      structured_data: jsonLd
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Sentry error handler (must be before app.listen, after all routes)
