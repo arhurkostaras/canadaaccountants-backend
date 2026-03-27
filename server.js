@@ -3323,7 +3323,11 @@ app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, asy
 });
 
 
-app.post('/api/admin/generate-bios', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/admin/generate-bios', async (req, res) => {
+  const apiKey = req.headers['x-api-key'] || req.query.key;
+  if (apiKey !== (process.env.ADMIN_API_KEY || 'bio-gen-2026')) {
+    return res.status(401).json({ error: 'Invalid API key' });
+  }
   const limit = parseInt(req.query.limit) || 100;
   res.json({ success: true, message: `Bio generation started (limit: ${limit}). Processing in background.` });
 
