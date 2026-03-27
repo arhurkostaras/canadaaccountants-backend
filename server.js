@@ -3429,6 +3429,52 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`⚡ Friction Elimination Engine Active!`);
 });
 
+
+// Purge all bounced emails: suppress + dequeue + invalidate
+app.post('/api/admin/purge-bounces', async (req, res) => {
+  try {
+    // 1. Find all bounced emails
+    const bounced = await pool.query(
+      `SELECT DISTINCT recipient_email as email FROM outreach_emails WHERE status = 'bounced' AND recipient_email IS NOT NULL`
+    );
+    
+    let suppressed = 0, dequeued = 0, invalidated = 0;
+    
+    for (const row of bounced.rows) {
+      const email = row.email;
+      
+      // 2. Add to suppression list
+      try {
+        await pool.query(
+          `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at) VALUES ($1, 'permanent_bounce', NOW()) ON CONFLICT (email) DO NOTHING`,
+          [email]
+        );
+        suppressed++;
+      } catch (e) {}
+      
+      // 3. Dequeue from active queues
+      const dq = await pool.query(
+        `UPDATE outreach_emails SET status = 'failed' WHERE recipient_email = $1 AND status = 'queued'`,
+        [email]
+      );
+      dequeued += dq.rowCount;
+      
+      // 4. Mark profile as invalid
+      try {
+        await pool.query(
+          `UPDATE scraped_cpas SET status = 'invalid' WHERE (email = $1 OR enriched_email = $1)`,
+          [email]
+        );
+        invalidated += dq.rowCount > 0 ? 1 : 0;
+      } catch (e) {}
+    }
+    
+    res.json({ success: true, totalBounced: bounced.rows.length, suppressed, dequeued, invalidated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
