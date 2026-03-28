@@ -75,11 +75,21 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         const session = event.data.object;
         const cpaProfileId = session.metadata?.cpa_profile_id;
         const planType = session.metadata?.plan_type;
+        const userId = session.metadata?.userId;
+        const tier = session.metadata?.tier || planType;
         if (cpaProfileId && session.subscription) {
           await pool.query(
             `UPDATE cpa_subscriptions SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', current_period_start = NOW(), updated_at = NOW() WHERE cpa_profile_id = $3`,
             [session.subscription, session.customer, cpaProfileId]
           );
+        }
+        // Update users table with subscription info for upgrade gate
+        if (userId) {
+          await pool.query(
+            `UPDATE users SET subscription_tier = $1, subscription_status = 'active', stripe_customer_id = $2 WHERE id = $3`,
+            [tier, session.customer, userId]
+          );
+          console.log(`[Stripe] User ${userId} subscribed to ${tier}`);
         }
         console.log(`Checkout completed for CPA ${cpaProfileId}, plan: ${planType}`);
         break;
@@ -2838,11 +2848,13 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
 
     let customerEmail = email;
     let cpaProfileId = profileId;
+    let userId = null;
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       try {
         const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET || 'your_jwt_secret_key');
         customerEmail = customerEmail || decoded.email;
+        userId = decoded.userId;
         if (!cpaProfileId) {
           const profileResult = await pool.query('SELECT id FROM cpa_profiles WHERE user_id = $1', [decoded.userId]);
           if (profileResult.rows.length > 0) cpaProfileId = profileResult.rows[0].id.toString();
@@ -2856,9 +2868,15 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
       mode: 'subscription',
       payment_method_types: ['card'],
       line_items: [{ price: stripePriceId, quantity: 1 }],
-      success_url: `${FRONTEND_URL}/checkout-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${FRONTEND_URL}/pricing`,
-      metadata: { cpa_profile_id: cpaProfileId || '', plan_type: tier || planType || lookupKey, interval: interval || 'monthly' },
+      success_url: `${FRONTEND_URL}/admin?upgraded=true`,
+      cancel_url: `${FRONTEND_URL}/admin?upgraded=false`,
+      metadata: {
+        cpa_profile_id: cpaProfileId || '',
+        plan_type: tier || planType || lookupKey,
+        interval: interval || 'monthly',
+        userId: userId ? String(userId) : '',
+        tier: tier || planType || lookupKey
+      },
       customer_email: customerEmail
     });
 
@@ -3139,6 +3157,9 @@ app.post('/api/admin/reset-password', async (req, res) => {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(64)`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by INTEGER`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS priority_placement BOOLEAN DEFAULT false`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50)`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50)`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255)`);
     console.log('[Referral] Schema columns ensured');
   } catch (err) {
     console.error('[Referral] Schema migration error:', err.message);
@@ -3224,6 +3245,72 @@ app.get('/api/dashboard/activity', authenticateToken, requireCPA, async (req, re
   } catch (error) {
     console.error('Dashboard activity error:', error);
     res.status(500).json({ error: 'Failed to fetch activity', details: error.message });
+  }
+});
+
+// Dashboard matches endpoint — upgrade gate: free users get previews, subscribers get full details
+app.get('/api/dashboard/matches', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    // Get user subscription status
+    const subResult = await pool.query(
+      `SELECT cs.status, cs.plan_type FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1 AND cs.status = 'active'`,
+      [req.user.userId]
+    );
+    // Also check users table for subscription_status
+    const userResult = await pool.query(
+      `SELECT subscription_tier, subscription_status FROM users WHERE id = $1`,
+      [req.user.userId]
+    );
+    const hasSubscription = (subResult.rows.length > 0) || (userResult.rows[0]?.subscription_status === 'active');
+    const tier = subResult.rows[0]?.plan_type || userResult.rows[0]?.subscription_tier || null;
+
+    // Get user's province from profile
+    const profile = await pool.query(
+      `SELECT cp.province, cp.city, sc.province as scraped_province, sc.city as scraped_city
+       FROM cpa_profiles cp
+       LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
+       WHERE cp.user_id = $1`, [req.user.userId]
+    );
+    const province = profile.rows[0]?.province || profile.rows[0]?.scraped_province || 'ON';
+
+    // Query scraped_smes in user's province
+    const matches = await pool.query(
+      `SELECT business_name, industry, city, contact_name, contact_email, phone FROM scraped_smes WHERE province = $1 AND business_name IS NOT NULL ORDER BY scraped_at DESC LIMIT 10`,
+      [province]
+    );
+
+    if (hasSubscription) {
+      // Full match details for subscribers
+      res.json({
+        success: true,
+        subscribed: true,
+        tier,
+        matches: matches.rows.map(m => ({
+          business_name: m.business_name,
+          industry: m.industry || 'Professional Services',
+          city: m.city || '',
+          contact_name: m.contact_name || '',
+          contact_email: m.contact_email || '',
+          phone: m.phone || ''
+        }))
+      });
+    } else {
+      // Preview only for free users
+      res.json({
+        success: true,
+        subscribed: false,
+        tier: null,
+        matches: matches.rows.map(m => ({
+          business_name: m.business_name,
+          industry: m.industry || 'Professional Services',
+          city: m.city || '',
+          upgrade_to_connect: true
+        }))
+      });
+    }
+  } catch (error) {
+    console.error('Dashboard matches error:', error);
+    res.status(500).json({ error: 'Failed to fetch matches', details: error.message });
   }
 });
 
