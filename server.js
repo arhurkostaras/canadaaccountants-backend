@@ -3371,8 +3371,8 @@ app.post('/api/admin/generate-bios', async (req, res) => {
 app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, first_name, last_name, firm_name, city, province, designation, specializations,
-              years_experience, generated_bio, claim_status
+      `SELECT id, first_name, last_name, firm_name, city, province, designation,
+              generated_bio, claim_status
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
