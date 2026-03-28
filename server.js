@@ -3333,7 +3333,7 @@ app.post('/api/admin/generate-bios', async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `SELECT id, first_name, last_name, firm_name, city, province, designation, specializations, years_experience
+      `SELECT id, first_name, last_name, firm_name, city, province, designation
        FROM scraped_cpas
        WHERE generated_bio IS NULL AND first_name IS NOT NULL AND last_name IS NOT NULL
        ORDER BY CASE WHEN claim_status = 'claimed' THEN 0 ELSE 1 END, id
@@ -3404,8 +3404,8 @@ app.get('/api/profiles/:id', async (req, res) => {
         city: p.city,
         province: p.province,
         designation: p.designation,
-        specializations: p.specializations,
-        years_experience: p.years_experience,
+        
+        
         bio: p.generated_bio,
         claimed: p.claim_status === 'claimed'
       },
