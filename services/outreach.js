@@ -987,7 +987,7 @@ class OutreachEngine {
     if (unsubToken) {
       body = body.replace(
         /href="https:\/\/canadaaccountants\.app\/(join-as-cpa|claim-profile)"/g,
-        `href="https://canadaaccountants.app/claim-profile?ref=${unsubToken}"`
+        `href="https://canadaaccountants.app/profile?id=${emailRecord.recipient_id}&ref=${unsubToken}"`
       );
     }
 
