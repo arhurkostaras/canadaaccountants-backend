@@ -470,7 +470,7 @@ app.post('/api/cpa-registration', async (req, res) => {
     const insertQuery = `
       INSERT INTO cpa_profiles (
     cpa_id, first_name, last_name, email, phone, firm_name,
-    province, years_experience, firm_size, specializations, industries_served,
+    province, years_experience, firm_size, designation, industries_served,
     hourly_rate_min, profile_status, verification_status, created_date
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
 ON CONFLICT (email) 
@@ -1097,7 +1097,7 @@ app.post('/api/friction/cpa-registration', async (req, res) => {
     const insertQuery = `
       INSERT INTO cpa_friction_profiles (
         registration_id, marketing_waste_amount, sales_cycle_length, current_win_rate,
-        lead_generation_method, biggest_challenge, target_client_size, specializations,
+        lead_generation_method, biggest_challenge, target_client_size, designation,
         contact_info, availability, friction_elimination_score, created_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
       RETURNING *;
@@ -1602,7 +1602,7 @@ async function storeFrictionMatches(requestId, matches) {
     for (const match of matches) {
       const insertQuery = `
         INSERT INTO friction_matches (
-          request_id, cpa_id, cpa_name, specializations, match_score,
+          request_id, cpa_id, cpa_name, designation, match_score,
           friction_expertise, success_rate, avg_time_savings, avg_cost_savings,
           location, availability, created_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW());
@@ -1720,7 +1720,7 @@ app.put('/api/cpa/my-profile', authenticateToken, requireCPA, async (req, res) =
 
     const result = await pool.query(`
       UPDATE cpa_profiles SET
-        specializations = COALESCE($1, specializations),
+        specializations = COALESCE($1, designation),
         hourly_rate_min = COALESCE($2, hourly_rate_min),
         firm_name = COALESCE($3, firm_name),
         province = COALESCE($4, province),
@@ -3646,7 +3646,7 @@ app.post('/api/admin/send-weekly-digest', async (req, res) => {
         try {
           // Look up their CPA record
           const { rows: cpas } = await pool.query(
-            `SELECT id, first_name, last_name, city, province, phone, specializations, firm_name
+            `SELECT id, first_name, last_name, city, province, phone, designation, firm_name
              FROM scraped_cpas WHERE COALESCE(enriched_email, email) = $1 LIMIT 1`,
             [r.recipient_email]
           );
@@ -3729,7 +3729,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
     // Helper: get CPA by email
     const getCPA = async (email) => {
       const { rows } = await pool.query(
-        `SELECT id, first_name, last_name, city, province, designation, firm_name, specializations, generated_bio
+        `SELECT id, first_name, last_name, city, province, designation, firm_name, designation, generated_bio
          FROM scraped_cpas WHERE COALESCE(enriched_email, email) = $1 LIMIT 1`, [email]
       );
       return rows[0] || null;
