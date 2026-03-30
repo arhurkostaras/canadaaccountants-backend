@@ -3459,14 +3459,52 @@ app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, first_name, last_name, firm_name, city, province, designation,
-              generated_bio, claim_status
+              specializations, years_experience, phone, bio, generated_bio,
+              claim_status, subscription_tier, unsubscribe_token
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
 
     const p = rows[0];
-    const fullName = `${p.first_name} ${p.last_name}`.trim();
+
+    // Flip "Last, First" to "First Last" if needed
+    let firstName = p.first_name || '';
+    let lastName = p.last_name || '';
+    if (firstName.includes(',') && !lastName) {
+      const parts = firstName.split(',').map(s => s.trim());
+      lastName = parts[0];
+      firstName = parts[1] || '';
+    }
+    const fullName = `${firstName} ${lastName}`.trim();
+
+    // Generate AI bio on-the-fly if missing
+    let bio = p.generated_bio;
+    if (!bio) {
+      try {
+        bio = await generateBio({ ...p, first_name: firstName, last_name: lastName }, 'accountants');
+        // Persist for future requests (fire and forget)
+        pool.query('UPDATE scraped_cpas SET generated_bio = $1 WHERE id = $2', [bio, p.id]).catch(() => {});
+      } catch (bioErr) {
+        console.error(`[Profile] Bio generation failed for id=${p.id}:`, bioErr.message);
+        bio = null;
+      }
+    }
+
+    // Calculate SEO score on-the-fly
+    const seoScore = calculateSEOScore({
+      bio: bio || p.bio,
+      phone: p.phone,
+      specializations: p.specializations,
+      firm_name: p.firm_name,
+      designation: p.designation,
+      city: p.city,
+      province: p.province,
+      years_experience: p.years_experience,
+      claim_status: p.claim_status,
+      subscription_tier: p.subscription_tier
+    });
+
     const jobTitle = p.designation ? `${p.designation} — Chartered Professional Accountant` : 'Chartered Professional Accountant';
     const location = [p.city, p.province].filter(Boolean).join(', ');
 
@@ -3477,28 +3515,32 @@ app.get('/api/profiles/:id', async (req, res) => {
       jobTitle,
       ...(p.firm_name && { worksFor: { '@type': 'Organization', name: p.firm_name } }),
       ...(location && { address: { '@type': 'PostalAddress', addressLocality: p.city || '', addressRegion: p.province || '', addressCountry: 'CA' } }),
-      ...(p.generated_bio && { description: p.generated_bio }),
-      url: `https://canadaaccountants.app/profile/${p.id}`
+      ...(bio && { description: bio }),
+      url: `https://canadaaccountants.app/profile?id=${p.id}`
     };
 
     res.json({
       profile: {
         id: p.id,
         name: fullName,
-        first_name: p.first_name,
-        last_name: p.last_name,
+        first_name: firstName,
+        last_name: lastName,
         firm_name: p.firm_name,
         city: p.city,
         province: p.province,
         designation: p.designation,
-        
-        
-        bio: p.generated_bio,
-        claimed: p.claim_status === 'claimed'
+        specializations: p.specializations,
+        years_experience: p.years_experience,
+        bio: bio,
+        claim_status: p.claim_status || 'unclaimed',
+        claimed: p.claim_status === 'claimed',
+        ref_token: p.unsubscribe_token || null
       },
+      seo_score: seoScore,
       structured_data: jsonLd
     });
   } catch (err) {
+    console.error('[Profile] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
