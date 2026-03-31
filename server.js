@@ -3650,89 +3650,95 @@ app.post('/api/admin/purge-bounces', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════
 // ENGAGEMENT LAYER 1: Weekly Digest
 // ═══════════════════════════════════════════════════════════════════
-app.post('/api/admin/send-weekly-digest', async (req, res) => {
-  try {
-    const PROVINCE_POP = { ON: 14, QC: 8.5, BC: 5.1, AB: 4.4, MB: 1.4, SK: 1.2, NS: 1, NB: 0.8, NL: 0.5, PE: 0.16 };
-    const delay = ms => new Promise(r => setTimeout(r, ms));
+// Weekly digest state (in-memory)
+const digestState = { running: false, lastRun: null, sent: 0, errors: 0, total: 0, remaining: 0 };
 
-    // Get all unique recipients who have been emailed
-    const { rows: recipients } = await pool.query(
-      `SELECT DISTINCT recipient_email FROM outreach_emails
+app.post('/api/admin/send-weekly-digest', async (req, res) => {
+  if (digestState.running) {
+    return res.status(409).json({ status: 'already_running', ...digestState });
+  }
+
+  // Count recipients first
+  try {
+    const { rows } = await pool.query(
+      `SELECT COUNT(DISTINCT recipient_email) as total FROM outreach_emails
        WHERE status IN ('sent','delivered','opened','clicked')
          AND recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)`
     );
+    const total = parseInt(rows[0].total);
+    digestState.running = true;
+    digestState.lastRun = new Date().toISOString();
+    digestState.sent = 0;
+    digestState.errors = 0;
+    digestState.total = total;
+    digestState.remaining = total;
 
-    let sent = 0, failed = 0;
-    for (let i = 0; i < recipients.length; i += 100) {
-      const batch = recipients.slice(i, i + 100);
-      for (const r of batch) {
-        try {
-          // Look up their CPA record
-          const { rows: cpas } = await pool.query(
-            `SELECT id, first_name, last_name, city, province, phone, designation, firm_name
-             FROM scraped_cpas WHERE COALESCE(enriched_email, email) = $1 LIMIT 1`,
-            [r.recipient_email]
-          );
-          if (cpas.length === 0) continue;
-          const cpa = cpas[0];
-          const province = (cpa.province || 'ON').toUpperCase();
-          const popWeight = PROVINCE_POP[province] || 1;
-          const views = Math.floor(popWeight * (Math.random() * 3 + 2));
-
-          // Count CPAs in their city
-          const { rows: cityCount } = await pool.query(
-            `SELECT COUNT(*) FROM scraped_cpas WHERE city = $1`, [cpa.city || 'Unknown']
-          );
-          const totalInCity = parseInt(cityCount[0].count) || 10;
-          const rank = Math.floor(Math.random() * totalInCity * 0.6) + 1;
-
-          // Generate tip
-          let tip = '';
-          if (!cpa.phone) tip = 'Add your phone number — profiles with a phone get 40% more inquiries.';
-          else if (!cpa.specializations) tip = 'Add your specializations — clients search by specialty first.';
-          else if (!cpa.firm_name) tip = 'Add your firm name — it builds trust and improves search ranking.';
-          else tip = 'Your profile is looking strong! Consider upgrading for priority placement.';
-
-          const firstName = cpa.first_name || 'there';
-          const city = cpa.city || province;
-          const subject = `Your profile this week — ${views} views in ${city}`;
-          const profileUrl = `${FRONTEND_URL}/profile?id=${cpa.id}`;
-
-          const html = `
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;">
-  <h2 style="color:#1e3a8a;">Weekly Profile Report</h2>
-  <p>Hi ${firstName},</p>
-  <div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;">
-    <div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div>
-    <div style="color:#666;font-size:14px;">profile views this week</div>
-  </div>
-  <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-    <tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Search appearances in ${city}</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${totalInCity}</td></tr>
-    <tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Your ranking</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">#${rank} of ${totalInCity}</td></tr>
-  </table>
-  <div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;">
-    <strong style="color:#92400e;">Tip to boost your profile:</strong>
-    <p style="margin:8px 0 0;color:#78350f;">${tip}</p>
-  </div>
-  <p style="text-align:center;margin:24px 0;">
-    <a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a>
-  </p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
-</div>`;
-          await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
-          sent++;
-          await delay(2000);
-        } catch (e) {
-          console.error(`[WeeklyDigest] Failed for ${r.recipient_email}:`, e.message);
-          failed++;
-        }
-      }
-    }
-    res.json({ success: true, sent, failed, total: recipients.length });
+    res.status(202).json({ status: 'accepted', total, message: 'Digest processing in background' });
   } catch (err) {
-    console.error('[WeeklyDigest] Error:', err.message);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
+
+  // Process in background
+  (async () => {
+    try {
+      const PROVINCE_POP = { ON: 14, QC: 8.5, BC: 5.1, AB: 4.4, MB: 1.4, SK: 1.2, NS: 1, NB: 0.8, NL: 0.5, PE: 0.16 };
+      const delay = ms => new Promise(r => setTimeout(r, ms));
+
+      const { rows: recipients } = await pool.query(
+        `SELECT DISTINCT recipient_email FROM outreach_emails
+         WHERE status IN ('sent','delivered','opened','clicked')
+           AND recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)`
+      );
+
+      for (let i = 0; i < recipients.length; i += 50) {
+        const batch = recipients.slice(i, i + 50);
+        for (const r of batch) {
+          try {
+            const { rows: cpas } = await pool.query(
+              `SELECT id, first_name, last_name, city, province, phone, designation, firm_name
+               FROM scraped_cpas WHERE COALESCE(enriched_email, email) = $1 LIMIT 1`,
+              [r.recipient_email]
+            );
+            if (cpas.length === 0) { digestState.remaining--; continue; }
+            const cpa = cpas[0];
+            const province = (cpa.province || 'ON').toUpperCase();
+            const popWeight = PROVINCE_POP[province] || 1;
+            const views = Math.floor(popWeight * (Math.random() * 3 + 2));
+            const { rows: cityCount } = await pool.query(
+              `SELECT COUNT(*) FROM scraped_cpas WHERE city = $1`, [cpa.city || 'Unknown']
+            );
+            const totalInCity = parseInt(cityCount[0].count) || 10;
+            const rank = Math.floor(Math.random() * totalInCity * 0.6) + 1;
+            let tip = '';
+            if (!cpa.phone) tip = 'Add your phone number — profiles with a phone get 40% more inquiries.';
+            else if (!cpa.firm_name) tip = 'Add your firm name — it builds trust and improves search ranking.';
+            else tip = 'Your profile is looking strong! Consider upgrading for priority placement.';
+            const firstName = cpa.first_name || 'there';
+            const city = cpa.city || province;
+            const subject = `Your profile this week — ${views} views in ${city}`;
+            const profileUrl = `${FRONTEND_URL}/profile?id=${cpa.id}`;
+            const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;"><h2 style="color:#1e3a8a;">Weekly Profile Report</h2><p>Hi ${firstName},</p><div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;"><div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div><div style="color:#666;font-size:14px;">profile views this week</div></div><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Search appearances in ${city}</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${totalInCity}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Your ranking</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">#${rank} of ${totalInCity}</td></tr></table><div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;"><strong style="color:#92400e;">Tip to boost your profile:</strong><p style="margin:8px 0 0;color:#78350f;">${tip}</p></div><p style="text-align:center;margin:24px 0;"><a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p><p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p></div>`;
+            await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
+            digestState.sent++;
+          } catch (e) {
+            console.error(`[WeeklyDigest] Failed for ${r.recipient_email}:`, e.message);
+            digestState.errors++;
+          }
+          digestState.remaining--;
+        }
+        await delay(1000); // 1s between batches of 50
+      }
+      console.log(`[WeeklyDigest] Complete: sent=${digestState.sent}, errors=${digestState.errors}, total=${digestState.total}`);
+    } catch (err) {
+      console.error('[WeeklyDigest] Fatal:', err.message);
+    } finally {
+      digestState.running = false;
+    }
+  })();
+});
+
+app.get('/api/admin/digest-status', async (req, res) => {
+  res.json(digestState);
 });
 
 // ═══════════════════════════════════════════════════════════════════
