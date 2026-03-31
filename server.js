@@ -3491,8 +3491,7 @@ app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, first_name, last_name, firm_name, city, province, designation,
-              specializations, years_experience, phone, bio, generated_bio,
-              claim_status, subscription_tier, unsubscribe_token
+              phone, bio, generated_bio, claim_status
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
@@ -3561,12 +3560,9 @@ app.get('/api/profiles/:id', async (req, res) => {
         city: p.city,
         province: p.province,
         designation: p.designation,
-        specializations: p.specializations,
-        years_experience: p.years_experience,
         bio: bio,
         claim_status: p.claim_status || 'unclaimed',
-        claimed: p.claim_status === 'claimed',
-        ref_token: p.unsubscribe_token || null
+        claimed: p.claim_status === 'claimed'
       },
       seo_score: seoScore,
       structured_data: jsonLd
