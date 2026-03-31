@@ -3491,7 +3491,7 @@ app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, first_name, last_name, firm_name, city, province, designation,
-              phone, bio, generated_bio, claim_status
+              phone, generated_bio, claim_status
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
@@ -3524,7 +3524,7 @@ app.get('/api/profiles/:id', async (req, res) => {
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
-      bio: bio || p.bio,
+      bio: bio,
       phone: p.phone,
       specializations: p.specializations,
       firm_name: p.firm_name,
