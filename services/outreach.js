@@ -98,7 +98,7 @@ class OutreachEngine {
   }
 
   async updateCampaign(id, updates) {
-    const allowed = ['name', 'subject_template', 'body_template', 'target_provinces', 'target_cities', 'target_naics_codes', 'daily_limit', 'total_limit', 'subject_variants', 'follow_up_delay_days', 'max_sequence', 'follow_up_subjects'];
+    const allowed = ['name', 'subject_template', 'body_template', 'target_provinces', 'target_cities', 'target_naics_codes', 'daily_limit', 'total_limit', 'subject_variants', 'follow_up_delay_days', 'max_sequence', 'follow_up_subjects', 'send_type'];
     const sets = [];
     const values = [];
     let idx = 1;
@@ -311,12 +311,45 @@ class OutreachEngine {
   async processQueue() {
     if (this.processing) return;
 
-    // Skip weekends
-    const day = new Date().getDay();
-    if (day === 0 || day === 6) {
-      console.log('[Outreach] Skipping - weekend');
+    // Cold/warm send day split schedule
+    // Tue-Thu: cold sends, Fri: warm sends, Mon/Sat/Sun: off
+    // Holidays override: skip all sends
+    const now = new Date();
+    const day = now.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
+
+    // No sends on Sat, Sun, Mon
+    if (day === 0 || day === 1 || day === 6) {
+      console.log('[Outreach] No-send day (Mon/Sat/Sun). Skipping.');
       return;
     }
+
+    // Holiday check (YYYY-MM-DD in ET)
+    const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
+    const holidays = ['2026-04-03', '2026-04-06']; // Good Friday, Easter Monday
+    if (holidays.includes(etDate)) {
+      console.log(`[Outreach] Holiday (${etDate}). Skipping all sends.`);
+      return;
+    }
+
+    // Determine which send types run today
+    const coldDay = day >= 2 && day <= 4; // Tue, Wed, Thu
+    let warmDay = day === 5; // Friday normally
+
+    // If Friday is a holiday, move warm sends to Thursday
+    if (day === 4) {
+      const friday = new Date(now);
+      friday.setDate(friday.getDate() + 1);
+      const fridayStr = friday.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
+      if (holidays.includes(fridayStr)) {
+        warmDay = true;
+        console.log('[Outreach] Friday is a holiday — warm sends moved to today (Thursday)');
+      }
+    }
+
+    const sendTypes = [];
+    if (coldDay) sendTypes.push('cold');
+    if (warmDay) sendTypes.push('warm');
+    console.log(`[Outreach] Day ${day} (${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]}) — processing: ${sendTypes.join(', ')}`);
 
     this.processing = true;
 
@@ -328,9 +361,10 @@ class OutreachEngine {
         return;
       }
 
-      // Auto-relaunch: reactivate any paused or completed campaigns before processing
+      // Auto-relaunch: reactivate campaigns matching today's send types
       const stalled = await this.pool.query(
-        `SELECT id, name, status FROM outreach_campaigns WHERE status IN ('paused', 'completed')`
+        `SELECT id, name, status FROM outreach_campaigns WHERE status IN ('paused', 'completed') AND COALESCE(send_type, 'cold') = ANY($1)`,
+        [sendTypes]
       );
       for (const camp of stalled.rows) {
         await this.pool.query(
@@ -340,9 +374,10 @@ class OutreachEngine {
         console.log(`[Outreach] Auto-relaunched campaign ${camp.id} "${camp.name}" (was ${camp.status})`);
       }
 
-      // Get active campaigns
+      // Get active campaigns filtered by today's send types
       const campaigns = await this.pool.query(
-        `SELECT * FROM outreach_campaigns WHERE status = 'active'`
+        `SELECT * FROM outreach_campaigns WHERE status = 'active' AND COALESCE(send_type, 'cold') = ANY($1)`,
+        [sendTypes]
       );
 
       for (const campaign of campaigns.rows) {

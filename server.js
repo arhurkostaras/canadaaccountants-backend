@@ -636,6 +636,9 @@ const crmIntelligence = new CRMIntelligence({
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS max_sequence INTEGER DEFAULT 1`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS follow_up_subjects JSONB`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS subject_variants JSONB`);
+    await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
+    // Tag re-engagement campaigns as warm
+    await pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS variant_index INTEGER DEFAULT 0`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_validations (
