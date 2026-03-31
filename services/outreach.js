@@ -311,6 +311,15 @@ class OutreachEngine {
   async processQueue() {
     if (this.processing) return;
 
+    // Ensure send_type column exists (may race with DB migration on startup)
+    if (!this._sendTypeMigrated) {
+      try {
+        await this.pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
+        await this.pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
+        this._sendTypeMigrated = true;
+      } catch (e) { /* ignore */ }
+    }
+
     // Cold/warm send day split schedule
     // Tue-Thu: cold sends, Fri: warm sends, Mon/Sat/Sun: off
     // Holidays override: skip all sends
