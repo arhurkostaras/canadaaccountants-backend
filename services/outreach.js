@@ -334,7 +334,7 @@ class OutreachEngine {
 
     // Holiday check (YYYY-MM-DD in ET)
     const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-    const holidays = ['2026-04-03', '2026-04-06']; // Good Friday, Easter Monday
+    const holidays = ['2026-04-03', '2026-04-04', '2026-04-06']; // Good Friday, Easter Saturday, Easter Monday
     if (holidays.includes(etDate)) {
       console.log(`[Outreach] Holiday (${etDate}). Skipping all sends.`);
       return;

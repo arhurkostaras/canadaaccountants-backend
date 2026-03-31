@@ -637,6 +637,19 @@ const crmIntelligence = new CRMIntelligence({
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS follow_up_subjects JSONB`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS subject_variants JSONB`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS search_events (
+        id SERIAL PRIMARY KEY,
+        platform VARCHAR(20),
+        city VARCHAR(100),
+        province VARCHAR(50),
+        specialty VARCHAR(150),
+        timestamp TIMESTAMPTZ DEFAULT NOW(),
+        session_id VARCHAR(100)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_search_events_city_spec ON search_events (city, specialty, timestamp)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_search_events_ts ON search_events (timestamp)`);
     // Tag re-engagement campaigns as warm
     await pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS variant_index INTEGER DEFAULT 0`);
@@ -1038,6 +1051,13 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
       frictionRequest.additionalContext || '',
       frictionScore
     ]);
+
+    // Log search event (non-blocking)
+    const ci = frictionRequest.contactInfo || {};
+    pool.query(
+      `INSERT INTO search_events (platform, city, province, specialty, session_id) VALUES ($1, $2, $3, $4, $5)`,
+      ['accountants', ci.city || null, ci.province || null, frictionRequest.painPoint || (frictionRequest.servicesNeeded || [])[0] || null, req.headers['x-session-id'] || null]
+    ).catch(() => {});
 
     // Generate CPA matches based on friction points
     const cpaMatches = await generateFrictionBasedMatches(frictionRequest, frictionScore);
@@ -4100,6 +4120,27 @@ app.post('/api/admin/send-ai-briefs', async (req, res) => {
   } catch (err) {
     console.error('[AIBriefs] Error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Search event analytics
+app.get('/api/admin/search-events', async (req, res) => {
+  try {
+    const { city, specialty, since } = req.query;
+    const conditions = [];
+    const values = [];
+    let idx = 1;
+    if (city) { conditions.push(`city ILIKE $${idx}`); values.push(`%${city}%`); idx++; }
+    if (specialty) { conditions.push(`specialty ILIKE $${idx}`); values.push(`%${specialty}%`); idx++; }
+    if (since) { conditions.push(`timestamp >= $${idx}`); values.push(since); idx++; }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const events = await pool.query(`SELECT * FROM search_events ${where} ORDER BY timestamp DESC LIMIT 100`, values);
+    const topSearches = await pool.query(
+      `SELECT city, specialty, COUNT(*) as count FROM search_events WHERE timestamp >= NOW() - INTERVAL '7 days' GROUP BY city, specialty ORDER BY count DESC LIMIT 20`
+    );
+    res.json({ success: true, events: events.rows, top_searches_7d: topSearches.rows, total: events.rows.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch search events', details: error.message });
   }
 });
 
