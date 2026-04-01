@@ -2900,7 +2900,7 @@ app.post('/api/professionals/claim/:id', authenticateToken, async (req, res) => 
 app.get('/api/professionals/verify-claim/:token', async (req, res) => {
   try {
     const result = await pool.query(
-      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL WHERE claim_token = $1 AND claim_status = 'pending' RETURNING id, first_name, last_name, claimed_by`,
+      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL, founding_member = TRUE WHERE claim_token = $1 AND claim_status = 'pending' RETURNING id, first_name, last_name, claimed_by`,
       [req.params.token]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Invalid or expired claim token' });
@@ -2913,7 +2913,7 @@ app.get('/api/professionals/verify-claim/:token', async (req, res) => {
 app.post('/api/admin/claims/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const result = await pool.query(
-      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL WHERE id = $1 AND claim_status = 'pending' RETURNING id, claimed_by`,
+      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL, founding_member = TRUE WHERE id = $1 AND claim_status = 'pending' RETURNING id, claimed_by`,
       [parseInt(req.params.id)]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'No pending claim found' });
@@ -3181,9 +3181,9 @@ app.post('/api/claim/instant', async (req, res) => {
       }
     }
 
-    // Mark profile as claimed
+    // Mark profile as claimed + founding member
     await pool.query(
-      `UPDATE scraped_cpas SET claim_status = 'claimed', claimed_by = $1 WHERE id = $2`,
+      `UPDATE scraped_cpas SET claim_status = 'claimed', claimed_by = $1, founding_member = TRUE WHERE id = $2`,
       [userId, recipient_id]
     );
 
