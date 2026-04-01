@@ -1404,8 +1404,8 @@ class OutreachEngine {
 
       const bounceRate = bounced / total;
 
-      if (bounceRate > 0.10) {
-        console.error(`[Outreach] BOUNCE RATE CIRCUIT BREAKER: ${(bounceRate * 100).toFixed(1)}% bounce rate (${bounced}/${total} in 24h) — pausing ALL active campaigns`);
+      if (bounceRate > 0.15) {
+        console.error(`[Outreach] BOUNCE RATE CIRCUIT BREAKER: ${(bounceRate * 100).toFixed(1)}% bounce rate (${bounced}/${total} in 2h window) — pausing ALL active campaigns`);
 
         // Pause all active campaigns
         await this.pool.query(
@@ -1419,8 +1419,8 @@ class OutreachEngine {
             to: adminEmail,
             subject: '[CanadaAccountants] ALERT: Bounce rate circuit breaker triggered',
             html: `<h2>Bounce Rate Circuit Breaker Triggered</h2>
-              <p><strong>Bounce rate:</strong> ${(bounceRate * 100).toFixed(1)}% (${bounced} bounced out of ${total} sent in last 24h)</p>
-              <p><strong>Threshold:</strong> 5%</p>
+              <p><strong>Bounce rate:</strong> ${(bounceRate * 100).toFixed(1)}% (${bounced} bounced out of ${total} sent in last 2 hours)</p>
+              <p><strong>Threshold:</strong> 15%</p>
               <p><strong>Action taken:</strong> All active campaigns have been automatically paused.</p>
               <p>Please investigate the bounce reasons and resume campaigns manually once resolved.</p>
               <p style="color:#999;font-size:12px;">This is an automated alert from the CanadaAccountants outreach engine.</p>`,
