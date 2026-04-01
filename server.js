@@ -637,6 +637,15 @@ const crmIntelligence = new CRMIntelligence({
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS follow_up_subjects JSONB`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS subject_variants JSONB`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
+    // One-time: re-enable role-based emails in demand-side (SME) campaigns
+    try {
+      const result = await pool.query(`
+        UPDATE outreach_emails SET status = 'queued', updated_at = NOW()
+        WHERE campaign_id IN (SELECT id FROM outreach_campaigns WHERE type IN ('sme', 'business', 'investor'))
+          AND status = 'failed'
+      `);
+      if (result.rowCount > 0) console.log(`[DB] Re-enabled ${result.rowCount} role-based emails in demand-side campaigns`);
+    } catch (e) { /* ignore */ }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS search_events (
         id SERIAL PRIMARY KEY,

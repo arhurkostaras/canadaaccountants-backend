@@ -656,18 +656,20 @@ class OutreachEngine {
     try {
       // Skip obviously invalid emails (safety net)
       const email = emailRecord.recipient_email;
+      const isDemandSide = ['sme', 'business', 'investor'].includes(campaign.type);
       if (!email ||
           email.match(/\.(png|jpg|jpeg|gif|svg|css|js|webp|ico|woff|woff2)$/i) ||
           email.match(/\d+x\d*\./) ||
           email.match(/@(mysite|yoursite|yourdomain|domain|example|test|placeholder|sentry|wixpress|mailchimp|domainmarket)\./i) ||
           email.match(/^(noreply|no-reply|donotreply|do-not-reply|mailer-daemon|postmaster|abuse|fraud|spam|bounce|info@info|support@support)@/i) ||
           email.match(/^(w4bsupport|accessibility|webmaster|hostmaster|admin@admin)@/i) ||
-          email.match(/^(info|contact|hello|office|admin|support|sales|marketing|hr|careers|jobs|reception|general|enquiries|inquiries|billing|privacy|legal|compliance|media|press|communications|feedback|team|service|accounting|remittance|corporatemarketing|webenquiry|centrecontact|crm|community|newsletter|events?|customerservice|mail|signs|donations?|frontdesk|connect|kontakt|foi\.?privacy)@/i) ||
+          // Role-based filter — only for supply-side (professional) campaigns
+          (!isDemandSide && email.match(/^(info|contact|hello|office|admin|support|sales|marketing|hr|careers|jobs|reception|general|enquiries|inquiries|billing|privacy|legal|compliance|media|press|communications|feedback|team|service|accounting|remittance|corporatemarketing|webenquiry|centrecontact|crm|community|newsletter|events?|customerservice|mail|signs|donations?|frontdesk|connect|kontakt|foi\.?privacy)@/i)) ||
           // Template placeholder emails
           email.match(/@email\.com$/i) ||
           email.match(/^(your|youre?mail|your\.?address|your\.?email|your\.?name|name|email|someone|sampleemail|test|user|username|example)@/i) ||
-          // Generic non-professional prefixes
-          email.match(/^(shop|news|relais|ventas|pomoc|talent|web|people|appsupport|salesfire|newbusiness|notification|partnerships|right\.info|secretariat|secretary|vancouver|northyork|toronto|montreal|calgary|ottawa|staplestax|taxman|teamparmelee|order|leisure|lending|investors|corp|contactus|contact_us|recruitment|reservations|shipping|warehouse|dispatch|returns|booking|socam|rotterdam)@/i) ||
+          // Generic non-professional prefixes — only for supply-side
+          (!isDemandSide && email.match(/^(shop|news|relais|ventas|pomoc|talent|web|people|appsupport|salesfire|newbusiness|notification|partnerships|right\.info|secretariat|secretary|vancouver|northyork|toronto|montreal|calgary|ottawa|staplestax|taxman|teamparmelee|order|leisure|lending|investors|corp|contactus|contact_us|recruitment|reservations|shipping|warehouse|dispatch|returns|booking|socam|rotterdam)@/i)) ||
           // Obvious junk: xxx@, single/double char locals, ROT13-like gibberish
           email.match(/^x{2,}@/i) ||
           email.split('@')[0].length < 3 ||
