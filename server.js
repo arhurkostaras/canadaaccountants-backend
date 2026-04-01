@@ -722,7 +722,16 @@ const crmIntelligence = new CRMIntelligence({
     // CASL compliance: consent basis tracking and first contact timestamp
     await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS consent_basis VARCHAR(50) DEFAULT 'professional_directory'`);
     await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS first_contacted_at TIMESTAMP`);
-    console.log('[Migration] Referral + claim + CASL columns verified');
+    await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS founding_member BOOLEAN DEFAULT FALSE`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS founding_member_emails (
+        id SERIAL PRIMARY KEY,
+        professional_id INTEGER NOT NULL,
+        email VARCHAR(255) NOT NULL,
+        sent_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    console.log('[Migration] Referral + claim + CASL + founding_member columns verified');
 
   } catch (err) {
     console.error('[Migration] Referral/claim migration error (non-fatal):', err.message);
@@ -3515,7 +3524,7 @@ app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, first_name, last_name, firm_name, city, province, designation,
-              phone, generated_bio, claim_status
+              phone, generated_bio, claim_status, founding_member
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
@@ -3586,7 +3595,8 @@ app.get('/api/profiles/:id', async (req, res) => {
         designation: p.designation,
         bio: bio,
         claim_status: p.claim_status || 'unclaimed',
-        claimed: p.claim_status === 'claimed'
+        claimed: p.claim_status === 'claimed',
+        founding_member: p.founding_member || false
       },
       seo_score: seoScore,
       structured_data: jsonLd
@@ -4179,11 +4189,12 @@ app.get('/api/matched-professionals', async (req, res) => {
     // Score and rank professionals
     const { rows } = await pool.query(`
       SELECT id, first_name, last_name, firm_name, city, province, designation,
-             generated_bio, claim_status, phone
+             generated_bio, claim_status, phone, founding_member
       FROM scraped_cpas
       WHERE province = $1
         AND COALESCE(enriched_email, email) IS NOT NULL
       ORDER BY
+        CASE WHEN founding_member = TRUE THEN 0 ELSE 1 END,
         CASE WHEN claim_status = 'claimed' THEN 0 ELSE 1 END,
         CASE WHEN generated_bio IS NOT NULL THEN 0 ELSE 1 END,
         CASE WHEN phone IS NOT NULL THEN 0 ELSE 1 END
@@ -4220,6 +4231,7 @@ app.get('/api/matched-professionals', async (req, res) => {
         bio_excerpt: p.generated_bio ? p.generated_bio.substring(0, 200) + '...' : null,
         seo_score: score,
         claimed: p.claim_status === 'claimed',
+        founding_member: p.founding_member || false,
         profile_url: `/profile?id=${p.id}`
       };
     });
@@ -4365,6 +4377,78 @@ app.get('/api/admin/signal-emails', async (req, res) => {
     );
     res.json({ success: true, signals: rows, total: rows.length });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── Founding Member Program ──
+app.post('/api/admin/founding-members/flag', async (req, res) => {
+  try {
+    // 1. Find all claimed professionals
+    const { rows: claimed } = await pool.query(
+      `SELECT id, first_name, last_name, city, province, designation, COALESCE(enriched_email, email) AS email
+       FROM scraped_cpas WHERE claim_status = 'claimed'`
+    );
+
+    let flagged = 0, emailed = 0;
+
+    for (const p of claimed) {
+      // 2. Set founding_member = TRUE
+      await pool.query('UPDATE scraped_cpas SET founding_member = TRUE WHERE id = $1', [p.id]);
+      flagged++;
+
+      // 3. Skip if already emailed or no email
+      if (!p.email) continue;
+      const { rows: already } = await pool.query(
+        'SELECT id FROM founding_member_emails WHERE professional_id = $1', [p.id]
+      );
+      if (already.length > 0) continue;
+
+      // Resolve first name
+      let firstName = p.first_name || '';
+      let lastName = p.last_name || '';
+      if (firstName.includes(',') && !lastName) {
+        const parts = firstName.split(',').map(s => s.trim());
+        lastName = parts[0];
+        firstName = parts[1] || '';
+      }
+      if (!firstName) firstName = 'there';
+
+      const designation = p.designation || 'CPA';
+      const city = p.city || 'your city';
+
+      const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;">
+  <div style="background:linear-gradient(135deg,#1e3a8a,#2563eb);padding:24px 32px;border-radius:8px 8px 0 0;">
+    <h2 style="color:#fff;margin:0;font-size:20px;">CanadaAccountants</h2>
+  </div>
+  <div style="padding:24px 32px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+    <p style="font-size:15px;color:#111;">Hi ${firstName},</p>
+    <p style="font-size:15px;color:#333;line-height:1.7;">You were one of the first ${designation}s in ${city} to claim your profile on CanadaAccountants. We've added Founding Member status to your profile — you'll be permanently listed first in local search in your city. Your badge is now visible on your public profile.</p>
+    <p style="font-size:15px;color:#333;">Thank you for being first.</p>
+    <p style="color:#999;font-size:11px;">CanadaAccountants</p>
+  </div>
+</div>`;
+
+      try {
+        await sendEmail({
+          to: p.email,
+          subject: "You're a Founding Member of CanadaAccountants",
+          html,
+          from: OUTREACH_FROM
+        });
+        await pool.query(
+          'INSERT INTO founding_member_emails (professional_id, email) VALUES ($1, $2)',
+          [p.id, p.email]
+        );
+        emailed++;
+      } catch (emailErr) {
+        console.error(`[FoundingMember] Email failed for id=${p.id}:`, emailErr.message);
+      }
+    }
+
+    res.json({ success: true, flagged, emailed, total_claimed: claimed.length });
+  } catch (error) {
+    console.error('[FoundingMember] Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
