@@ -10,6 +10,7 @@ const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = r
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
 const crypto = require('crypto');
+const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
@@ -687,6 +688,29 @@ const crmIntelligence = new CRMIntelligence({
       )
     `);
     console.log('[Migration] Outreach email columns + email_validations table verified');
+
+    // Seed Tax Season Campaign (C8) — scheduled for April 14, 2026
+    try {
+      const existing = await pool.query("SELECT id FROM outreach_campaigns WHERE name = 'Tax Season CPA Campaign'");
+      if (existing.rows.length === 0) {
+        await pool.query(`
+          INSERT INTO outreach_campaigns (name, type, subject_template, body_template, daily_limit, total_limit, status, send_type, created_at)
+          VALUES (
+            'Tax Season CPA Campaign',
+            'cpa',
+            '{{cpa_name}}, tax season is when clients search for a new CPA — is your profile ready?',
+            '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background-color:#f4f4f7;font-family:Arial,sans-serif;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7;"><tr><td align="center" style="padding:32px 16px;"><table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);"><tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);padding:28px 40px;text-align:center;"><h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;">CanadaAccountants</h1><p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">AI-Powered CPA-Client Matching</p></td></tr><tr><td style="padding:36px 40px;"><p style="margin:0 0 18px;color:#1a1a1a;font-size:15px;line-height:1.7;">Hi {{first_name}},</p><p style="margin:0 0 18px;color:#333;font-size:15px;line-height:1.7;">April 30 is 16 days away. Right now, Canadians searching for a CPA are finding profiles on CanadaAccountants &mdash; but yours is unclaimed.</p><p style="margin:0 0 18px;color:#333;font-size:15px;line-height:1.7;">We already built your AI profile. Your SEO score is ??/100. Claimed CPAs in {{city}} are showing up in searches today.</p><p style="margin:0 0 24px;color:#333;font-size:15px;line-height:1.7;">Takes 30 seconds to claim before tax season ends.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 28px;"><tr><td style="background:linear-gradient(135deg,#2563eb,#1e3a8a);border-radius:6px;padding:14px 36px;"><a href="https://canadaaccountants.app/profile?id={{recipient_id}}" style="color:#fff;text-decoration:none;font-size:16px;font-weight:600;">Claim Before April 30 &rarr;</a></td></tr></table></td></tr><tr><td style="padding:20px 40px;border-top:1px solid #eee;background:#fafafa;"><p style="margin:0;color:#999;font-size:11px;text-align:center;"><a href="{{unsubscribe_url}}" style="color:#999;text-decoration:underline;">Unsubscribe</a> &middot; &copy; 2026 CanadaAccountants.app</p></td></tr></table></td></tr></table></body></html>',
+            300,
+            NULL,
+            'scheduled',
+            'cold',
+            NOW()
+          )
+        `);
+        console.log('[Campaign] Tax Season CPA Campaign (C8) seeded — scheduled for Apr 14');
+      }
+    } catch (e) { console.log('[Campaign] Tax season seed:', e.message); }
+
   } catch (err) {
     console.error('[Migration] Column migration error (non-fatal):', err.message);
   }
@@ -757,7 +781,18 @@ const crmIntelligence = new CRMIntelligence({
         notified BOOLEAN DEFAULT false
       )
     `);
-    console.log('[Migration] generated_bio column + profile_visits table verified');
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ab_test_results (
+        id SERIAL PRIMARY KEY,
+        variant VARCHAR(1) NOT NULL,
+        page_load_at TIMESTAMPTZ DEFAULT NOW(),
+        form_completed_at TIMESTAMPTZ,
+        professional_id INTEGER,
+        platform VARCHAR(20) DEFAULT 'accountants'
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ab_test_variant ON ab_test_results (variant, form_completed_at)`);
+    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
   }
@@ -3965,11 +4000,11 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
        GROUP BY pv.profile_id`
     );
 
-    let sent = 0, failed = 0;
+    let sent = 0, failed = 0, enriched = 0;
     for (const v of visits) {
       try {
         const { rows: cpas } = await pool.query(
-          `SELECT id, first_name, last_name, city, province, COALESCE(enriched_email, email) as email
+          `SELECT id, first_name, last_name, city, province, COALESCE(enriched_email, email) as email, claim_status
            FROM scraped_cpas WHERE id = $1`, [v.profile_id]
         );
         if (cpas.length === 0) continue;
@@ -3981,8 +4016,48 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
         if (unsub.length > 0) continue;
 
         const viewText = parseInt(v.visit_count) === 1 ? 'Someone viewed' : `${v.visit_count} people viewed`;
-        const subject = `${viewText} your CanadaAccountants profile`;
-        const html = `
+        let subject, html;
+
+        // Search event enrichment for unclaimed profiles
+        let matchingSearch = null;
+        if (!cpa.claim_status || cpa.claim_status !== 'claimed') {
+          try {
+            const { rows: searchRows } = await pool.query(`
+              SELECT * FROM search_events
+              WHERE LOWER(city) = LOWER($1)
+                AND timestamp > NOW() - INTERVAL '30 minutes'
+                AND platform = 'accountants'
+              ORDER BY timestamp DESC LIMIT 1
+            `, [cpa.city]);
+            if (searchRows.length > 0) matchingSearch = searchRows[0];
+          } catch (searchErr) {
+            console.log('[VisitorNotify] search_events lookup failed (non-fatal):', searchErr.message);
+          }
+        }
+
+        if (matchingSearch && matchingSearch.specialty) {
+          // Enriched notification with search context
+          const name = cpa.first_name || 'there';
+          const city = matchingSearch.city || cpa.city || 'your area';
+          const specialty = matchingSearch.specialty;
+          subject = `${name}, a business in ${city} searching for a ${specialty} CPA just viewed your profile`;
+          html = `
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+  <p>Hi ${name},</p>
+  <div style="text-align:center;margin:20px 0;padding:20px;background:#fef3c7;border-radius:12px;">
+    <div style="font-size:36px;">🔍</div>
+    <div style="font-size:20px;font-weight:bold;color:#92400e;margin-top:8px;">A ${specialty} CPA search in ${city} led to your profile</div>
+    <div style="color:#78350f;font-size:14px;margin-top:4px;">Last visit: ${new Date(v.last_visit).toLocaleDateString('en-CA')}</div>
+  </div>
+  <p>Someone in ${city} searched for a <strong>${specialty}</strong> CPA and visited your profile — but it's unclaimed so we can't make the introduction yet. Claim your profile to be connected.</p>
+  <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/profile?id=${cpa.id}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim & Get Introduced →</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
+</div>`;
+          enriched++;
+        } else {
+          // Generic notification (existing behavior)
+          subject = `${viewText} your CanadaAccountants profile`;
+          html = `
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
   <p>Hi ${cpa.first_name || 'there'},</p>
   <div style="text-align:center;margin:20px 0;padding:20px;background:#fef3c7;border-radius:12px;">
@@ -3994,6 +4069,7 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
   <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/profile?id=${cpa.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
 </div>`;
+        }
         await sendEmail({ to: cpa.email, subject, html, from: OUTREACH_FROM });
 
         // Mark visits as notified
@@ -4005,7 +4081,7 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
         failed++;
       }
     }
-    res.json({ success: true, sent, failed, totalProfiles: visits.length });
+    res.json({ success: true, sent, failed, enriched, totalProfiles: visits.length });
   } catch (err) {
     console.error('[VisitorNotifications] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -4453,6 +4529,63 @@ app.post('/api/admin/founding-members/flag', async (req, res) => {
   }
 });
 
+// A/B test tracking
+app.post('/api/ab-test/track-load', async (req, res) => {
+  try {
+    const { variant, professional_id } = req.body;
+    if (!variant || !['A', 'B'].includes(variant)) return res.status(400).json({ error: 'Invalid variant' });
+    const { rows } = await pool.query(
+      'INSERT INTO ab_test_results (variant, professional_id) VALUES ($1, $2) RETURNING id',
+      [variant, professional_id || null]
+    );
+    res.json({ success: true, id: rows[0].id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/ab-test/track-complete', async (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: 'Test ID required' });
+    await pool.query(
+      'UPDATE ab_test_results SET form_completed_at = NOW() WHERE id = $1',
+      [id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/admin/ab-test/results', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        variant,
+        COUNT(*) as loads,
+        COUNT(form_completed_at) as completions,
+        ROUND(COUNT(form_completed_at)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as rate,
+        MIN(page_load_at) as started_at
+      FROM ab_test_results
+      GROUP BY variant
+      ORDER BY variant
+    `);
+
+    const startDate = rows.length > 0 ? new Date(rows[0].started_at) : new Date();
+    const daysRunning = Math.ceil((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+
+    let winner = null;
+    if (daysRunning >= 14 && rows.length === 2) {
+      winner = parseFloat(rows[0].rate) >= parseFloat(rows[1].rate) ? rows[0].variant : rows[1].variant;
+    }
+
+    res.json({ success: true, variants: rows, days_running: daysRunning, winner });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -4474,6 +4607,25 @@ setInterval(() => {
     console.error('[Sequences] Scheduled send error:', err.message)
   );
 }, 15 * 60 * 1000);
+
+// Tax Season Campaign auto-launch: April 14, 2026 at 9 AM ET
+cron.schedule('0 9 14 4 *', async () => {
+  try {
+    const { rows } = await pool.query("SELECT id FROM outreach_campaigns WHERE name = 'Tax Season CPA Campaign' AND status = 'scheduled'");
+    if (rows.length > 0) {
+      await outreachEngine.launchCampaign(rows[0].id);
+      console.log('[Campaign] Tax Season CPA Campaign launched!');
+    }
+  } catch (e) { console.error('[Campaign] Tax season launch error:', e.message); }
+}, { timezone: 'America/Toronto' });
+
+// Tax Season Campaign auto-pause: April 28, 2026 at 6 PM ET
+cron.schedule('0 18 28 4 *', async () => {
+  try {
+    await pool.query("UPDATE outreach_campaigns SET status = 'completed' WHERE name = 'Tax Season CPA Campaign'");
+    console.log('[Campaign] Tax Season CPA Campaign ended (Apr 28)');
+  } catch (e) { console.error('[Campaign] Tax season end error:', e.message); }
+}, { timezone: 'America/Toronto' });
 
 // CRM Intelligence — nightly at 3 AM ET (use setInterval every 24h with initial delay)
 setTimeout(() => {
