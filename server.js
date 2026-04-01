@@ -659,6 +659,21 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_search_events_city_spec ON search_events (city, specialty, timestamp)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_search_events_ts ON search_events (timestamp)`);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS signal_emails (
+        id SERIAL PRIMARY KEY,
+        professional_id INTEGER NOT NULL,
+        search_event_id INTEGER,
+        email VARCHAR(255) NOT NULL,
+        subject TEXT,
+        sent_at TIMESTAMPTZ DEFAULT NOW(),
+        opened_at TIMESTAMPTZ,
+        clicked_at TIMESTAMPTZ,
+        claimed_at TIMESTAMPTZ,
+        resend_id VARCHAR(255)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_signal_emails_prof ON signal_emails (professional_id, sent_at)`);
     // Tag re-engagement campaigns as warm
     await pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS variant_index INTEGER DEFAULT 0`);
@@ -4152,6 +4167,205 @@ app.get('/api/admin/search-events', async (req, res) => {
     res.json({ success: true, events: events.rows, top_searches_7d: topSearches.rows, total: events.rows.length });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch search events', details: error.message });
+  }
+});
+
+// Matched professionals landing page API
+app.get('/api/matched-professionals', async (req, res) => {
+  try {
+    const { province, specialty } = req.query;
+    if (!province) return res.status(400).json({ error: 'Province required' });
+
+    // Score and rank professionals
+    const { rows } = await pool.query(`
+      SELECT id, first_name, last_name, firm_name, city, province, designation,
+             generated_bio, claim_status, phone
+      FROM scraped_cpas
+      WHERE province = $1
+        AND COALESCE(enriched_email, email) IS NOT NULL
+      ORDER BY
+        CASE WHEN claim_status = 'claimed' THEN 0 ELSE 1 END,
+        CASE WHEN generated_bio IS NOT NULL THEN 0 ELSE 1 END,
+        CASE WHEN phone IS NOT NULL THEN 0 ELSE 1 END
+      LIMIT 20
+    `, [province]);
+
+    // Calculate SEO scores and build response
+    const professionals = rows.map(p => {
+      let firstName = p.first_name || '';
+      let lastName = p.last_name || '';
+      if (firstName.includes(',') && !lastName) {
+        const parts = firstName.split(',').map(s => s.trim());
+        lastName = parts[0];
+        firstName = parts[1] || '';
+      }
+      const name = `${firstName} ${lastName}`.trim();
+
+      let score = 30; // base
+      if (p.generated_bio) score += 25;
+      if (p.phone) score += 15;
+      if (p.firm_name) score += 10;
+      if (p.designation) score += 10;
+      if (p.claim_status === 'claimed') score += 10;
+
+      return {
+        id: p.id,
+        name,
+        first_name: firstName,
+        last_name: lastName,
+        firm_name: p.firm_name,
+        city: p.city,
+        province: p.province,
+        designation: p.designation,
+        bio_excerpt: p.generated_bio ? p.generated_bio.substring(0, 200) + '...' : null,
+        seo_score: score,
+        claimed: p.claim_status === 'claimed',
+        profile_url: `/profile?id=${p.id}`
+      };
+    });
+
+    // Sort by score descending, take top 3
+    professionals.sort((a, b) => b.seo_score - a.seo_score);
+    const top3 = professionals.slice(0, 3);
+
+    res.json({
+      success: true,
+      province,
+      specialty: specialty || null,
+      professionals: top3,
+      total_in_province: rows.length
+    });
+  } catch (error) {
+    console.error('[MatchedProfessionals] Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch matched professionals' });
+  }
+});
+
+// Client-signal email trigger — fires when a search event matches unclaimed professionals
+app.post('/api/admin/trigger-client-signal', async (req, res) => {
+  try {
+    const { search_event_id } = req.body;
+
+    // Get the search event
+    const { rows: events } = await pool.query(
+      'SELECT * FROM search_events WHERE id = $1', [search_event_id]
+    );
+    if (events.length === 0) return res.status(404).json({ error: 'Search event not found' });
+    const event = events[0];
+
+    const result = await processClientSignal(event);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Background: process recent search events for client signals
+async function processClientSignal(event) {
+  const city = event.city;
+  const province = event.province;
+  const specialty = event.specialty;
+
+  if (!province && !city) return { triggered: 0, reason: 'No location in search event' };
+
+  // Find unclaimed professionals matching the search
+  const conditions = ['claim_status IS DISTINCT FROM \'claimed\''];
+  const params = [];
+  let idx = 1;
+
+  if (province) { conditions.push(`province = $${idx}`); params.push(province); idx++; }
+  if (city) { conditions.push(`LOWER(city) = LOWER($${idx})`); params.push(city); idx++; }
+
+  const { rows: professionals } = await pool.query(`
+    SELECT id, first_name, last_name, city, province, designation, firm_name,
+           COALESCE(enriched_email, email) AS email
+    FROM scraped_cpas
+    WHERE ${conditions.join(' AND ')}
+      AND COALESCE(enriched_email, email) IS NOT NULL
+      AND COALESCE(enriched_email, email) != ''
+      AND NOT EXISTS (
+        SELECT 1 FROM signal_emails se
+        WHERE se.professional_id = scraped_cpas.id AND se.sent_at > NOW() - INTERVAL '14 days'
+      )
+      AND COALESCE(enriched_email, email) NOT IN (SELECT email FROM outreach_unsubscribes)
+    LIMIT 10
+  `, params);
+
+  let sent = 0;
+  for (const prof of professionals) {
+    let firstName = prof.first_name || '';
+    let lastName = prof.last_name || '';
+    if (firstName.includes(',') && !lastName) {
+      const parts = firstName.split(',').map(s => s.trim());
+      lastName = parts[0]; firstName = parts[1] || '';
+    }
+    const name = `${firstName} ${lastName}`.trim() || 'CPA';
+    const profCity = prof.city || province || 'your area';
+    const spec = specialty || 'accounting';
+
+    const subject = `${name}, a business in ${profCity} just searched for a ${spec} CPA`;
+    const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;">
+      <div style="background:linear-gradient(135deg,#1e3a8a,#2563eb);padding:24px 32px;border-radius:8px 8px 0 0;">
+        <h2 style="color:#fff;margin:0;font-size:20px;">CanadaAccountants</h2>
+      </div>
+      <div style="padding:24px 32px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+        <p style="font-size:15px;color:#111;">Hi ${firstName || 'there'},</p>
+        <p style="font-size:15px;color:#333;line-height:1.7;">A business in ${profCity} searched CanadaAccountants for a <strong>${spec} CPA</strong> &mdash; your profile matched their criteria. We can&rsquo;t make the introduction until you claim your profile. Takes 30 seconds.</p>
+        <div style="text-align:center;margin:24px 0;">
+          <a href="https://canadaaccountants.app/profile?id=${prof.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:600;">Claim &amp; Get Introduced &rarr;</a>
+        </div>
+        <p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="https://canadaaccountants.app/unsubscribe?email=${encodeURIComponent(prof.email)}">Unsubscribe</a></p>
+      </div>
+    </div>`;
+
+    try {
+      const result = await sendEmail({ to: prof.email, subject, html, from: OUTREACH_FROM });
+      await pool.query(
+        'INSERT INTO signal_emails (professional_id, search_event_id, email, subject, resend_id) VALUES ($1, $2, $3, $4, $5)',
+        [prof.id, event.id, prof.email, subject, result?.id || null]
+      );
+      sent++;
+    } catch (e) {
+      console.error(`[ClientSignal] Failed to send to ${prof.email}:`, e.message);
+    }
+  }
+
+  console.log(`[ClientSignal] Triggered ${sent} emails for search event ${event.id} (${city || province}, ${specialty})`);
+  return { triggered: sent, professionals_matched: professionals.length, city, province, specialty };
+}
+
+// Auto-process: hook into search event logging
+// This runs as background job after each search event is logged
+async function processRecentSignals() {
+  try {
+    const { rows: recentEvents } = await pool.query(`
+      SELECT se.* FROM search_events se
+      WHERE se.timestamp > NOW() - INTERVAL '60 minutes'
+        AND NOT EXISTS (
+          SELECT 1 FROM signal_emails sig WHERE sig.search_event_id = se.id
+        )
+      ORDER BY se.timestamp DESC
+      LIMIT 5
+    `);
+    for (const event of recentEvents) {
+      await processClientSignal(event);
+    }
+  } catch (e) {
+    console.error('[ClientSignal] Auto-process error:', e.message);
+  }
+}
+
+// Run signal processor every 15 minutes
+setInterval(() => processRecentSignals().catch(e => console.error('[ClientSignal]', e.message)), 15 * 60 * 1000);
+
+app.get('/api/admin/signal-emails', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM signal_emails ORDER BY sent_at DESC LIMIT 50'
+    );
+    res.json({ success: true, signals: rows, total: rows.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
