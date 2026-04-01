@@ -250,8 +250,8 @@ class OutreachEngine {
       const smes = await this.pool.query(query, params);
 
       for (const sme of smes.rows) {
-        // ZeroBounce pre-validation before queuing
-        const validation = await this._validateEmailForQueue(sme.email);
+        // ZeroBounce pre-validation before queuing — skip role-based filter for SME campaigns
+        const validation = await this._validateEmailForQueue(sme.email, { skipRoleBased: true });
         if (!validation.valid) {
           console.log(`[Outreach] Pre-queue rejected: ${sme.email} (${validation.status}/${validation.sub_status})`);
           skippedByValidation++;
@@ -697,7 +697,8 @@ class OutreachEngine {
       }
 
       // ZeroBounce email validation (if API key configured)
-      const validation = await this._validateEmail(email);
+      const isDemandSideCampaign = ['sme', 'business', 'investor'].includes(campaign.type);
+      const validation = await this._validateEmail(email, { skipRoleBased: isDemandSideCampaign });
       if (!validation.valid) {
         console.warn(`[Outreach] ZeroBounce blocked: ${email} (${validation.status}/${validation.sub_status})`);
         await this.pool.query(
@@ -778,12 +779,13 @@ class OutreachEngine {
   // ZEROBOUNCE EMAIL VALIDATION
   // =====================================================
 
-  async _validateEmail(email) {
+  async _validateEmail(email, options = {}) {
     const apiKey = process.env.ZEROBOUNCE_API_KEY;
     if (!apiKey) return { valid: true, status: 'skipped', sub_status: '' };
 
     // Pre-filter role-based emails — saves ZeroBounce credits
-    if (isRoleBasedEmail(email)) {
+    // Skip for demand-side campaigns where role-based is valid
+    if (!options.skipRoleBased && isRoleBasedEmail(email)) {
       console.log(`[Outreach] Role-based email skipped (no ZB credit used): ${email}`);
       // Cache as do_not_mail so downstream code treats it consistently
       try {
@@ -901,7 +903,7 @@ class OutreachEngine {
     }
   }
 
-  async _validateEmailForQueue(email) {
+  async _validateEmailForQueue(email, options = {}) {
     const apiKey = process.env.ZEROBOUNCE_API_KEY;
     if (!apiKey) return { valid: true, status: 'skipped', sub_status: '' };
 
@@ -913,7 +915,7 @@ class OutreachEngine {
     }
 
     // Use the existing _validateEmail method (which has caching built in)
-    const result = await this._validateEmail(email);
+    const result = await this._validateEmail(email, options);
 
     // Decrement cached credits if we made an actual API call (not cached)
     if (result.status !== 'skipped' && result.status !== 'error' &&
