@@ -98,7 +98,7 @@ class OutreachEngine {
   }
 
   async updateCampaign(id, updates) {
-    const allowed = ['name', 'subject_template', 'body_template', 'target_provinces', 'target_cities', 'target_naics_codes', 'daily_limit', 'total_limit', 'subject_variants', 'follow_up_delay_days', 'max_sequence', 'follow_up_subjects', 'send_type'];
+    const allowed = ['name', 'subject_template', 'body_template', 'target_provinces', 'target_cities', 'target_naics_codes', 'daily_limit', 'total_limit', 'subject_variants', 'follow_up_delay_days', 'max_sequence', 'follow_up_subjects', 'send_type', 'superseded_by'];
     const sets = [];
     const values = [];
     let idx = 1;
@@ -371,8 +371,13 @@ class OutreachEngine {
       }
 
       // Auto-relaunch: reactivate campaigns matching today's send types
+      // Never relaunch archived or superseded campaigns
       const stalled = await this.pool.query(
-        `SELECT id, name, status FROM outreach_campaigns WHERE status IN ('paused', 'completed') AND COALESCE(send_type, 'cold') = ANY($1)`,
+        `SELECT id, name, status FROM outreach_campaigns
+         WHERE status IN ('paused', 'completed')
+           AND COALESCE(send_type, 'cold') = ANY($1)
+           AND COALESCE(send_type, 'cold') != 'archived'
+           AND superseded_by IS NULL`,
         [sendTypes]
       );
       for (const camp of stalled.rows) {
