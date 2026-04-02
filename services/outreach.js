@@ -315,6 +315,7 @@ class OutreachEngine {
     if (!this._sendTypeMigrated) {
       try {
         await this.pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
+        await this.pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS superseded_by INTEGER`);
         await this.pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
         this._sendTypeMigrated = true;
       } catch (e) { /* ignore */ }
