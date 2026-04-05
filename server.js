@@ -4742,6 +4742,154 @@ cron.schedule('0 18 28 4 *', async () => {
   } catch (e) { console.error('[Campaign] Tax season end error:', e.message); }
 }, { timezone: 'America/Toronto' });
 
+// =====================================================
+// PIPELINE MONITOR — Cross-platform health reports
+// Fires at 9:05 AM, 10:05 AM, and 2:05 PM ET on send days (Tue-Thu)
+// Emails consolidated report to admin
+// =====================================================
+
+const MONITOR_BACKENDS = [
+  { name: 'ACC', url: 'https://canadaaccountants-backend-production-1d8f.up.railway.app' },
+  { name: 'LAW', url: 'https://canadalawyers-backend-production.up.railway.app' },
+  { name: 'INV', url: 'https://canadainvesting-backend-production.up.railway.app' },
+];
+
+const HOLIDAYS = ['2026-04-03', '2026-04-04', '2026-04-06'];
+
+async function runPipelineMonitor(label) {
+  const https = require('https');
+  const fetchJSON = (url) => new Promise((resolve) => {
+    https.get(url, { timeout: 15000 }, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve(null); } });
+    }).on('error', () => resolve(null));
+  });
+
+  const now = new Date();
+  const day = now.getDay();
+  const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
+
+  // Skip weekends, Monday, holidays
+  if (day === 0 || day === 1 || day === 6 || HOLIDAYS.includes(etDate)) {
+    console.log(`[Monitor] Skipping — non-send day (${etDate})`);
+    return;
+  }
+
+  const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'America/Toronto', hour: '2-digit', minute: '2-digit' });
+  const dateStr = now.toLocaleDateString('en-US', { timeZone: 'America/Toronto', month: 'long', day: 'numeric', year: 'numeric' });
+
+  let rows = '';
+  let totalSent = 0, totalQueued = 0, totalConv = 0;
+  const alerts = [];
+
+  for (const backend of MONITOR_BACKENDS) {
+    try {
+      const health = await fetchJSON(`${backend.url}/api/outreach/health`);
+      const campaigns = await fetchJSON(`${backend.url}/api/admin/outreach/campaigns`);
+      const camps = campaigns?.campaigns || campaigns || [];
+
+      const sent = health?.sent_today || 0;
+      const queued = health?.queued || 0;
+      const bnc7d = health?.bounced_7d || 0;
+      const active = health?.active_campaigns?.length || 0;
+      const conv = camps.reduce((sum, c) => sum + (c.total_converted || 0), 0);
+
+      totalSent += sent;
+      totalQueued += queued;
+      totalConv += conv;
+
+      // Check for alerts
+      if (active === 0 && queued > 0) alerts.push(`${backend.name}: 0 active campaigns with ${queued} queued — possible circuit breaker`);
+      if (sent === 0 && label !== '9:05 AM' && queued > 0) alerts.push(`${backend.name}: 0 sent today at ${label} with ${queued} queued`);
+
+      rows += `<tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;">${backend.name}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">${sent.toLocaleString()}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">${queued.toLocaleString()}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">${active}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">${bnc7d}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:600;color:#059669;">${conv}</td>
+      </tr>`;
+    } catch (e) {
+      rows += `<tr><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;" colspan="6">${backend.name}: ERROR — ${e.message}</td></tr>`;
+      alerts.push(`${backend.name}: health check failed — ${e.message}`);
+    }
+  }
+
+  // Check digest status
+  let digestInfo = '';
+  try {
+    const digest = await fetchJSON(`${MONITOR_BACKENDS[0].url}/api/admin/digest-status`);
+    if (digest?.running) {
+      digestInfo = `<div style="margin:12px 0;padding:12px 16px;background:#eff6ff;border-radius:6px;font-size:13px;color:#1e40af;">Digest running: ${digest.sent}/${digest.total} sent, ${digest.errors} errors</div>`;
+    } else if (digest?.lastRun) {
+      digestInfo = `<div style="margin:12px 0;padding:12px 16px;background:#f0fdf4;border-radius:6px;font-size:13px;color:#166534;">Last digest: ${digest.sent}/${digest.total} sent (${new Date(digest.lastRun).toLocaleString('en-US', { timeZone: 'America/Toronto' })})</div>`;
+    }
+  } catch { /* skip */ }
+
+  const alertsHtml = alerts.length > 0
+    ? `<div style="margin:16px 0;padding:12px 16px;background:#fef2f2;border-left:4px solid #dc2626;border-radius:0 6px 6px 0;"><strong style="color:#991b1b;">Alerts:</strong><ul style="margin:8px 0 0;padding-left:20px;color:#991b1b;font-size:13px;">${alerts.map(a => `<li>${a}</li>`).join('')}</ul></div>`
+    : '';
+
+  const html = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;">
+    <div style="background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;padding:20px 24px;border-radius:8px 8px 0 0;">
+      <h2 style="margin:0;font-size:18px;">Pipeline Monitor — ${label}</h2>
+      <p style="margin:4px 0 0;opacity:0.85;font-size:13px;">${dateStr}</p>
+    </div>
+    <div style="padding:20px 24px;background:#fff;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+      <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
+        <tr style="background:#f1f5f9;">
+          <th style="padding:8px 12px;text-align:left;font-size:12px;color:#475569;">Platform</th>
+          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Sent</th>
+          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Queued</th>
+          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Active</th>
+          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Bnc 7d</th>
+          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Conv</th>
+        </tr>
+        ${rows}
+        <tr style="background:#f8fafc;font-weight:700;">
+          <td style="padding:8px 12px;">Total</td>
+          <td style="padding:8px 12px;text-align:right;">${totalSent.toLocaleString()}</td>
+          <td style="padding:8px 12px;text-align:right;">${totalQueued.toLocaleString()}</td>
+          <td style="padding:8px 12px;text-align:right;" colspan="2"></td>
+          <td style="padding:8px 12px;text-align:right;color:#059669;">${totalConv}</td>
+        </tr>
+      </table>
+      ${digestInfo}
+      ${alertsHtml}
+      <p style="margin:16px 0 0;font-size:11px;color:#94a3b8;">Auto-generated by ACC pipeline monitor</p>
+    </div>
+  </div>`;
+
+  try {
+    await sendEmail({
+      to: 'arthur@negotiateandwin.com',
+      subject: `Pipeline ${label} — ${totalSent} sent, ${totalConv} conv — ${dateStr}`,
+      html,
+      from: 'Pipeline Monitor <connect@canadaaccountants.app>'
+    });
+    console.log(`[Monitor] ${label} report sent — sent=${totalSent}, conv=${totalConv}, alerts=${alerts.length}`);
+  } catch (e) {
+    console.error(`[Monitor] Failed to send report: ${e.message}`);
+  }
+}
+
+// 9:05 AM — post-cron check
+cron.schedule('5 9 * * 2-4', () => runPipelineMonitor('9:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+
+// 10:05 AM — Ontario window check
+cron.schedule('5 10 * * 2-4', () => runPipelineMonitor('10:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+
+// 2:05 PM — afternoon cron check
+cron.schedule('5 14 * * 2-4', () => runPipelineMonitor('2:05 PM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+
+// Also fire on Friday warm send days
+cron.schedule('5 9 * * 5', () => runPipelineMonitor('9:05 AM (Fri warm)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+cron.schedule('5 14 * * 5', () => runPipelineMonitor('2:05 PM (Fri warm)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+
+console.log('[Monitor] Pipeline monitor scheduled: 9:05/10:05/14:05 Tue-Thu, 9:05/14:05 Fri');
+
 // CRM Intelligence — nightly at 3 AM ET (use setInterval every 24h with initial delay)
 setTimeout(() => {
   crmIntelligence.runNightly().catch(err => console.error('[CRM:Intelligence] Nightly run error:', err.message));
