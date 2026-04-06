@@ -639,6 +639,27 @@ const crmIntelligence = new CRMIntelligence({
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS subject_variants JSONB`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
     await pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS superseded_by INTEGER`);
+    // One-time: backfill total_queued to actual count (counter drift fix)
+    try {
+      const r = await pool.query(`
+        UPDATE outreach_campaigns c
+        SET total_queued = COALESCE(sub.cnt, 0)
+        FROM (
+          SELECT campaign_id, COUNT(*) AS cnt
+          FROM outreach_emails
+          WHERE status = 'queued'
+          GROUP BY campaign_id
+        ) sub
+        WHERE c.id = sub.campaign_id AND c.total_queued != sub.cnt
+      `);
+      if (r.rowCount > 0) console.log(`[DB] Backfilled total_queued on ${r.rowCount} campaigns`);
+      // Also reset campaigns with no queued rows (counter > 0 but actual = 0)
+      const r2 = await pool.query(`
+        UPDATE outreach_campaigns SET total_queued = 0
+        WHERE total_queued > 0 AND id NOT IN (SELECT DISTINCT campaign_id FROM outreach_emails WHERE status = 'queued')
+      `);
+      if (r2.rowCount > 0) console.log(`[DB] Reset total_queued to 0 on ${r2.rowCount} empty campaigns`);
+    } catch (e) { console.log('[DB] total_queued backfill:', e.message); }
     // One-time: re-enable role-based emails in demand-side (SME) campaigns
     try {
       const result = await pool.query(`
@@ -3708,9 +3729,16 @@ app.post('/api/admin/purge-bounces', async (req, res) => {
         suppressed++;
       } catch (e) {}
       
-      // 3. Dequeue from active queues
+      // 3. Dequeue from active queues + decrement campaign counters
       const dq = await pool.query(
-        `UPDATE outreach_emails SET status = 'failed' WHERE recipient_email = $1 AND status = 'queued'`,
+        `WITH dequeued AS (
+          UPDATE outreach_emails SET status = 'failed', updated_at = NOW()
+          WHERE recipient_email = $1 AND status = 'queued'
+          RETURNING campaign_id
+        )
+        UPDATE outreach_campaigns SET total_queued = GREATEST(total_queued - sub.cnt, 0)
+        FROM (SELECT campaign_id, COUNT(*) AS cnt FROM dequeued GROUP BY campaign_id) sub
+        WHERE outreach_campaigns.id = sub.campaign_id`,
         [email]
       );
       dequeued += dq.rowCount;

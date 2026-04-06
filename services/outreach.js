@@ -658,6 +658,36 @@ class OutreachEngine {
     return 0;
   }
 
+  // Atomically update an email's status AND decrement campaign.total_queued
+  // if the email was previously in 'queued' state. Use this instead of raw
+  // UPDATE outreach_emails SET status = ... at all status transition sites.
+  async _setEmailStatus(emailId, newStatus, extraSetClause = '', extraParams = []) {
+    try {
+      // Get current state first
+      const current = await this.pool.query(
+        `SELECT status, campaign_id FROM outreach_emails WHERE id = $1`,
+        [emailId]
+      );
+      if (current.rows.length === 0) return;
+      const wasQueued = current.rows[0].status === 'queued';
+      const campaignId = current.rows[0].campaign_id;
+
+      // Update the status
+      const sql = `UPDATE outreach_emails SET status = $2, updated_at = NOW()${extraSetClause ? ', ' + extraSetClause : ''} WHERE id = $1`;
+      await this.pool.query(sql, [emailId, newStatus, ...extraParams]);
+
+      // Decrement queued counter if transitioning out of queued
+      if (wasQueued && newStatus !== 'queued') {
+        await this.pool.query(
+          `UPDATE outreach_campaigns SET total_queued = GREATEST(total_queued - 1, 0) WHERE id = $1`,
+          [campaignId]
+        );
+      }
+    } catch (e) {
+      console.error('[Outreach] _setEmailStatus error:', e.message);
+    }
+  }
+
   async _sendOutreachEmail(campaign, emailRecord) {
     try {
       // Skip obviously invalid emails (safety net)
@@ -686,7 +716,7 @@ class OutreachEngine {
           email.includes('..') ||
           !email.match(/^[^@\s]+@[^@\s]+\.[^@\s]+$/)) {
         console.warn(`[Outreach] Skipping invalid email: ${email}`);
-        await this.pool.query(`UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = $1`, [emailRecord.id]);
+        await this._setEmailStatus(emailRecord.id, 'failed');
         return;
       }
 
@@ -707,10 +737,7 @@ class OutreachEngine {
       const validation = await this._validateEmail(email, { skipRoleBased: isDemandSideCampaign });
       if (!validation.valid) {
         console.warn(`[Outreach] ZeroBounce blocked: ${email} (${validation.status}/${validation.sub_status})`);
-        await this.pool.query(
-          `UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = $1`,
-          [emailRecord.id]
-        );
+        await this._setEmailStatus(emailRecord.id, 'failed');
         return;
       }
 
@@ -737,10 +764,7 @@ class OutreachEngine {
       });
 
       if (result.success) {
-        await this.pool.query(
-          `UPDATE outreach_emails SET status = 'sent', sent_at = NOW(), resend_email_id = $2, rendered_subject = $3, rendered_body = $4 WHERE id = $1`,
-          [emailRecord.id, result.id, subject, body]
-        );
+        await this._setEmailStatus(emailRecord.id, 'sent', 'sent_at = NOW(), resend_email_id = $3, rendered_subject = $4, rendered_body = $5', [result.id, subject, body]);
         await this.pool.query(
           `UPDATE outreach_campaigns SET total_sent = total_sent + 1, updated_at = NOW() WHERE id = $1`,
           [campaign.id]
@@ -763,10 +787,7 @@ class OutreachEngine {
         // Increment retry count; mark as 'failed' after 5 attempts
         const retries = (emailRecord.retry_count || 0) + 1;
         if (retries >= 5) {
-          await this.pool.query(
-            `UPDATE outreach_emails SET status = 'failed', retry_count = $2, updated_at = NOW() WHERE id = $1`,
-            [emailRecord.id, retries]
-          );
+          await this._setEmailStatus(emailRecord.id, 'failed', 'retry_count = $3', [retries]);
           console.error(`[Outreach] Permanently failed after ${retries} attempts: ${emailRecord.recipient_email} (${result.reason})`);
         } else {
           await this.pool.query(
@@ -1366,10 +1387,7 @@ class OutreachEngine {
           if (result.valid) { valid++; }
           else {
             invalid++;
-            await this.pool.query(
-              `UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = $1`,
-              [row.id]
-            );
+            await this._setEmailStatus(row.id, 'failed');
           }
         } else {
           errors++;
