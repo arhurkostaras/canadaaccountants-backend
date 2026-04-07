@@ -3765,6 +3765,103 @@ app.post('/api/admin/purge-bounces', async (req, res) => {
 // Weekly digest state (in-memory)
 const digestState = { running: false, lastRun: null, sent: 0, errors: 0, total: 0, remaining: 0 };
 
+// Recovery campaign — clicked-but-not-claimed apology email
+const recoveryState = { running: false, lastRun: null, sent: 0, errors: 0, total: 0, remaining: 0 };
+
+app.post('/api/admin/send-recovery-campaign', async (req, res) => {
+  if (recoveryState.running) {
+    return res.status(409).json({ status: 'already_running', ...recoveryState });
+  }
+
+  try {
+    // Audience: clicked in last 14 days, never claimed, not unsubscribed
+    const { rows: countRows } = await pool.query(`
+      SELECT COUNT(DISTINCT oe.recipient_email) as total
+      FROM outreach_emails oe
+      JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+      WHERE oe.status IN ('clicked', 'opened')
+        AND oe.clicked_at > NOW() - INTERVAL '14 days'
+        AND sc.claim_status IS DISTINCT FROM 'claimed'
+        AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
+    `);
+    const total = parseInt(countRows[0].total);
+
+    recoveryState.running = true;
+    recoveryState.lastRun = new Date().toISOString();
+    recoveryState.sent = 0;
+    recoveryState.errors = 0;
+    recoveryState.total = total;
+    recoveryState.remaining = total;
+
+    res.status(202).json({ status: 'accepted', total, message: 'Recovery campaign processing in background' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  // Process in background
+  (async () => {
+    try {
+      const { rows: recipients } = await pool.query(`
+        SELECT DISTINCT ON (oe.recipient_email)
+          oe.recipient_email, oe.recipient_id,
+          sc.first_name, sc.last_name
+        FROM outreach_emails oe
+        JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+        WHERE oe.status IN ('clicked', 'opened')
+          AND oe.clicked_at > NOW() - INTERVAL '14 days'
+          AND sc.claim_status IS DISTINCT FROM 'claimed'
+          AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
+        ORDER BY oe.recipient_email, oe.clicked_at DESC
+      `);
+
+      for (let i = 0; i < recipients.length; i += 50) {
+        const batch = recipients.slice(i, i + 50);
+        for (const r of batch) {
+          try {
+            let firstName = r.first_name || '';
+            if (firstName.includes(',')) {
+              const parts = firstName.split(',').map(s => s.trim());
+              firstName = parts[1] || parts[0];
+            }
+            if (!firstName) firstName = 'there';
+
+            const subject = `${firstName}, our link was broken — sorry`;
+            const claimUrl = `https://canadaaccountants.app/claim-profile?id=${r.recipient_id}`;
+            const unsubUrl = `${BACKEND_URL}/api/unsubscribe/${r.recipient_email}`;
+
+            const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:32px;color:#1a1a1a;">
+              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">Hi ${firstName},</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">I'm sorry for wasting your time. You clicked through to your profile on <strong>CanadaAccountants</strong> last week, but we sent you to a page without the claim button. That was my mistake.</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">Your AI bio is already built and waiting &mdash; the link below goes to the right place. Prospective clients see your bio before they contact you. Claiming takes 30 seconds and it's free.</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 24px;">Thanks for your patience.</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 28px;">&mdash; Arthur Kostaras</p>
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr><td style="background:linear-gradient(135deg,#2563eb,#1e3a8a);border-radius:6px;padding:14px 32px;"><a href="${claimUrl}" style="color:#fff;text-decoration:none;font-size:16px;font-weight:600;">Claim Your Profile (this time it works) &rarr;</a></td></tr></table>
+              <p style="margin:32px 0 0;color:#999;font-size:11px;text-align:center;"><a href="${unsubUrl}" style="color:#999;">Unsubscribe</a> &middot; CanadaAccountants.app</p>
+            </div>`;
+
+            await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
+            recoveryState.sent++;
+          } catch (e) {
+            console.error(`[Recovery] Failed for ${r.recipient_email}:`, e.message);
+            recoveryState.errors++;
+          }
+          recoveryState.remaining--;
+        }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      console.log(`[Recovery] Complete: sent=${recoveryState.sent}, errors=${recoveryState.errors}`);
+    } catch (err) {
+      console.error('[Recovery] Fatal:', err.message);
+    } finally {
+      recoveryState.running = false;
+    }
+  })();
+});
+
+app.get('/api/admin/recovery-status', async (req, res) => {
+  res.json(recoveryState);
+});
+
 app.post('/api/admin/send-weekly-digest', async (req, res) => {
   if (digestState.running) {
     return res.status(409).json({ status: 'already_running', ...digestState });
