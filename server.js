@@ -3827,7 +3827,7 @@ app.post('/api/admin/send-recovery-campaign', async (req, res) => {
 
             const subject = `${firstName}, our link was broken — sorry`;
             const claimUrl = `https://canadaaccountants.app/claim-profile?id=${r.recipient_id}`;
-            const unsubUrl = `${BACKEND_URL}/api/unsubscribe/${r.recipient_email}`;
+            const unsubUrl = `https://canadaaccountants-backend-production-1d8f.up.railway.app/api/unsubscribe/${r.recipient_email}`;
 
             const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:32px;color:#1a1a1a;">
               <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">Hi ${firstName},</p>
