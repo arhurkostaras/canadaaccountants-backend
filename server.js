@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
-const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail, sendClaimVerificationEmail } = require('./services/email');
+const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail } = require('./services/email');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
@@ -2888,8 +2888,12 @@ app.get('/api/referrals/verify/:code', async (req, res) => {
 });
 
 // =====================================================
-// PROFILE CLAIMING
+// PROFILE SEARCH (used by directory)
 // =====================================================
+// NOTE: The legacy two-email "verification handshake" claim flow was removed
+// 2026-04-08 after confirming zero historical usage across all 3 platforms
+// (most_recent_claim_request was null on every row of scraped_cpas). The
+// canonical claim flow is now /api/claim/instant — see /api/c/:id redirect.
 
 app.get('/api/professionals/search', async (req, res) => {
   try {
@@ -2906,76 +2910,6 @@ app.get('/api/professionals/search', async (req, res) => {
     res.json({ results: result.rows });
   } catch (error) {
     res.status(500).json({ error: 'Search failed' });
-  }
-});
-
-app.post('/api/professionals/claim/:id', authenticateToken, async (req, res) => {
-  try {
-    const professionalId = parseInt(req.params.id);
-    const professional = await pool.query(`SELECT * FROM scraped_cpas WHERE id = $1`, [professionalId]);
-    if (professional.rows.length === 0) return res.status(404).json({ error: 'Professional not found' });
-    if (professional.rows[0].claim_status === 'claimed') return res.status(409).json({ error: 'Profile already claimed' });
-
-    const claimToken = crypto.randomBytes(32).toString('hex');
-    await pool.query(
-      `UPDATE scraped_cpas SET claim_status = 'pending', claim_token = $1, claimed_by = $2, claim_requested_at = NOW() WHERE id = $3`,
-      [claimToken, req.user.userId, professionalId]
-    );
-
-    const prof = professional.rows[0];
-    const enrichedEmail = prof.enriched_email || prof.email;
-    if (enrichedEmail) {
-      sendClaimVerificationEmail({
-        email: enrichedEmail,
-        firstName: prof.first_name,
-        claimToken,
-        professionalName: `${prof.first_name || ''} ${prof.last_name || ''}`.trim()
-      }).catch(err => console.error('[Claim] Email error:', err.message));
-      res.json({ success: true, verification: 'email_sent', message: 'Verification email sent to the professional email on file' });
-    } else {
-      res.json({ success: true, verification: 'admin_review', message: 'Claim submitted for admin review (no email on file)' });
-    }
-  } catch (error) {
-    console.error('[Claim] Error:', error.message);
-    res.status(500).json({ error: 'Failed to process claim' });
-  }
-});
-
-app.get('/api/professionals/verify-claim/:token', async (req, res) => {
-  try {
-    const result = await pool.query(
-      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL, founding_member = TRUE WHERE claim_token = $1 AND claim_status = 'pending' RETURNING id, first_name, last_name, claimed_by`,
-      [req.params.token]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Invalid or expired claim token' });
-    res.json({ success: true, message: 'Profile claimed successfully', professionalId: result.rows[0].id });
-  } catch (error) {
-    res.status(500).json({ error: 'Verification failed' });
-  }
-});
-
-app.post('/api/admin/claims/:id/approve', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `UPDATE scraped_cpas SET claim_status = 'claimed', claim_token = NULL, founding_member = TRUE WHERE id = $1 AND claim_status = 'pending' RETURNING id, claimed_by`,
-      [parseInt(req.params.id)]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'No pending claim found' });
-    res.json({ success: true, message: 'Claim approved', professionalId: result.rows[0].id });
-  } catch (error) {
-    res.status(500).json({ error: 'Approval failed' });
-  }
-});
-
-app.get('/api/admin/claims/pending', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT sc.id, sc.first_name, sc.last_name, sc.firm_name, sc.city, sc.province, sc.claimed_by, sc.claim_requested_at, u.email as claimant_email
-       FROM scraped_cpas sc LEFT JOIN users u ON sc.claimed_by = u.id WHERE sc.claim_status = 'pending' ORDER BY sc.claim_requested_at DESC`
-    );
-    res.json({ pendingClaims: result.rows });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch pending claims' });
   }
 });
 
@@ -3080,35 +3014,6 @@ app.post('/api/claim/real-visit', async (req, res) => {
     );
 
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// TEMPORARY DIAGNOSTIC — count + sample stranded pending claims for legacy-flow removal decision.
-// Added 2026-04-08. TODO: REMOVE after the legacy flow decision is made.
-app.get('/api/admin/_diag/legacy-claim-status', async (req, res) => {
-  try {
-    const countQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE claim_status = 'pending'`
-    );
-    const sampleQ = await pool.query(
-      `SELECT id, full_name, COALESCE(enriched_email, email) AS email, claim_status, claim_requested_at, claimed_by
-       FROM scraped_cpas WHERE claim_status = 'pending' ORDER BY claim_requested_at DESC NULLS LAST LIMIT 10`
-    );
-    const recentActivityQ = await pool.query(
-      `SELECT MAX(claim_requested_at) AS most_recent_request FROM scraped_cpas WHERE claim_requested_at IS NOT NULL`
-    );
-    const tokenColumnQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE claim_token IS NOT NULL`
-    );
-    res.json({
-      success: true,
-      pending_count: parseInt(countQ.rows[0].n, 10),
-      pending_sample: sampleQ.rows,
-      most_recent_claim_request: recentActivityQ.rows[0].most_recent_request,
-      rows_with_active_token: parseInt(tokenColumnQ.rows[0].n, 10),
-    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
