@@ -195,12 +195,15 @@ class OutreachEngine {
       const cpas = await this.pool.query(query, params);
 
       for (const cpa of cpas.rows) {
-        // ZeroBounce pre-validation before queuing
+        // ZeroBounce pre-validation: hard block only on abuse, soft flag on everything else
         const validation = await this._validateEmailForQueue(cpa.email);
-        if (!validation.valid) {
-          console.log(`[Outreach] Pre-queue rejected: ${cpa.email} (${validation.status}/${validation.sub_status})`);
+        if (this._isHardBlocked(validation)) {
+          console.log(`[Outreach] Pre-queue HARD BLOCK (abuse): ${cpa.email} (${validation.status}/${validation.sub_status})`);
           skippedByValidation++;
           continue;
+        }
+        if (!validation.valid) {
+          console.log(`[Outreach] Pre-queue ZB-flagged but proceeding: ${cpa.email} (${validation.status}/${validation.sub_status})`);
         }
 
         const name = cpa.full_name || `${cpa.first_name || ''} ${cpa.last_name || ''}`.trim();
@@ -250,12 +253,15 @@ class OutreachEngine {
       const smes = await this.pool.query(query, params);
 
       for (const sme of smes.rows) {
-        // ZeroBounce pre-validation before queuing — skip role-based filter for SME campaigns
+        // ZeroBounce pre-validation: hard block only on abuse, soft flag on everything else
         const validation = await this._validateEmailForQueue(sme.email, { skipRoleBased: true });
-        if (!validation.valid) {
-          console.log(`[Outreach] Pre-queue rejected: ${sme.email} (${validation.status}/${validation.sub_status})`);
+        if (this._isHardBlocked(validation)) {
+          console.log(`[Outreach] Pre-queue HARD BLOCK (abuse): ${sme.email} (${validation.status}/${validation.sub_status})`);
           skippedByValidation++;
           continue;
+        }
+        if (!validation.valid) {
+          console.log(`[Outreach] Pre-queue ZB-flagged but proceeding: ${sme.email} (${validation.status}/${validation.sub_status})`);
         }
 
         const unsubToken = crypto.randomBytes(24).toString('hex');
@@ -733,12 +739,17 @@ class OutreachEngine {
       }
 
       // ZeroBounce email validation (if API key configured)
+      // Hard block only on abuse (real spam trap risk). Everything else proceeds —
+      // Resend's bounce telemetry is the source of truth for deliverability.
       const isDemandSideCampaign = ['sme', 'business', 'investor'].includes(campaign.type);
       const validation = await this._validateEmail(email, { skipRoleBased: isDemandSideCampaign });
-      if (!validation.valid) {
-        console.warn(`[Outreach] ZeroBounce blocked: ${email} (${validation.status}/${validation.sub_status})`);
+      if (this._isHardBlocked(validation)) {
+        console.warn(`[Outreach] ZB HARD BLOCK (abuse): ${email} (${validation.status}/${validation.sub_status})`);
         await this._setEmailStatus(emailRecord.id, 'failed');
         return;
+      }
+      if (!validation.valid) {
+        console.warn(`[Outreach] ZB flagged but proceeding: ${email} (${validation.status}/${validation.sub_status})`);
       }
 
       // Use existing unsubscribe token from queue time, or generate one for backward compatibility
@@ -805,6 +816,19 @@ class OutreachEngine {
   // =====================================================
   // ZEROBOUNCE EMAIL VALIDATION
   // =====================================================
+
+  // Decides whether a ZeroBounce verdict is a HARD block (skip the send entirely)
+  // or a SOFT flag (log + proceed). Added 2026-04-08 after verifying ZeroBounce
+  // false-positives on Canadian corporate domains (Dentons partners, Sun Life CPAs,
+  // etc. all flagged as do_not_mail/global_suppression but verified real via web search).
+  // Resend's bounce telemetry is the source of truth for deliverability.
+  // Only block on actual spam-trap risk (abuse).
+  _isHardBlocked(validation) {
+    if (!validation || validation.valid) return false;
+    const status = (validation.status || '').toLowerCase();
+    const sub = (validation.sub_status || '').toLowerCase();
+    return status === 'abuse' || sub === 'abuse';
+  }
 
   async _validateEmail(email, options = {}) {
     const apiKey = process.env.ZEROBOUNCE_API_KEY;
