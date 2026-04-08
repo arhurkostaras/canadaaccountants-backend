@@ -3019,6 +3019,69 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY CLEANUP — handles 3 SME contact_email pollution patterns:
+// (a) CRLF-injected (URL-encoded %0d%0a) → strip up to last %0a
+// (b) phone-prefix concatenation (digits/dashes before alpha) → strip leading non-alpha
+// (c) UUID placeholder (32 hex chars as local part, e.g. anonymized directory) → mark status='invalid'
+// GET = dry-run. POST with ?confirm=YES = execute. TODO: REMOVE after firing.
+app.get('/api/admin/_diag/cleanup-sme-pollution', async (req, res) => {
+  try {
+    const crlfQ = await pool.query(
+      `SELECT id, business_name, contact_email,
+              regexp_replace(contact_email, '.*%0a', '', 'i') AS would_become
+       FROM scraped_smes WHERE contact_email ~* '%0d%0a'`
+    );
+    const phoneQ = await pool.query(
+      `SELECT id, business_name, contact_email,
+              regexp_replace(contact_email, '^[0-9][0-9-]*(?=[a-zA-Z])', '') AS would_become
+       FROM scraped_smes WHERE contact_email ~ '^[0-9][0-9-]*[a-zA-Z]'`
+    );
+    const uuidQ = await pool.query(
+      `SELECT id, business_name, contact_email
+       FROM scraped_smes WHERE contact_email ~ '^[0-9a-f]{32}@'`
+    );
+    res.json({
+      success: true,
+      dry_run: true,
+      crlf_injected: { count: crlfQ.rowCount, sample: crlfQ.rows },
+      phone_prefix:  { count: phoneQ.rowCount, sample: phoneQ.rows },
+      uuid_placeholder: { count: uuidQ.rowCount, sample: uuidQ.rows.slice(0, 5), note: 'will be marked status=invalid (unrecoverable)' },
+      execute_url: 'POST /api/admin/_diag/cleanup-sme-pollution?confirm=YES',
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/_diag/cleanup-sme-pollution', async (req, res) => {
+  try {
+    if (req.query.confirm !== 'YES') {
+      return res.status(400).json({ error: 'POST requires ?confirm=YES query param' });
+    }
+    const crlfFix = await pool.query(
+      `UPDATE scraped_smes SET contact_email = regexp_replace(contact_email, '.*%0a', '', 'i')
+       WHERE contact_email ~* '%0d%0a'`
+    );
+    const phoneFix = await pool.query(
+      `UPDATE scraped_smes SET contact_email = regexp_replace(contact_email, '^[0-9][0-9-]*(?=[a-zA-Z])', '')
+       WHERE contact_email ~ '^[0-9][0-9-]*[a-zA-Z]'`
+    );
+    const uuidFix = await pool.query(
+      `UPDATE scraped_smes SET status = 'invalid'
+       WHERE contact_email ~ '^[0-9a-f]{32}@'`
+    );
+    res.json({
+      success: true,
+      dry_run: false,
+      crlf_stripped: crlfFix.rowCount,
+      phone_prefix_stripped: phoneFix.rowCount,
+      uuid_placeholder_marked_invalid: uuidFix.rowCount,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // TEMPORARY DIAGNOSTIC — broader scan for data quality issues in scraped_smes.contact_email.
 // Looks for URL-encoded chars, leading/trailing whitespace, control chars, double-@, etc.
 // Read-only. TODO: REMOVE after analysis.
