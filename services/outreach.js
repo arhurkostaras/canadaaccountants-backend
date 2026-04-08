@@ -41,8 +41,12 @@ function _isInSendWindow(province) {
   const targetHour = PROVINCE_TIMEZONE_UTC_HOUR[province.toUpperCase()];
   if (targetHour === undefined) return true; // unrecognized province — send anyway
   const nowUTC = new Date().getUTCHours();
-  // Allow ±30 min window: if target is 15, accept hours 14 and 15
-  return nowUTC === targetHour || nowUTC === targetHour - 1;
+  // Business hours window: 8 AM - 5 PM local (10 hours wide).
+  // PROVINCE_TIMEZONE_UTC_HOUR is "10 AM local in STANDARD time".
+  // Standard: window = 8 AM - 5 PM local. DST: shifts to 9 AM - 6 PM local.
+  // Bug fix 2026-04-08: previous window was ±30 min which silently dropped
+  // most queue rows during the wrong UTC hour with no logging.
+  return nowUTC >= targetHour - 2 && nowUTC <= targetHour + 7;
 }
 
 function htmlToPlainText(html) {
