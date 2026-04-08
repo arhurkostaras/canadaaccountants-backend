@@ -3096,18 +3096,6 @@ app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   }
 });
 
-// ONE-SHOT — un-claim Julie Doyle (id=26235) which was claimed during 2026-04-08 funnel verification test.
-// TODO: REMOVE this endpoint after firing once.
-app.post('/api/admin/_unclaim_julie_doyle', async (req, res) => {
-  try {
-    const before = await pool.query(`SELECT id, full_name, claim_status, claimed_by, founding_member FROM scraped_cpas WHERE id = 26235`);
-    const r = await pool.query(`UPDATE scraped_cpas SET claim_status = NULL, claimed_by = NULL, founding_member = FALSE WHERE id = 26235 RETURNING id, full_name, claim_status, claimed_by, founding_member`);
-    res.json({ success: true, before: before.rows[0] || null, after: r.rows[0] || null, rowCount: r.rowCount });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // =====================================================
 // CLAIM PROFILE ENDPOINTS (free claim flow)
 // =====================================================
