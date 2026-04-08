@@ -3085,6 +3085,71 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY DIAGNOSTIC — count + sample queued rows that are ZB-flagged invalid.
+// GET = dry-run (count + 5-row sample). POST with ?confirm=YES = actually flush.
+// Added 2026-04-08 to clean polluted SME pool. TODO: REMOVE after firing.
+app.get('/api/admin/_diag/flush-invalid-queue', async (req, res) => {
+  try {
+    const campaignId = req.query.campaign_id ? parseInt(req.query.campaign_id, 10) : null;
+    const where = `
+      WHERE oe.status = 'queued'
+        AND EXISTS (
+          SELECT 1 FROM email_validations ev
+          WHERE LOWER(ev.email) = LOWER(oe.recipient_email)
+            AND (ev.status = 'invalid' OR ev.status = 'abuse')
+        )
+        ${campaignId ? 'AND oe.campaign_id = $1' : ''}
+    `;
+    const params = campaignId ? [campaignId] : [];
+    const countQ = await pool.query(`SELECT COUNT(*) AS n FROM outreach_emails oe ${where}`, params);
+    const sampleQ = await pool.query(`
+      SELECT oe.id, oe.campaign_id, oe.recipient_email, ev.status AS zb_status, ev.sub_status AS zb_sub_status
+      FROM outreach_emails oe
+      JOIN email_validations ev ON LOWER(ev.email) = LOWER(oe.recipient_email)
+      ${where}
+      LIMIT 10
+    `, params);
+    const byCampaignQ = await pool.query(`
+      SELECT oe.campaign_id, COUNT(*) AS n
+      FROM outreach_emails oe
+      ${where}
+      GROUP BY oe.campaign_id ORDER BY n DESC
+    `, params);
+    res.json({
+      success: true,
+      dry_run: true,
+      total_would_flush: parseInt(countQ.rows[0].n, 10),
+      by_campaign: byCampaignQ.rows.map(r => ({ campaign_id: r.campaign_id, count: parseInt(r.n, 10) })),
+      sample: sampleQ.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/_diag/flush-invalid-queue', async (req, res) => {
+  try {
+    if (req.query.confirm !== 'YES') {
+      return res.status(400).json({ error: 'POST requires ?confirm=YES query param to actually flush' });
+    }
+    const campaignId = req.query.campaign_id ? parseInt(req.query.campaign_id, 10) : null;
+    const where = `
+      WHERE status = 'queued'
+        AND EXISTS (
+          SELECT 1 FROM email_validations ev
+          WHERE LOWER(ev.email) = LOWER(outreach_emails.recipient_email)
+            AND (ev.status = 'invalid' OR ev.status = 'abuse')
+        )
+        ${campaignId ? 'AND campaign_id = $1' : ''}
+    `;
+    const params = campaignId ? [campaignId] : [];
+    const r = await pool.query(`UPDATE outreach_emails SET status = 'failed' ${where}`, params);
+    res.json({ success: true, dry_run: false, rows_flushed: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
