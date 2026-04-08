@@ -2367,24 +2367,6 @@ app.get('/api/admin/outreach/stats', async (req, res) => {
   }
 });
 
-// TEMPORARY DIAGNOSTIC — sample one outreach_emails row for end-to-end claim flow testing.
-// TODO: REMOVE after claim flow verification (added 2026-04-08).
-app.get('/api/admin/_diag/sample-token', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `SELECT oe.id, oe.recipient_id, oe.recipient_email, oe.unsubscribe_token, oe.sent_at, sc.full_name, sc.claim_status
-       FROM outreach_emails oe
-       JOIN scraped_cpas sc ON sc.id = oe.recipient_id
-       WHERE oe.unsubscribe_token IS NOT NULL
-         AND sc.claim_status != 'claimed'
-       ORDER BY oe.id DESC LIMIT 1`
-    );
-    res.json({ success: true, row: r.rows[0] || null });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Outreach quality — bounce/complaint rates for 24h, 7d, 30d
 app.get('/api/admin/outreach/quality', authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -3872,17 +3854,17 @@ app.post('/api/admin/send-recovery-campaign', async (req, res) => {
             }
             if (!firstName) firstName = 'there';
 
-            const subject = `${firstName}, our link was broken — sorry`;
+            const subject = `${firstName}, the claim link is finally fixed`;
             const claimUrl = claimRedirectUrl(r.recipient_id);
             const unsubUrl = `${BACKEND_URL}/api/unsubscribe/${r.recipient_email}`;
 
             const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:32px;color:#1a1a1a;">
               <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">Hi ${firstName},</p>
-              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">I'm sorry for wasting your time. You clicked through to your profile on <strong>CanadaAccountants</strong> last week, but we sent you to a page without the claim button. That was my mistake.</p>
-              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">Your AI bio is already built and waiting &mdash; the link below goes to the right place. Prospective clients see your bio before they contact you. Claiming takes 30 seconds and it's free.</p>
-              <p style="font-size:15px;line-height:1.7;margin:0 0 24px;">Thanks for your patience.</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">I owe you an honest apology. You clicked through to your profile on <strong>CanadaAccountants</strong> recently, but the link I sent you was broken &mdash; it dropped you on a page that couldn't actually claim anything. I tried to fix it yesterday and accidentally sent you a second broken link. I'm sorry.</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">The button below is the real, working one. I personally tested it end-to-end this time. Your AI bio is already built and waiting. Claiming takes about 30 seconds, and it's free.</p>
+              <p style="font-size:15px;line-height:1.7;margin:0 0 24px;">Thank you for your patience with me on this.</p>
               <p style="font-size:15px;line-height:1.7;margin:0 0 28px;">&mdash; Arthur Kostaras</p>
-              <table cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr><td style="background:linear-gradient(135deg,#2563eb,#1e3a8a);border-radius:6px;padding:14px 32px;"><a href="${claimUrl}" style="color:#fff;text-decoration:none;font-size:16px;font-weight:600;">Claim Your Profile (this time it works) &rarr;</a></td></tr></table>
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr><td style="background:linear-gradient(135deg,#2563eb,#1e3a8a);border-radius:6px;padding:14px 32px;"><a href="${claimUrl}" style="color:#fff;text-decoration:none;font-size:16px;font-weight:600;">Claim Your Profile &rarr;</a></td></tr></table>
               <p style="margin:32px 0 0;color:#999;font-size:11px;text-align:center;"><a href="${unsubUrl}" style="color:#999;">Unsubscribe</a> &middot; CanadaAccountants.app</p>
             </div>`;
 
