@@ -821,13 +821,16 @@ class OutreachEngine {
   // or a SOFT flag (log + proceed). Added 2026-04-08 after verifying ZeroBounce
   // false-positives on Canadian corporate domains (Dentons partners, Sun Life CPAs,
   // etc. all flagged as do_not_mail/global_suppression but verified real via web search).
-  // Resend's bounce telemetry is the source of truth for deliverability.
-  // Only block on actual spam-trap risk (abuse).
+  //
+  // Refined 2026-04-08 09:42 ET after observing 9% bounce rate on the first batch
+  // with the abuse-only filter. ZeroBounce IS accurate on the 'invalid' status (mailbox
+  // does not exist) — those addresses really do bounce. The false-positive class is
+  // do_not_mail/role_based/global_suppression. So: block invalid + abuse, allow the rest.
   _isHardBlocked(validation) {
     if (!validation || validation.valid) return false;
     const status = (validation.status || '').toLowerCase();
     const sub = (validation.sub_status || '').toLowerCase();
-    return status === 'abuse' || sub === 'abuse';
+    return status === 'abuse' || sub === 'abuse' || status === 'invalid';
   }
 
   async _validateEmail(email, options = {}) {
