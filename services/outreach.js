@@ -1060,9 +1060,11 @@ class OutreachEngine {
 
     // Append ref tracking token to CTA links for conversion attribution
     if (unsubToken) {
+      // Canonical: rewrite any /claim-profile or /join-as-cpa CTA (with or without
+      // existing query params) to the canonical /claim-profile?ref=<token> URL.
       body = body.replace(
-        /href="https:\/\/canadaaccountants\.app\/(join-as-cpa|claim-profile)"/g,
-        `href="https://canadaaccountants.app/profile?id=${emailRecord.recipient_id}&ref=${unsubToken}"`
+        /href="https:\/\/canadaaccountants\.app\/(?:join-as-cpa|claim-profile)(?:\?[^"]*)?"/g,
+        `href="https://canadaaccountants.app/claim-profile?ref=${unsubToken}"`
       );
     }
 

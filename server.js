@@ -14,6 +14,10 @@ const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app';
+// Canonical claim URL helper — every email CTA must route through this so the
+// redirect endpoint can resolve recipient_id → unsubscribe_token → /claim-profile?ref=...
+const claimRedirectUrl = (recipientId) => `${BACKEND_URL}/api/c/${recipientId}`;
 const STRIPE_PRICES = {
   associate: process.env.STRIPE_PRICE_ASSOCIATE || '',
   professional: process.env.STRIPE_PRICE_PROFESSIONAL || '',
@@ -3115,6 +3119,31 @@ app.post('/api/admin/cleanup-test-claims', async (req, res) => {
 // =====================================================
 
 // GET /api/claim/profile/:refToken — look up scraped profile by outreach unsubscribe_token
+// GET /api/c/:recipientId — canonical claim redirect.
+// Resolves recipient_id → most recent outreach_emails.unsubscribe_token →
+// 302 to /claim-profile?ref=<token>. Single source of truth for every email CTA
+// so direct-construction code paths (digest, visitor notif, signal, recovery, etc.)
+// don't need the token in scope. Falls back to homepage if no row.
+app.get('/api/c/:recipientId', async (req, res) => {
+  try {
+    const recipientId = parseInt(req.params.recipientId, 10);
+    if (!recipientId) return res.redirect(302, `${FRONTEND_URL}/`);
+    const r = await pool.query(
+      `SELECT unsubscribe_token FROM outreach_emails
+       WHERE recipient_id = $1 AND unsubscribe_token IS NOT NULL
+       ORDER BY id DESC LIMIT 1`,
+      [recipientId]
+    );
+    if (r.rows.length === 0 || !r.rows[0].unsubscribe_token) {
+      return res.redirect(302, `${FRONTEND_URL}/find-cpa`);
+    }
+    return res.redirect(302, `${FRONTEND_URL}/claim-profile?ref=${r.rows[0].unsubscribe_token}`);
+  } catch (error) {
+    console.error('[/api/c] Error:', error.message);
+    return res.redirect(302, `${FRONTEND_URL}/`);
+  }
+});
+
 app.get('/api/claim/profile/:refToken', async (req, res) => {
   try {
     const { refToken } = req.params;
@@ -3844,8 +3873,8 @@ app.post('/api/admin/send-recovery-campaign', async (req, res) => {
             if (!firstName) firstName = 'there';
 
             const subject = `${firstName}, our link was broken — sorry`;
-            const claimUrl = `https://canadaaccountants.app/claim-profile?id=${r.recipient_id}`;
-            const unsubUrl = `https://canadaaccountants-backend-production-1d8f.up.railway.app/api/unsubscribe/${r.recipient_email}`;
+            const claimUrl = claimRedirectUrl(r.recipient_id);
+            const unsubUrl = `${BACKEND_URL}/api/unsubscribe/${r.recipient_email}`;
 
             const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:32px;color:#1a1a1a;">
               <p style="font-size:15px;line-height:1.7;margin:0 0 16px;">Hi ${firstName},</p>
@@ -3943,7 +3972,7 @@ app.post('/api/admin/send-weekly-digest', async (req, res) => {
             const firstName = cpa.first_name || 'there';
             const city = cpa.city || province;
             const subject = `Your profile this week — ${views} views in ${city}`;
-            const profileUrl = `${FRONTEND_URL}/claim-profile?id=${cpa.id}`;
+            const profileUrl = claimRedirectUrl(cpa.id);
             const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;"><h2 style="color:#1e3a8a;">Weekly Profile Report</h2><p>Hi ${firstName},</p><div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;"><div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div><div style="color:#666;font-size:14px;">profile views this week</div></div><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Search appearances in ${city}</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${totalInCity}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Your ranking</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">#${rank} of ${totalInCity}</td></tr></table><div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;"><strong style="color:#92400e;">Tip to boost your profile:</strong><p style="margin:8px 0 0;color:#78350f;">${tip}</p></div><p style="text-align:center;margin:24px 0;"><a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p><p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p></div>`;
             await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
             digestState.sent++;
@@ -4008,7 +4037,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   <p>We generated a professional bio for your CanadaAccountants profile. Here's a preview:</p>
   <blockquote style="margin:16px 0;padding:16px;background:#f8fafc;border-left:4px solid #2563eb;border-radius:4px;font-style:italic;color:#334155;">${bio}</blockquote>
   <p>Claim your profile to customize it and make it live for prospective clients.</p>
-  <p style="text-align:center;"><a href="${FRONTEND_URL}/profile?id=${cpa.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim & Customize Your Bio</a></p>
+  <p style="text-align:center;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim & Customize Your Bio</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject: `${cpa.first_name || 'Hi'}, here's your AI-generated professional bio`, html, from: OUTREACH_FROM });
@@ -4038,7 +4067,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   <p><strong>${claimed} CPAs in ${cpa.province || 'your province'}</strong> have already claimed their profiles on CanadaAccountants this month.</p>
   <p>Claimed profiles appear higher in search results and include verified badges, AI bios, and direct client contact — all at no cost.</p>
   <p>Don't let competitors in ${cpa.city || 'your city'} get ahead.</p>
-  <p style="text-align:center;"><a href="${FRONTEND_URL}/profile?id=${cpa.id}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
+  <p style="text-align:center;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject: `${claimed} CPAs in ${cpa.province || 'your province'} just claimed their profiles`, html, from: OUTREACH_FROM });
@@ -4212,7 +4241,7 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
     <div style="color:#78350f;font-size:14px;margin-top:4px;">Last visit: ${new Date(v.last_visit).toLocaleDateString('en-CA')}</div>
   </div>
   <p>Someone in ${city} searched for a <strong>${specialty}</strong> CPA and visited your profile — but it's unclaimed so we can't make the introduction yet. Claim your profile to be connected.</p>
-  <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/profile?id=${cpa.id}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim & Get Introduced →</a></p>
+  <p style="text-align:center;margin:24px 0;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim & Get Introduced →</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
 </div>`;
           enriched++;
@@ -4228,7 +4257,7 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
     <div style="color:#78350f;font-size:14px;margin-top:4px;">Last visit: ${new Date(v.last_visit).toLocaleDateString('en-CA')}</div>
   </div>
   <p>Potential clients in ${cpa.city || cpa.province || 'your area'} are actively looking at your credentials. Make sure your profile is complete and up to date.</p>
-  <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/profile?id=${cpa.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p>
+  <p style="text-align:center;margin:24px 0;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
 </div>`;
         }
@@ -4303,7 +4332,7 @@ app.post('/api/admin/send-competitive-report', async (req, res) => {
     <p style="margin:0;font-weight:bold;color:#1e3a8a;">What this means for you:</p>
     <p style="margin:8px 0 0;color:#334155;">Competition is growing. CPAs with claimed, complete profiles are capturing the majority of client inquiries. Make sure your profile stands out.</p>
   </div>
-  <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/profile?id=${r.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Update Your Profile</a></p>
+  <p style="text-align:center;margin:24px 0;"><a href="${claimRedirectUrl(r.id)}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Update Your Profile</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
