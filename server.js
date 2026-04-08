@@ -3019,69 +3019,6 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
-// TEMPORARY DIAGNOSTIC + CLEANUP — strip %20 (URL-encoded space) prefix from
-// scraped_smes.contact_email rows poisoned by an upstream import bug.
-// GET = dry-run. POST with ?confirm=YES = execute.
-// Added 2026-04-08. TODO: REMOVE after firing.
-app.get('/api/admin/_diag/cleanup-url-encoded-emails', async (req, res) => {
-  try {
-    const countQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM scraped_smes WHERE contact_email LIKE $1 ESCAPE '\\'`,
-      ['\\%20%']
-    );
-    const sampleQ = await pool.query(
-      `SELECT id, business_name, contact_email,
-              SUBSTRING(contact_email FROM 4) AS would_become
-       FROM scraped_smes WHERE contact_email LIKE $1 ESCAPE '\\'
-       ORDER BY id LIMIT 20`,
-      ['\\%20%']
-    );
-    const stuckInQueueQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM outreach_emails WHERE recipient_email LIKE $1 ESCAPE '\\' AND status = 'queued'`,
-      ['\\%20%']
-    );
-    res.json({
-      success: true,
-      dry_run: true,
-      scraped_smes_to_strip: parseInt(countQ.rows[0].n, 10),
-      outreach_emails_still_queued: parseInt(stuckInQueueQ.rows[0].n, 10),
-      sample: sampleQ.rows,
-      execute_url: 'POST /api/admin/_diag/cleanup-url-encoded-emails?confirm=YES',
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/admin/_diag/cleanup-url-encoded-emails', async (req, res) => {
-  try {
-    if (req.query.confirm !== 'YES') {
-      return res.status(400).json({ error: 'POST requires ?confirm=YES query param to actually execute' });
-    }
-    // Step 1: strip the %20 prefix from scraped_smes.contact_email
-    const stripQ = await pool.query(
-      `UPDATE scraped_smes SET contact_email = SUBSTRING(contact_email FROM 4)
-       WHERE contact_email LIKE $1 ESCAPE '\\'`,
-      ['\\%20%']
-    );
-    // Step 2: mark any still-queued outreach_emails rows with the bad email as failed
-    // (defensive — C2 SME is currently paused so this should be 0, but be safe)
-    const failQ = await pool.query(
-      `UPDATE outreach_emails SET status = 'failed'
-       WHERE recipient_email LIKE $1 ESCAPE '\\' AND status = 'queued'`,
-      ['\\%20%']
-    );
-    res.json({
-      success: true,
-      dry_run: false,
-      scraped_smes_stripped: stripQ.rowCount,
-      outreach_emails_marked_failed: failQ.rowCount,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
