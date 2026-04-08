@@ -2363,6 +2363,19 @@ app.get('/api/admin/outreach/stats', async (req, res) => {
   }
 });
 
+// TEMPORARY DIAGNOSTIC — sample one outreach_emails row for end-to-end claim flow testing.
+// TODO: REMOVE after claim flow verification (added 2026-04-08).
+app.get('/api/admin/_diag/sample-token', async (req, res) => {
+  try {
+    const r = await pool.query(
+      "SELECT id, recipient_id, recipient_email, unsubscribe_token, sent_at FROM outreach_emails WHERE unsubscribe_token IS NOT NULL ORDER BY id DESC LIMIT 1"
+    );
+    res.json({ success: true, row: r.rows[0] || null });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Outreach quality — bounce/complaint rates for 24h, 7d, 30d
 app.get('/api/admin/outreach/quality', authenticateToken, requireAdmin, async (req, res) => {
   try {
