@@ -3026,16 +3026,22 @@ app.post('/api/claim/real-visit', async (req, res) => {
 // GET = dry-run. POST with ?confirm=YES = execute. TODO: REMOVE after firing.
 app.get('/api/admin/_diag/cleanup-sme-pollution', async (req, res) => {
   try {
+    // CRLF: contact_email contains URL-encoded newline (%0d%0a or %0a)
     const crlfQ = await pool.query(
       `SELECT id, business_name, contact_email,
               regexp_replace(contact_email, '.*%0a', '', 'i') AS would_become
        FROM scraped_smes WHERE contact_email ~* '%0d%0a'`
     );
+    // Phone prefix: ONLY North American phone formats (\d{3}-\d{4} or \d{3}-\d{3}-\d{4})
+    // followed directly by a letter. This avoids stripping legit emails that start with
+    // a digit like "8thave@", "365security@", or UUID-like placeholders.
     const phoneQ = await pool.query(
       `SELECT id, business_name, contact_email,
-              regexp_replace(contact_email, '^[0-9][0-9-]*(?=[a-zA-Z])', '') AS would_become
-       FROM scraped_smes WHERE contact_email ~ '^[0-9][0-9-]*[a-zA-Z]'`
+              regexp_replace(contact_email, '^([0-9]{3}-)?[0-9]{3}-[0-9]{4}', '') AS would_become
+       FROM scraped_smes
+       WHERE contact_email ~ '^([0-9]{3}-)?[0-9]{3}-[0-9]{4}[a-zA-Z]'`
     );
+    // UUID placeholder: 32 hex chars as local part (anonymized directory marker)
     const uuidQ = await pool.query(
       `SELECT id, business_name, contact_email
        FROM scraped_smes WHERE contact_email ~ '^[0-9a-f]{32}@'`
@@ -3058,13 +3064,15 @@ app.post('/api/admin/_diag/cleanup-sme-pollution', async (req, res) => {
     if (req.query.confirm !== 'YES') {
       return res.status(400).json({ error: 'POST requires ?confirm=YES query param' });
     }
+    // Order matters: CRLF first (so phone-prefix doesn't see the embedded phone),
+    // then phone, then UUID-mark-invalid.
     const crlfFix = await pool.query(
       `UPDATE scraped_smes SET contact_email = regexp_replace(contact_email, '.*%0a', '', 'i')
        WHERE contact_email ~* '%0d%0a'`
     );
     const phoneFix = await pool.query(
-      `UPDATE scraped_smes SET contact_email = regexp_replace(contact_email, '^[0-9][0-9-]*(?=[a-zA-Z])', '')
-       WHERE contact_email ~ '^[0-9][0-9-]*[a-zA-Z]'`
+      `UPDATE scraped_smes SET contact_email = regexp_replace(contact_email, '^([0-9]{3}-)?[0-9]{3}-[0-9]{4}', '')
+       WHERE contact_email ~ '^([0-9]{3}-)?[0-9]{3}-[0-9]{4}[a-zA-Z]'`
     );
     const uuidFix = await pool.query(
       `UPDATE scraped_smes SET status = 'invalid'
