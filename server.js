@@ -2368,7 +2368,12 @@ app.get('/api/admin/outreach/stats', async (req, res) => {
 app.get('/api/admin/_diag/sample-token', async (req, res) => {
   try {
     const r = await pool.query(
-      "SELECT id, recipient_id, recipient_email, unsubscribe_token, sent_at FROM outreach_emails WHERE unsubscribe_token IS NOT NULL ORDER BY id DESC LIMIT 1"
+      `SELECT oe.id, oe.recipient_id, oe.recipient_email, oe.unsubscribe_token, oe.sent_at, sc.full_name, sc.claim_status
+       FROM outreach_emails oe
+       JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+       WHERE oe.unsubscribe_token IS NOT NULL
+         AND sc.claim_status != 'claimed'
+       ORDER BY oe.id DESC LIMIT 1`
     );
     res.json({ success: true, row: r.rows[0] || null });
   } catch (error) {
