@@ -3019,6 +3019,44 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY DIAGNOSTIC — broader scan for data quality issues in scraped_smes.contact_email.
+// Looks for URL-encoded chars, leading/trailing whitespace, control chars, double-@, etc.
+// Read-only. TODO: REMOVE after analysis.
+app.get('/api/admin/_diag/sme-email-quality-scan', async (req, res) => {
+  try {
+    const checks = [
+      { name: 'url_encoded_anywhere', sql: `contact_email ~ '%[0-9A-Fa-f]{2}'` },
+      { name: 'starts_with_url_encoded', sql: `contact_email ~ '^%[0-9A-Fa-f]{2}'` },
+      { name: 'leading_whitespace', sql: `contact_email ~ '^\\s'` },
+      { name: 'trailing_whitespace', sql: `contact_email ~ '\\s$'` },
+      { name: 'contains_space', sql: `contact_email LIKE '% %'` },
+      { name: 'no_at_sign', sql: `contact_email IS NOT NULL AND contact_email NOT LIKE '%@%'` },
+      { name: 'multiple_at_signs', sql: `contact_email ~ '@.*@'` },
+      { name: 'starts_with_dot', sql: `contact_email LIKE '.%'` },
+      { name: 'starts_with_digit_then_dash_then_digit', sql: `contact_email ~ '^[0-9]+-'` },
+      { name: 'contains_uuid_local_part', sql: `contact_email ~ '^[0-9a-f]{32}@'` },
+      { name: 'contains_pipe', sql: `contact_email LIKE '%|%'` },
+      { name: 'contains_quote', sql: `contact_email LIKE '%''%' OR contact_email LIKE '%"%'` },
+      { name: 'starts_with_dash', sql: `contact_email LIKE '-%'` },
+      { name: 'has_newline_or_tab', sql: `contact_email ~ '[\\n\\r\\t]'` },
+    ];
+    const out = {};
+    for (const c of checks) {
+      const r = await pool.query(`SELECT COUNT(*) AS n FROM scraped_smes WHERE ${c.sql}`);
+      const n = parseInt(r.rows[0].n, 10);
+      if (n > 0) {
+        const sample = await pool.query(`SELECT id, business_name, contact_email FROM scraped_smes WHERE ${c.sql} ORDER BY id LIMIT 5`);
+        out[c.name] = { count: n, sample: sample.rows };
+      } else {
+        out[c.name] = { count: 0 };
+      }
+    }
+    res.json({ success: true, checks: out });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
