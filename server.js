@@ -3085,6 +3085,35 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY DIAGNOSTIC — count + sample stranded pending claims for legacy-flow removal decision.
+// Added 2026-04-08. TODO: REMOVE after the legacy flow decision is made.
+app.get('/api/admin/_diag/legacy-claim-status', async (req, res) => {
+  try {
+    const countQ = await pool.query(
+      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE claim_status = 'pending'`
+    );
+    const sampleQ = await pool.query(
+      `SELECT id, full_name, COALESCE(enriched_email, email) AS email, claim_status, claim_requested_at, claimed_by
+       FROM scraped_cpas WHERE claim_status = 'pending' ORDER BY claim_requested_at DESC NULLS LAST LIMIT 10`
+    );
+    const recentActivityQ = await pool.query(
+      `SELECT MAX(claim_requested_at) AS most_recent_request FROM scraped_cpas WHERE claim_requested_at IS NOT NULL`
+    );
+    const tokenColumnQ = await pool.query(
+      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE claim_token IS NOT NULL`
+    );
+    res.json({
+      success: true,
+      pending_count: parseInt(countQ.rows[0].n, 10),
+      pending_sample: sampleQ.rows,
+      most_recent_claim_request: recentActivityQ.rows[0].most_recent_request,
+      rows_with_active_token: parseInt(tokenColumnQ.rows[0].n, 10),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
