@@ -3019,6 +3019,19 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY — manually trigger the pipeline monitor with a custom label.
+// Used 2026-04-08 because the user was expecting an 11:05 monitor that doesn't exist
+// in the cron schedule. TODO: REMOVE after firing.
+app.post('/api/admin/_diag/fire-monitor', async (req, res) => {
+  try {
+    const label = req.query.label || 'ad-hoc';
+    runPipelineMonitor(label).catch(e => console.error('[Monitor adhoc]', e.message));
+    res.json({ success: true, message: `Pipeline monitor triggered with label '${label}'` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
