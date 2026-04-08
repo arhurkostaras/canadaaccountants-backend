@@ -3019,6 +3019,58 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY DIAGNOSTIC — sample recent bounced recipients to assess pool composition.
+// Added 2026-04-08 after observing 4.4% bounce rate on first post-filter batch.
+// TODO: REMOVE after analysis.
+app.get('/api/admin/_diag/recent-bounces', async (req, res) => {
+  try {
+    const hours = parseInt(req.query.hours, 10) || 2;
+    const r = await pool.query(
+      `SELECT oe.id, oe.campaign_id, oe.recipient_email, oe.recipient_name, oe.sent_at, oe.status,
+              ev.status AS zb_status, ev.sub_status AS zb_sub_status,
+              CASE
+                WHEN oe.recipient_email LIKE 'info@%' OR oe.recipient_email LIKE 'admin@%' OR
+                     oe.recipient_email LIKE 'contact@%' OR oe.recipient_email LIKE 'office@%' OR
+                     oe.recipient_email LIKE 'sales@%' OR oe.recipient_email LIKE 'support@%' OR
+                     oe.recipient_email LIKE 'hello@%' OR oe.recipient_email LIKE 'mail@%' OR
+                     oe.recipient_email LIKE 'reception@%' OR oe.recipient_email LIKE 'enquiries@%' OR
+                     oe.recipient_email LIKE 'inquiries@%'
+                THEN true ELSE false
+              END AS is_role_based
+       FROM outreach_emails oe
+       LEFT JOIN email_validations ev ON LOWER(ev.email) = LOWER(oe.recipient_email)
+       WHERE oe.status = 'bounced'
+         AND oe.sent_at > NOW() - (INTERVAL '1 hour' * $1)
+       ORDER BY oe.sent_at DESC
+       LIMIT 50`,
+      [hours]
+    );
+    const totalQ = await pool.query(
+      `SELECT COUNT(*) AS n FROM outreach_emails WHERE status = 'bounced' AND sent_at > NOW() - (INTERVAL '1 hour' * $1)`,
+      [hours]
+    );
+    const sentQ = await pool.query(
+      `SELECT COUNT(*) AS n FROM outreach_emails WHERE sent_at > NOW() - (INTERVAL '1 hour' * $1) AND status IN ('sent','delivered','opened','clicked','bounced','complained')`,
+      [hours]
+    );
+    const total = parseInt(totalQ.rows[0].n, 10);
+    const sent = parseInt(sentQ.rows[0].n, 10);
+    const roleBased = r.rows.filter(row => row.is_role_based).length;
+    res.json({
+      success: true,
+      window_hours: hours,
+      total_sent_in_window: sent,
+      total_bounced_in_window: total,
+      bounce_rate_pct: sent > 0 ? Math.round((total / sent) * 1000) / 10 : 0,
+      role_based_in_sample: roleBased,
+      role_based_pct_of_sample: r.rows.length > 0 ? Math.round((roleBased / r.rows.length) * 1000) / 10 : 0,
+      sample: r.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
