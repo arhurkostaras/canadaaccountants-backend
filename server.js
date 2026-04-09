@@ -3036,10 +3036,13 @@ app.get('/api/admin/_diag/cohort-funnel', async (req, res) => {
       GROUP BY 1 ORDER BY 1
     `);
 
-    // Cold cohort funnel via outreach_emails
+    // Cold cohort funnel via outreach_emails — split bot vs human
     const coldFunnelQ = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS cold_clicks_yesterday,
+        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL AND COALESCE(is_bot_click, false) = false) AS cold_human_clicks,
+        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL AND is_bot_click = true) AS cold_bot_clicks,
+        COUNT(*) FILTER (WHERE real_visit_at IS NOT NULL) AS cold_real_visits,
         COUNT(*) FILTER (WHERE status = 'converted') AS cold_conversions_yesterday,
         COUNT(*) FILTER (WHERE opened_at IS NOT NULL) AS cold_opens_yesterday,
         COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','complained','converted')) AS cold_sent_yesterday
@@ -3060,16 +3063,28 @@ app.get('/api/admin/_diag/cohort-funnel', async (req, res) => {
 
     const c = coldFunnelQ.rows[0];
     const t = coldTotalQ.rows[0];
+    const sent = parseInt(c.cold_sent_yesterday, 10);
+    const clicks = parseInt(c.cold_clicks_yesterday, 10);
+    const humanClicks = parseInt(c.cold_human_clicks, 10);
+    const botClicks = parseInt(c.cold_bot_clicks, 10);
+    const realVisits = parseInt(c.cold_real_visits, 10);
+    const conv = parseInt(c.cold_conversions_yesterday, 10);
     res.json({
       success: true,
       ab_loads_by_hour_et: abByHourQ.rows,
       cold_funnel_yesterday_acc_only: {
-        sent: parseInt(c.cold_sent_yesterday, 10),
+        sent,
         opened: parseInt(c.cold_opens_yesterday, 10),
-        clicked: parseInt(c.cold_clicks_yesterday, 10),
-        converted: parseInt(c.cold_conversions_yesterday, 10),
-        click_rate_pct: c.cold_sent_yesterday > 0 ? (parseInt(c.cold_clicks_yesterday, 10) / parseInt(c.cold_sent_yesterday, 10) * 100).toFixed(2) : '0',
-        click_to_conversion_pct: c.cold_clicks_yesterday > 0 ? (parseInt(c.cold_conversions_yesterday, 10) / parseInt(c.cold_clicks_yesterday, 10) * 100).toFixed(2) : '0',
+        clicked_total: clicks,
+        clicked_human: humanClicks,
+        clicked_bot: botClicks,
+        real_visits_via_beacon: realVisits,
+        converted: conv,
+        click_rate_pct: sent > 0 ? (clicks / sent * 100).toFixed(2) : '0',
+        human_click_rate_pct: sent > 0 ? (humanClicks / sent * 100).toFixed(2) : '0',
+        bot_click_pct_of_clicks: clicks > 0 ? (botClicks / clicks * 100).toFixed(2) : '0',
+        human_click_to_conversion_pct: humanClicks > 0 ? (conv / humanClicks * 100).toFixed(2) : '0',
+        real_visit_to_conversion_pct: realVisits > 0 ? (conv / realVisits * 100).toFixed(2) : '0',
       },
       cold_cohort_lifetime_acc_only: {
         total_clicks: parseInt(t.total_clicks, 10),
