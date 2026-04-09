@@ -2695,6 +2695,128 @@ app.post('/api/contact', async (req, res) => {
   }
 });
 
+// CPA Application form (join-as-cpa.html)
+// Bootstrap the table on first call. Idempotent.
+let _cpaApplicationsTableReady = false;
+async function ensureCpaApplicationsTable() {
+  if (_cpaApplicationsTableReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cpa_applications (
+      id SERIAL PRIMARY KEY,
+      full_name VARCHAR(200) NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      phone VARCHAR(50),
+      firm_name VARCHAR(255),
+      cpa_number VARCHAR(100),
+      province VARCHAR(5),
+      designation VARCHAR(50),
+      experience VARCHAR(20),
+      specializations TEXT[],
+      client_size VARCHAR(100),
+      referral_source VARCHAR(50),
+      pricing_tier VARCHAR(50),
+      message TEXT,
+      ref_token VARCHAR(255),
+      status VARCHAR(20) DEFAULT 'pending',
+      submitted_at TIMESTAMPTZ DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ,
+      reviewed_by INTEGER,
+      notes TEXT
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cpa_apps_email ON cpa_applications (email)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cpa_apps_status ON cpa_applications (status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_cpa_apps_submitted ON cpa_applications (submitted_at DESC)`);
+  _cpaApplicationsTableReady = true;
+}
+
+app.post('/api/cpa-application', async (req, res) => {
+  try {
+    await ensureCpaApplicationsTable();
+
+    const {
+      fullName, email, phone, firmName, cpaNumber, province, designation,
+      experience, specializations, clientSize, referralSource, pricingTier, message, ref
+    } = req.body;
+
+    // Required field validation
+    if (!fullName || !email || !phone || !firmName || !cpaNumber || !province || !designation || !experience || !pricingTier) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    if (!Array.isArray(specializations) || specializations.length === 0) {
+      return res.status(400).json({ error: 'At least one specialization is required' });
+    }
+
+    console.log(`📝 CPA application from ${fullName} (${email}) — ${firmName}, ${province}`);
+
+    const insert = await pool.query(
+      `INSERT INTO cpa_applications
+       (full_name, email, phone, firm_name, cpa_number, province, designation, experience, specializations, client_size, referral_source, pricing_tier, message, ref_token)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       RETURNING id, submitted_at`,
+      [fullName, email, phone, firmName, cpaNumber, province, designation, experience, specializations, clientSize || null, referralSource || null, pricingTier, message || null, ref || null]
+    );
+
+    const appId = insert.rows[0].id;
+
+    // Notify admin (async, non-blocking)
+    const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
+    const specsHtml = specializations.map(s => `<li>${s}</li>`).join('');
+    sendEmail({
+      to: adminEmail,
+      subject: `New CPA Application: ${fullName} (${firmName})`,
+      html: `
+        <h2 style="color:#1e3a8a;">New CPA Application Received</h2>
+        <p><strong>Application ID:</strong> #${appId}</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Name</td><td style="padding:8px;border:1px solid #e2e8f0;">${fullName}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Email</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="mailto:${email}">${email}</a></td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Phone</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="tel:${phone}">${phone}</a></td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Firm</td><td style="padding:8px;border:1px solid #e2e8f0;">${firmName}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">CPA Number</td><td style="padding:8px;border:1px solid #e2e8f0;">${cpaNumber}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${province}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Designation</td><td style="padding:8px;border:1px solid #e2e8f0;">${designation}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Experience</td><td style="padding:8px;border:1px solid #e2e8f0;">${experience}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Client Size</td><td style="padding:8px;border:1px solid #e2e8f0;">${clientSize || 'Not specified'}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Referral Source</td><td style="padding:8px;border:1px solid #e2e8f0;">${referralSource || 'Not specified'}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Pricing Tier</td><td style="padding:8px;border:1px solid #e2e8f0;">${pricingTier}</td></tr>
+        </table>
+        <h3>Specializations</h3>
+        <ul>${specsHtml}</ul>
+        ${message ? `<h3>Message</h3><p style="background:#f8fafc;padding:12px;border-left:4px solid #2563eb;">${message.replace(/</g, '&lt;')}</p>` : ''}
+        ${ref ? `<p style="color:#666;font-size:13px;">Ref token: <code>${ref}</code></p>` : ''}
+        <p style="color:#666;font-size:12px;margin-top:24px;">Submitted: ${insert.rows[0].submitted_at}</p>
+      `,
+    }).catch(err => console.error('CPA application admin email error (non-fatal):', err.message));
+
+    // Confirmation to applicant
+    sendEmail({
+      to: email,
+      subject: 'Application Received — CanadaAccountants.app',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
+          <h2 style="color:#1e3a8a;">Application Received</h2>
+          <p>Hi ${fullName.split(' ')[0] || 'there'},</p>
+          <p>Thank you for applying to join <strong>CanadaAccountants.app</strong>. Your application has been received and our team will review it within 48 hours.</p>
+          <p>We will independently verify your CPA designation before activating your profile. <strong>No payment is required until your application is approved.</strong></p>
+          <p>If you have any questions in the meantime, reply to this email or contact <a href="mailto:support@canadaaccountants.app">support@canadaaccountants.app</a>.</p>
+          <p>Best regards,<br>The CanadaAccountants Team</p>
+          <p style="color:#999;font-size:11px;margin-top:32px;">Application ID: #${appId}</p>
+        </div>
+      `,
+    }).catch(err => console.error('CPA application applicant email error (non-fatal):', err.message));
+
+    res.json({
+      success: true,
+      applicationId: appId,
+      message: 'Your application has been received. We will review it within 48 hours.',
+    });
+  } catch (error) {
+    console.error('❌ CPA application error:', error);
+    res.status(500).json({ error: 'Failed to process application', details: error.message });
+  }
+});
+
 // Create a new campaign (no auth — admin use only)
 app.post('/api/admin/outreach/create-campaign', async (req, res) => {
   try {
