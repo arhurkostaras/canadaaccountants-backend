@@ -3141,52 +3141,6 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
-// TEMPORARY DIAGNOSTIC — today's bounce rate per active campaign.
-// TODO: REMOVE after analysis.
-app.get('/api/admin/_diag/today-bounce', async (req, res) => {
-  try {
-    const r = await pool.query(`
-      SELECT
-        campaign_id,
-        COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','complained','converted')) AS sent_today,
-        COUNT(*) FILTER (WHERE status = 'bounced') AS bounced_today,
-        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS clicked_today,
-        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL AND COALESCE(is_bot_click, false) = false) AS human_clicks_today,
-        COUNT(*) FILTER (WHERE status = 'converted') AS conv_today
-      FROM outreach_emails
-      WHERE sent_at >= CURRENT_DATE
-      GROUP BY campaign_id ORDER BY campaign_id
-    `);
-    const total = await pool.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','complained','converted')) AS sent,
-        COUNT(*) FILTER (WHERE status = 'bounced') AS bounced
-      FROM outreach_emails
-      WHERE sent_at >= CURRENT_DATE
-    `);
-    const t = total.rows[0];
-    res.json({
-      success: true,
-      by_campaign: r.rows.map(row => ({
-        campaign_id: row.campaign_id,
-        sent: parseInt(row.sent_today, 10),
-        bounced: parseInt(row.bounced_today, 10),
-        clicked: parseInt(row.clicked_today, 10),
-        human_clicks: parseInt(row.human_clicks_today, 10),
-        converted: parseInt(row.conv_today, 10),
-        bounce_rate_pct: row.sent_today > 0 ? (parseInt(row.bounced_today, 10) / parseInt(row.sent_today, 10) * 100).toFixed(2) : '0',
-      })),
-      total_today: {
-        sent: parseInt(t.sent, 10),
-        bounced: parseInt(t.bounced, 10),
-        bounce_rate_pct: t.sent > 0 ? (parseInt(t.bounced, 10) / parseInt(t.sent, 10) * 100).toFixed(2) : '0',
-      },
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
