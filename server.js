@@ -3019,6 +3019,69 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY DIAGNOSTIC — segment ACC A/B test page loads by hour to compare
+// recovery cohort (sent ~10 AM ET 2026-04-08) vs cold cohort (sent ~12-18 ET).
+// Also reports cold-cohort funnel directly from outreach_emails.
+// TODO: REMOVE after analysis.
+app.get('/api/admin/_diag/cohort-funnel', async (req, res) => {
+  try {
+    // A/B test page loads by hour ET
+    const abByHourQ = await pool.query(`
+      SELECT
+        TO_CHAR(page_load_at AT TIME ZONE 'America/Toronto', 'YYYY-MM-DD HH24') AS hour_et,
+        COUNT(*) AS loads,
+        COUNT(form_completed_at) AS completions
+      FROM ab_test_results
+      WHERE page_load_at >= '2026-04-08 00:00:00'
+      GROUP BY 1 ORDER BY 1
+    `);
+
+    // Cold cohort funnel via outreach_emails
+    const coldFunnelQ = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS cold_clicks_yesterday,
+        COUNT(*) FILTER (WHERE status = 'converted') AS cold_conversions_yesterday,
+        COUNT(*) FILTER (WHERE opened_at IS NOT NULL) AS cold_opens_yesterday,
+        COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','complained','converted')) AS cold_sent_yesterday
+      FROM outreach_emails
+      WHERE campaign_id IS NOT NULL
+        AND sent_at >= '2026-04-08 00:00:00'
+        AND sent_at < '2026-04-09 00:00:00'
+    `);
+
+    // All-time cold cohort numbers (for context)
+    const coldTotalQ = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS total_clicks,
+        COUNT(*) FILTER (WHERE status = 'converted') AS total_conversions
+      FROM outreach_emails
+      WHERE campaign_id IS NOT NULL
+    `);
+
+    const c = coldFunnelQ.rows[0];
+    const t = coldTotalQ.rows[0];
+    res.json({
+      success: true,
+      ab_loads_by_hour_et: abByHourQ.rows,
+      cold_funnel_yesterday_acc_only: {
+        sent: parseInt(c.cold_sent_yesterday, 10),
+        opened: parseInt(c.cold_opens_yesterday, 10),
+        clicked: parseInt(c.cold_clicks_yesterday, 10),
+        converted: parseInt(c.cold_conversions_yesterday, 10),
+        click_rate_pct: c.cold_sent_yesterday > 0 ? (parseInt(c.cold_clicks_yesterday, 10) / parseInt(c.cold_sent_yesterday, 10) * 100).toFixed(2) : '0',
+        click_to_conversion_pct: c.cold_clicks_yesterday > 0 ? (parseInt(c.cold_conversions_yesterday, 10) / parseInt(c.cold_clicks_yesterday, 10) * 100).toFixed(2) : '0',
+      },
+      cold_cohort_lifetime_acc_only: {
+        total_clicks: parseInt(t.total_clicks, 10),
+        total_conversions: parseInt(t.total_conversions, 10),
+        click_to_conversion_pct: t.total_clicks > 0 ? (parseInt(t.total_conversions, 10) / parseInt(t.total_clicks, 10) * 100).toFixed(2) : '0',
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
