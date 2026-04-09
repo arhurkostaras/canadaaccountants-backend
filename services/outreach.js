@@ -49,6 +49,14 @@ function _isInSendWindow(province) {
   return nowUTC >= targetHour - 2 && nowUTC <= targetHour + 7;
 }
 
+// Returns list of province codes currently in their send window.
+// Used to filter SQL queries upstream so processQueue doesn't pull out-of-window
+// rows then silently skip them (which made daily caps under-send when one province
+// cohort was depleted while others were out of window).
+function _getInWindowProvinces() {
+  return Object.keys(PROVINCE_TIMEZONE_UTC_HOUR).filter(p => _isInSendWindow(p));
+}
+
 function htmlToPlainText(html) {
   return html
     .replace(/<br\s*\/?>/gi, '\n')
@@ -417,11 +425,39 @@ class OutreachEngine {
 
         const remaining = campaign.daily_limit - sentToday;
 
-        // Get queued emails for this campaign (skip emails that have failed too many times)
-        const emails = await this.pool.query(
-          `SELECT * FROM outreach_emails WHERE campaign_id = $1 AND status = 'queued' AND COALESCE(retry_count, 0) < 5 ORDER BY queued_at ASC LIMIT $2`,
-          [campaign.id, remaining]
-        );
+        // Get queued emails for this campaign — filter to in-window provinces only.
+        // Bug fix 2026-04-09: previously pulled rows regardless of province, then
+        // silently skipped out-of-window rows in _sendOutreachEmail. This wasted
+        // the daily cap on rows that couldn't actually send.
+        const inWindowProvinces = _getInWindowProvinces();
+        let emails;
+        if (campaign.type === 'cpa') {
+          emails = await this.pool.query(
+            `SELECT oe.* FROM outreach_emails oe
+             LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+             WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND COALESCE(oe.retry_count, 0) < 5
+               AND oe.recipient_type = 'cpa'
+               AND (sc.province IS NULL OR sc.province = ANY($3::text[]))
+             ORDER BY oe.queued_at ASC LIMIT $2`,
+            [campaign.id, remaining, inWindowProvinces]
+          );
+        } else if (campaign.type === 'sme') {
+          emails = await this.pool.query(
+            `SELECT oe.* FROM outreach_emails oe
+             LEFT JOIN scraped_smes ss ON ss.id = oe.recipient_id
+             WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND COALESCE(oe.retry_count, 0) < 5
+               AND oe.recipient_type = 'sme'
+               AND (ss.province IS NULL OR ss.province = ANY($3::text[]))
+             ORDER BY oe.queued_at ASC LIMIT $2`,
+            [campaign.id, remaining, inWindowProvinces]
+          );
+        } else {
+          // Unknown campaign type — fall back to unfiltered query
+          emails = await this.pool.query(
+            `SELECT * FROM outreach_emails WHERE campaign_id = $1 AND status = 'queued' AND COALESCE(retry_count, 0) < 5 ORDER BY queued_at ASC LIMIT $2`,
+            [campaign.id, remaining]
+          );
+        }
 
         for (const email of emails.rows) {
           await this._sendOutreachEmail(campaign, email);
