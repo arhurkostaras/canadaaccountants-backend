@@ -3141,6 +3141,31 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY — send David Mark the welcome email retroactively (he converted before the
+// welcome feature existed). TODO: REMOVE after firing.
+app.post('/api/admin/_diag/send-david-welcome', async (req, res) => {
+  try {
+    await sendEmail({
+      to: 'david.mark@workday.com',
+      subject: 'Welcome aboard, David',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #1a1a1a;">
+          <p style="font-size: 15px; line-height: 1.7;">Hi David,</p>
+          <p style="font-size: 15px; line-height: 1.7;">I saw you just claimed your profile on CanadaAccountants for Workday Canada. Welcome.</p>
+          <p style="font-size: 15px; line-height: 1.7;">You're one of the first CPAs in Ontario to join the platform. Your AI bio is live and your founding member badge is active. Clients searching for accountants in your area can now find you.</p>
+          <p style="font-size: 15px; line-height: 1.7;">If you want to update your bio, add specializations, or have any questions at all, just reply to this email. It comes straight to me.</p>
+          <p style="font-size: 15px; line-height: 1.7; margin-top: 28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
+        </div>
+      `,
+      from: 'Arthur Kostaras <connect@canadaaccountants.app>',
+      replyTo: 'arthur@negotiateandwin.com',
+    });
+    res.json({ success: true, message: 'Welcome email sent to david.mark@workday.com' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
