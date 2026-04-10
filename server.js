@@ -3141,6 +3141,58 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// TEMPORARY — find the organic conversion. TODO: REMOVE after inspection.
+app.get('/api/admin/_diag/find-conversion', async (req, res) => {
+  try {
+    // Find recently converted outreach_emails rows
+    const convQ = await pool.query(`
+      SELECT oe.id, oe.campaign_id, oe.recipient_id, oe.recipient_email, oe.recipient_name,
+             oe.status, oe.sent_at, oe.clicked_at, oe.unsubscribe_token,
+             sc.full_name, sc.first_name, sc.last_name, sc.firm_name, sc.city, sc.province,
+             sc.designation, sc.claim_status, sc.claimed_by, sc.founding_member
+      FROM outreach_emails oe
+      LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+      WHERE oe.status = 'converted' OR sc.claim_status = 'claimed'
+      ORDER BY oe.id DESC
+      LIMIT 10
+    `);
+    // Find recently claimed scraped_cpas
+    const claimedQ = await pool.query(`
+      SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
+             claim_status, claimed_by, founding_member,
+             COALESCE(enriched_email, email) AS email
+      FROM scraped_cpas
+      WHERE claim_status = 'claimed'
+      ORDER BY id DESC
+      LIMIT 10
+    `);
+    // A/B completions with timestamps
+    const abQ = await pool.query(`
+      SELECT id, variant, professional_id, page_load_at, form_completed_at
+      FROM ab_test_results
+      WHERE form_completed_at IS NOT NULL
+      ORDER BY form_completed_at DESC
+      LIMIT 10
+    `);
+    // Recent users created (the claim flow creates a user)
+    const usersQ = await pool.query(`
+      SELECT id, email, user_type, created_at
+      FROM users
+      ORDER BY created_at DESC
+      LIMIT 5
+    `);
+    res.json({
+      success: true,
+      converted_outreach_rows: convQ.rows,
+      claimed_cpas: claimedQ.rows,
+      ab_completions: abQ.rows,
+      recent_users: usersQ.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
