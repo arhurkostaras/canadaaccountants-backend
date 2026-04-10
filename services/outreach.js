@@ -346,21 +346,21 @@ class OutreachEngine {
     const day = now.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
 
     // No sends on Sat, Sun, Mon
-    if (day === 0 || day === 1 || day === 6) {
-      console.log('[Outreach] No-send day (Mon/Sat/Sun). Skipping.');
+    if (day === 0 || day === 6) {
+      console.log('[Outreach] No-send day (Sat/Sun). Skipping.');
       return;
     }
 
     // Holiday check (YYYY-MM-DD in ET)
     const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-    const holidays = ['2026-04-03', '2026-04-04', '2026-04-06']; // Good Friday, Easter Saturday, Easter Monday
+    const holidays = []; // Easter 2026 passed, clear until next holiday window
     if (holidays.includes(etDate)) {
       console.log(`[Outreach] Holiday (${etDate}). Skipping all sends.`);
       return;
     }
 
     // Determine which send types run today
-    const coldDay = day >= 2 && day <= 5; // Tue-Fri (was Tue-Thu, expanded 2026-04-10 to build cold volume faster) // Tue, Wed, Thu
+    const coldDay = day >= 1 && day <= 5; // Tue-Fri (was Tue-Thu, expanded 2026-04-10 to build cold volume faster) // Tue, Wed, Thu
     let warmDay = day === 5; // Friday normally
 
     // If Friday is a holiday, move warm sends to Thursday
