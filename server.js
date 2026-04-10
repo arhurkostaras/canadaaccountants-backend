@@ -3351,6 +3351,31 @@ app.post('/api/claim/instant', async (req, res) => {
       `
     }).catch(err => console.error('[Claim] Magic link email error:', err.message));
 
+    // Delayed personal welcome email — fires 10 min after claim so it arrives
+    // after the professional has had time to click the magic link and see their
+    // dashboard. Feels like a human noticed they joined, not an automated drip.
+    const welcomeFirstName = profile.rows[0].first_name || 'there';
+    const welcomeProvince = profile.rows[0].province || 'your area';
+    const welcomeFirm = profile.rows[0].firm_name;
+    setTimeout(() => {
+      sendEmail({
+        to: email,
+        subject: `Welcome aboard, ${welcomeFirstName}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #1a1a1a;">
+            <p style="font-size: 15px; line-height: 1.7;">Hi ${welcomeFirstName},</p>
+            <p style="font-size: 15px; line-height: 1.7;">I saw you just claimed your profile on CanadaAccountants${welcomeFirm ? ' for ' + welcomeFirm : ''}. Welcome.</p>
+            <p style="font-size: 15px; line-height: 1.7;">You're one of the first CPAs in ${welcomeProvince} to join the platform. Your AI bio is live and your founding member badge is active. Clients searching for accountants in your area can now find you.</p>
+            <p style="font-size: 15px; line-height: 1.7;">If you want to update your bio, add specializations, or have any questions at all, just reply to this email. It comes straight to me.</p>
+            <p style="font-size: 15px; line-height: 1.7; margin-top: 28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
+          </div>
+        `,
+        from: 'Arthur Kostaras <connect@canadaaccountants.app>',
+        replyTo: 'arthur@negotiateandwin.com',
+      }).catch(err => console.error('[Claim] Welcome email error:', err.message));
+      console.log(`[Claim] Welcome email sent to ${email} (10 min delayed)`);
+    }, 10 * 60 * 1000); // 10 minutes
+
     res.json({ success: true, token, userId, magicLink, referralLink });
   } catch (error) {
     console.error('[Claim Instant] Error:', error.message);
