@@ -361,7 +361,7 @@ class OutreachEngine {
 
     // Determine which send types run today
     const coldDay = day >= 1 && day <= 5; // Tue-Fri (was Tue-Thu, expanded 2026-04-10 to build cold volume faster) // Tue, Wed, Thu
-    let warmDay = day === 5; // Friday normally
+    let warmDay = day >= 1 && day <= 5; // Friday normally
 
     // If Friday is a holiday, move warm sends to Thursday
     if (day === 4) {
