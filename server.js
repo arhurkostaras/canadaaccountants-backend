@@ -3153,6 +3153,38 @@ app.post('/api/admin/monitor/fire', async (req, res) => {
   }
 });
 
+// TEMPORARY — check ACC queue composition for the weekend additions.
+app.get('/api/admin/_diag/queue-composition', async (req, res) => {
+  try {
+    const r = await pool.query(`
+      SELECT
+        oe.campaign_id,
+        oc.name AS campaign_name,
+        oc.type AS campaign_type,
+        COUNT(*) AS queued_count
+      FROM outreach_emails oe
+      JOIN outreach_campaigns oc ON oc.id = oe.campaign_id
+      WHERE oe.status = 'queued'
+      GROUP BY oe.campaign_id, oc.name, oc.type
+      ORDER BY queued_count DESC
+    `);
+    const total = r.rows.reduce((sum, row) => sum + parseInt(row.queued_count, 10), 0);
+    res.json({
+      success: true,
+      total_queued: total,
+      by_campaign: r.rows.map(row => ({
+        campaign_id: row.campaign_id,
+        name: row.campaign_name,
+        type: row.campaign_type,
+        queued: parseInt(row.queued_count, 10),
+        pct: total > 0 ? (parseInt(row.queued_count, 10) / total * 100).toFixed(1) + '%' : '0%',
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
