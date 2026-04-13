@@ -3141,15 +3141,6 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
-// TEMPORARY — fire monitor manually. TODO: REMOVE after firing.
-app.post('/api/admin/_diag/fire-monitor', async (req, res) => {
-  try {
-    const label = req.query.label || 'ad-hoc';
-    runPipelineMonitor(label).catch(e => console.error('[Monitor adhoc]', e.message));
-    res.json({ success: true, message: `Monitor triggered: ${label}` });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
