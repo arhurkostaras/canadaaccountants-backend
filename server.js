@@ -3141,6 +3141,18 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// On-demand pipeline monitor — permanent endpoint so we never need temp diagnostics
+// for manual monitor fires again. Tech debt #7, closed 2026-04-13.
+app.post('/api/admin/monitor/fire', async (req, res) => {
+  try {
+    const label = req.query.label || 'ad-hoc';
+    await runPipelineMonitor(label);
+    res.json({ success: true, message: `Monitor sent: ${label}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
