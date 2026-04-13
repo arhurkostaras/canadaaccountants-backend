@@ -5017,8 +5017,8 @@ async function runPipelineMonitor(label) {
   const day = now.getDay();
   const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
 
-  // Skip weekends, Monday, holidays
-  if (day === 0 || day === 1 || day === 6 || HOLIDAYS.includes(etDate)) {
+  // Skip weekends only (Monday enabled 2026-04-13, holidays cleared)
+  if (day === 0 || day === 6) {
     console.log(`[Monitor] Skipping — non-send day (${etDate})`);
     return;
   }
