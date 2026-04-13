@@ -5114,7 +5114,7 @@ async function runPipelineMonitor(label) {
       to: 'arthur@negotiateandwin.com',
       subject: `Pipeline ${label} — ${totalSent} sent, ${totalConv} conv — ${dateStr}`,
       html,
-      from: 'Pipeline Monitor <connect@canadaaccountants.app>'
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
     });
     console.log(`[Monitor] ${label} report sent — sent=${totalSent}, conv=${totalConv}, alerts=${alerts.length}`);
   } catch (e) {
