@@ -2422,6 +2422,24 @@ app.get('/api/admin/sme/export', async (req, res) => {
 });
 
 // Outreach stats
+// Recent conversions: users who claimed profiles or registered via applications
+app.get('/api/admin/recent-signups', async (req, res) => {
+  try {
+    const claims = await pool.query(`
+      SELECT u.id, u.email, u.created_at, sc.full_name, sc.firm_name, sc.province, sc.city, sc.claim_status
+      FROM users u
+      LEFT JOIN scraped_cpas sc ON sc.claimed_by = u.id
+      WHERE u.created_at > NOW() - INTERVAL '14 days'
+      ORDER BY u.created_at DESC LIMIT 20
+    `);
+    const apps = await pool.query(`SELECT id, full_name, email, firm_name, province, status, submitted_at FROM cpa_applications ORDER BY submitted_at DESC LIMIT 10`);
+    const regs = await pool.query(`SELECT cpa_id, first_name, last_name, email, firm_name, province, created_date FROM cpa_profiles ORDER BY created_date DESC LIMIT 10`);
+    res.json({ recent_claims: claims.rows, recent_applications: apps.rows, recent_registrations: regs.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/admin/outreach/stats', async (req, res) => {
   try {
     const stats = await outreachEngine.getOverallStats();
