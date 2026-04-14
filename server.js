@@ -3705,6 +3705,25 @@ app.post('/api/claim/instant', async (req, res) => {
       console.error('[Claim] trackConversion error:', err.message);
     });
 
+    // Admin notification: new sign-up
+    const p = profile.rows[0];
+    const claimName = p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim();
+    sendEmail({
+      to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+      subject: `NEW SIGN-UP: ${claimName} just claimed their profile on CanadaAccountants`,
+      html: `
+        <h2 style="color:#059669;">New Profile Claimed!</h2>
+        <p><strong>${claimName}</strong> just signed up on CanadaAccountants.app.</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f0fdf4;">Name</td><td style="padding:8px;border:1px solid #e2e8f0;">${claimName}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f0fdf4;">Email</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="mailto:${email}">${email}</a></td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f0fdf4;">Firm</td><td style="padding:8px;border:1px solid #e2e8f0;">${p.firm_name || '—'}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f0fdf4;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${p.province || '—'}</td></tr>
+        </table>
+        <p style="color:#666;font-size:12px;">Claimed at: ${new Date().toISOString()}</p>
+      `,
+    }).catch(err => console.error('[Claim] Admin notification error:', err.message));
+
     // Generate long-lived JWT for magic link (30 days)
     const token = jwt.sign(
       { userId, email, userType: 'CPA' },
