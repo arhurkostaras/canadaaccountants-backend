@@ -96,6 +96,71 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           );
           console.log(`[Stripe] User ${userId} subscribed to ${tier}`);
         }
+
+        // Handle application payment (auto-approved or manually approved)
+        const applicationId = session.metadata?.application_id;
+        if (applicationId && session.metadata?.source === 'auto_approved_application') {
+          const appTier = session.metadata?.tier || 'professional';
+          await pool.query(
+            `UPDATE cpa_applications SET status = 'paid', reviewed_at = COALESCE(reviewed_at, NOW()), notes = COALESCE(notes || ' | ', '') || $1 WHERE id = $2`,
+            [`Paid: ${appTier} tier, Stripe session ${session.id}`, applicationId]
+          );
+
+          // Look up applicant details for confirmation email
+          const appRow = await pool.query(`SELECT full_name, email, firm_name FROM cpa_applications WHERE id = $1`, [applicationId]);
+          if (appRow.rows.length > 0) {
+            const applicant = appRow.rows[0];
+            const appFirstName = applicant.full_name.split(' ')[0] || 'there';
+
+            // Activation confirmation to applicant
+            sendEmail({
+              to: applicant.email,
+              subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
+              html: `
+                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
+                  <div style="background:linear-gradient(135deg,#059669,#047857);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
+                    <h1 style="color:#ffffff;margin:0;font-size:24px;">You're All Set!</h1>
+                    <p style="color:#d1fae5;margin:8px 0 0;font-size:14px;">Your CanadaAccountants profile is now active</p>
+                  </div>
+                  <div style="padding:32px 24px;background:#ffffff;">
+                    <p style="color:#1a1a1a;font-size:16px;">Hi ${appFirstName},</p>
+                    <p style="color:#333;font-size:15px;">Your <strong>${appTier.charAt(0).toUpperCase() + appTier.slice(1)}</strong> membership is confirmed. Your verified CPA profile is now live on CanadaAccountants.app and you'll start receiving client referrals.</p>
+                    <p style="color:#333;font-size:15px;">Here's what happens next:</p>
+                    <ul style="color:#333;font-size:15px;">
+                      <li>Your profile is visible to potential clients searching for CPAs</li>
+                      <li>Our AI matching system will connect you with relevant client inquiries</li>
+                      <li>You'll receive email notifications for new referral opportunities</li>
+                    </ul>
+                    <div style="text-align:center;margin:24px 0;">
+                      <a href="${FRONTEND_URL}/dashboard" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">Go to Dashboard</a>
+                    </div>
+                    <p style="color:#666;font-size:13px;">Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
+                  </div>
+                  <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
+                    <p style="color:#999;font-size:11px;margin:0;">Application ID: #${applicationId}</p>
+                  </div>
+                </div>
+              `,
+            }).catch(err => console.error('Activation email error (non-fatal):', err.message));
+
+            // Notify admin of payment
+            const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
+            sendEmail({
+              to: adminEmail,
+              subject: `PAYMENT RECEIVED: CPA Application #${applicationId} -- ${applicant.full_name} (${appTier})`,
+              html: `
+                <h2 style="color:#059669;">Application Payment Received</h2>
+                <p><strong>${applicant.full_name}</strong> (${applicant.email}) paid for the <strong>${appTier}</strong> tier.</p>
+                <p>Firm: ${applicant.firm_name}</p>
+                <p>Stripe Session: <code>${session.id}</code></p>
+                <p>Application ID: #${applicationId}</p>
+              `,
+            }).catch(err => console.error('Admin payment notification error (non-fatal):', err.message));
+
+            console.log(`[Stripe] Application #${applicationId} paid: ${appTier} tier by ${applicant.full_name}`);
+          }
+        }
+
         console.log(`Checkout completed for CPA ${cpaProfileId}, plan: ${planType}`);
         break;
       }
@@ -2730,6 +2795,93 @@ async function ensureCpaApplicationsTable() {
   _cpaApplicationsTableReady = true;
 }
 
+// Helper: create 3 Stripe Checkout sessions for an approved application
+async function createApplicationCheckoutSessions(appId, email, fullName) {
+  const tiers = [
+    { key: 'associate', name: 'Associate', price: STRIPE_PRICES.associate },
+    { key: 'professional', name: 'Professional', price: STRIPE_PRICES.professional },
+    { key: 'enterprise', name: 'Enterprise', price: STRIPE_PRICES.enterprise },
+  ];
+  const sessions = {};
+  for (const tier of tiers) {
+    if (!tier.price) {
+      console.warn(`No Stripe price configured for ${tier.key}, skipping`);
+      continue;
+    }
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer_email: email,
+      line_items: [{ price: tier.price, quantity: 1 }],
+      success_url: `${FRONTEND_URL}/welcome?tier=${tier.key}&app=${appId}`,
+      cancel_url: `${FRONTEND_URL}/pricing`,
+      metadata: {
+        application_id: String(appId),
+        source: 'auto_approved_application',
+        tier: tier.key,
+        applicant_name: fullName,
+      },
+    });
+    sessions[tier.key] = session.url;
+  }
+  return sessions;
+}
+
+// Helper: send 3-tier approval email
+function sendApprovalEmail({ email, fullName, appId, sessions }) {
+  const firstName = fullName.split(' ')[0] || 'there';
+  sendEmail({
+    to: email,
+    subject: 'Application Approved — Welcome to CanadaAccountants.app!',
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
+        <div style="background:linear-gradient(135deg,#2563eb,#1e3a8a);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
+          <h1 style="color:#ffffff;margin:0;font-size:24px;">Application Approved</h1>
+          <p style="color:#e0e7ff;margin:8px 0 0;font-size:14px;">AI-Powered CPA-Client Matching</p>
+        </div>
+        <div style="padding:32px 24px;background:#ffffff;">
+          <p style="color:#1a1a1a;font-size:16px;">Hi ${firstName},</p>
+          <p style="color:#333;font-size:15px;">Great news! Your CPA credentials have been verified and your application to <strong>CanadaAccountants.app</strong> has been <span style="color:#059669;font-weight:bold;">approved</span>.</p>
+          <p style="color:#333;font-size:15px;">Choose your membership tier to activate your profile and start receiving client referrals:</p>
+
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin:24px 0;">
+            <tr>
+              <td style="padding:8px;" width="33%" align="center">
+                <div style="border:2px solid #e2e8f0;border-radius:8px;padding:16px 8px;text-align:center;">
+                  <p style="font-weight:bold;color:#1e3a8a;margin:0 0 4px;">Associate</p>
+                  <p style="font-size:24px;font-weight:bold;color:#1a1a1a;margin:0;">$199</p>
+                  <p style="font-size:12px;color:#666;margin:4px 0 12px;">/month</p>
+                  ${sessions.associate ? `<a href="${sessions.associate}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select</a>` : ''}
+                </div>
+              </td>
+              <td style="padding:8px;" width="33%" align="center">
+                <div style="border:2px solid #2563eb;border-radius:8px;padding:16px 8px;text-align:center;background:#f0f5ff;">
+                  <p style="font-weight:bold;color:#2563eb;margin:0 0 4px;">Professional</p>
+                  <p style="font-size:24px;font-weight:bold;color:#1a1a1a;margin:0;">$299</p>
+                  <p style="font-size:12px;color:#666;margin:4px 0 12px;">/month</p>
+                  ${sessions.professional ? `<a href="${sessions.professional}" style="display:inline-block;padding:10px 20px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select Plan</a>` : ''}
+                </div>
+              </td>
+              <td style="padding:8px;" width="33%" align="center">
+                <div style="border:2px solid #e2e8f0;border-radius:8px;padding:16px 8px;text-align:center;">
+                  <p style="font-weight:bold;color:#1e3a8a;margin:0 0 4px;">Enterprise</p>
+                  <p style="font-size:24px;font-weight:bold;color:#1a1a1a;margin:0;">$599</p>
+                  <p style="font-size:12px;color:#666;margin:4px 0 12px;">/month</p>
+                  ${sessions.enterprise ? `<a href="${sessions.enterprise}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select</a>` : ''}
+                </div>
+              </td>
+            </tr>
+          </table>
+
+          <p style="color:#666;font-size:13px;text-align:center;">All plans include AI-powered client matching, a verified profile listing, and dedicated support.</p>
+        </div>
+        <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
+          <p style="color:#999;font-size:11px;margin:0;">Application ID: #${appId} | Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
+        </div>
+      </div>
+    `,
+  }).catch(err => console.error('Approval email error (non-fatal):', err.message));
+}
+
 app.post('/api/cpa-application', async (req, res) => {
   try {
     await ensureCpaApplicationsTable();
@@ -2747,7 +2899,7 @@ app.post('/api/cpa-application', async (req, res) => {
       return res.status(400).json({ error: 'At least one specialization is required' });
     }
 
-    console.log(`📝 CPA application from ${fullName} (${email}) — ${firmName}, ${province}`);
+    console.log(`CPA application from ${fullName} (${email}) -- ${firmName}, ${province}`);
 
     const insert = await pool.query(
       `INSERT INTO cpa_applications
@@ -2758,62 +2910,223 @@ app.post('/api/cpa-application', async (req, res) => {
     );
 
     const appId = insert.rows[0].id;
-
-    // Notify admin (async, non-blocking)
     const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
-    const specsHtml = specializations.map(s => `<li>${s}</li>`).join('');
+
+    // --- Auto-verification: cross-reference against scraped_cpas ---
+    const [firstName, ...lastParts] = fullName.split(' ');
+    const lastName = lastParts.join(' ');
+    let verified = false;
+    let matchScore = 0;
+    let matchedCpa = null;
+
+    if (lastName) {
+      try {
+        const matchResult = await pool.query(
+          `SELECT first_name, last_name, full_name, province, city, firm_name, designation
+           FROM scraped_cpas
+           WHERE LOWER(TRIM(last_name)) = LOWER(TRIM($1))
+             AND LOWER(TRIM(province)) = LOWER(TRIM($2))
+           LIMIT 50`,
+          [lastName, province]
+        );
+
+        for (const row of matchResult.rows) {
+          let score = 0;
+          // +2 for first name match
+          if (row.first_name && firstName && row.first_name.toLowerCase().trim() === firstName.toLowerCase().trim()) {
+            score += 2;
+          }
+          // +1 for city match (if applicant provided firmName containing city info, or direct city match)
+          if (row.city && firmName && row.city.toLowerCase().trim().length > 0) {
+            // City is not submitted directly; skip unless we can infer from firm
+          }
+          // +1 for firm match
+          if (row.firm_name && firmName && row.firm_name.toLowerCase().trim().includes(firmName.toLowerCase().trim().substring(0, 10))) {
+            score += 1;
+          }
+          if (firmName && row.firm_name && firmName.toLowerCase().trim().includes(row.firm_name.toLowerCase().trim().substring(0, 10))) {
+            score += 1;
+          }
+
+          if (score >= 2 && score > matchScore) {
+            matchScore = score;
+            matchedCpa = row;
+          }
+        }
+
+        if (matchScore >= 2) {
+          verified = true;
+        }
+      } catch (matchErr) {
+        console.error('Auto-verification lookup failed (non-fatal):', matchErr.message);
+      }
+    }
+
+    if (verified) {
+      // --- AUTO-APPROVED: update status, create Stripe sessions, send approval email ---
+      console.log(`AUTO-APPROVED application #${appId} for ${fullName} (score: ${matchScore}, matched: ${matchedCpa?.full_name || matchedCpa?.first_name + ' ' + matchedCpa?.last_name})`);
+
+      await pool.query(
+        `UPDATE cpa_applications SET status = 'approved', reviewed_at = NOW(), notes = $1 WHERE id = $2`,
+        [`Auto-approved: score ${matchScore}, matched ${matchedCpa?.full_name || (matchedCpa?.first_name + ' ' + matchedCpa?.last_name)}`, appId]
+      );
+
+      const sessions = await createApplicationCheckoutSessions(appId, email, fullName);
+      sendApprovalEmail({ email, fullName, appId, sessions });
+
+      // Admin notification: auto-approved
+      sendEmail({
+        to: adminEmail,
+        subject: `AUTO-APPROVED CPA Application: ${fullName} (${firmName})`,
+        html: `
+          <h2 style="color:#059669;">Auto-Approved CPA Application</h2>
+          <p><strong>Application ID:</strong> #${appId}</p>
+          <p><strong>Match score:</strong> ${matchScore}</p>
+          <p><strong>Matched record:</strong> ${matchedCpa?.full_name || (matchedCpa?.first_name + ' ' + matchedCpa?.last_name)}, ${matchedCpa?.province}</p>
+          <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Name</td><td style="padding:8px;border:1px solid #e2e8f0;">${fullName}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Email</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="mailto:${email}">${email}</a></td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Firm</td><td style="padding:8px;border:1px solid #e2e8f0;">${firmName}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">CPA Number</td><td style="padding:8px;border:1px solid #e2e8f0;">${cpaNumber}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${province}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Designation</td><td style="padding:8px;border:1px solid #e2e8f0;">${designation}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Pricing Tier</td><td style="padding:8px;border:1px solid #e2e8f0;">${pricingTier}</td></tr>
+          </table>
+          <p style="color:#059669;font-weight:bold;">Applicant has been sent the 3-tier payment email.</p>
+        `,
+      }).catch(err => console.error('Admin auto-approve email error (non-fatal):', err.message));
+
+      res.json({
+        success: true,
+        applicationId: appId,
+        verified: true,
+        message: 'Your CPA credentials have been verified! Check your email for next steps.',
+      });
+    } else {
+      // --- NOT VERIFIED: send pending email + admin MANUAL REVIEW alert ---
+      console.log(`PENDING REVIEW application #${appId} for ${fullName} (score: ${matchScore})`);
+
+      // Confirmation to applicant (48h review)
+      sendEmail({
+        to: email,
+        subject: 'Application Received -- CanadaAccountants.app',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
+            <div style="background:linear-gradient(135deg,#2563eb,#1e3a8a);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
+              <h1 style="color:#ffffff;margin:0;font-size:24px;">Application Received</h1>
+              <p style="color:#e0e7ff;margin:8px 0 0;font-size:14px;">AI-Powered CPA-Client Matching</p>
+            </div>
+            <div style="padding:32px 24px;background:#ffffff;">
+              <p style="color:#1a1a1a;font-size:16px;">Hi ${firstName || 'there'},</p>
+              <p style="color:#333;font-size:15px;">Thank you for applying to join <strong>CanadaAccountants.app</strong>. Your application has been received and our team will review it within 48 hours.</p>
+              <p style="color:#333;font-size:15px;">We will independently verify your CPA designation before activating your profile. <strong>No payment is required until your application is approved.</strong></p>
+              <p style="color:#333;font-size:15px;">If you have any questions in the meantime, reply to this email or contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a>.</p>
+              <p style="color:#333;font-size:15px;">Best regards,<br>The CanadaAccountants Team</p>
+            </div>
+            <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
+              <p style="color:#999;font-size:11px;margin:0;">Application ID: #${appId}</p>
+            </div>
+          </div>
+        `,
+      }).catch(err => console.error('CPA application applicant email error (non-fatal):', err.message));
+
+      // Admin: MANUAL REVIEW needed
+      const specsHtml = specializations.map(s => `<li>${s}</li>`).join('');
+      sendEmail({
+        to: adminEmail,
+        subject: `MANUAL REVIEW: CPA Application -- ${fullName} (${firmName})`,
+        html: `
+          <h2 style="color:#dc2626;">Manual Review Required</h2>
+          <p>This applicant could not be auto-verified against the scraped CPA directory.</p>
+          <p><strong>Application ID:</strong> #${appId}</p>
+          <p><strong>Match score:</strong> ${matchScore} (threshold: 2)</p>
+          <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Name</td><td style="padding:8px;border:1px solid #e2e8f0;">${fullName}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Email</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="mailto:${email}">${email}</a></td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Phone</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="tel:${phone}">${phone}</a></td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Firm</td><td style="padding:8px;border:1px solid #e2e8f0;">${firmName}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">CPA Number</td><td style="padding:8px;border:1px solid #e2e8f0;">${cpaNumber}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${province}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Designation</td><td style="padding:8px;border:1px solid #e2e8f0;">${designation}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Experience</td><td style="padding:8px;border:1px solid #e2e8f0;">${experience}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Client Size</td><td style="padding:8px;border:1px solid #e2e8f0;">${clientSize || 'Not specified'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Referral Source</td><td style="padding:8px;border:1px solid #e2e8f0;">${referralSource || 'Not specified'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Pricing Tier</td><td style="padding:8px;border:1px solid #e2e8f0;">${pricingTier}</td></tr>
+          </table>
+          <h3>Specializations</h3>
+          <ul>${specsHtml}</ul>
+          ${message ? `<h3>Message</h3><p style="background:#f8fafc;padding:12px;border-left:4px solid #2563eb;">${message.replace(/</g, '&lt;')}</p>` : ''}
+          ${ref ? `<p style="color:#666;font-size:13px;">Ref token: <code>${ref}</code></p>` : ''}
+          <p style="margin-top:24px;"><strong>To approve manually:</strong></p>
+          <p><code>POST ${BACKEND_URL}/api/admin/applications/${appId}/approve</code></p>
+        `,
+      }).catch(err => console.error('CPA application admin email error (non-fatal):', err.message));
+
+      res.json({
+        success: true,
+        applicationId: appId,
+        verified: false,
+        message: 'Your application has been received. We will review it within 48 hours.',
+      });
+    }
+  } catch (error) {
+    console.error('CPA application error:', error);
+    res.status(500).json({ error: 'Failed to process application', details: error.message });
+  }
+});
+
+// Manual approval endpoint (no auth, admin use only)
+app.post('/api/admin/applications/:id/approve', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const appResult = await pool.query(
+      `SELECT id, full_name, email, firm_name, cpa_number, province, designation, pricing_tier, status
+       FROM cpa_applications WHERE id = $1`,
+      [id]
+    );
+
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    const app = appResult.rows[0];
+
+    if (app.status === 'approved') {
+      return res.status(400).json({ error: 'Application already approved' });
+    }
+
+    await pool.query(
+      `UPDATE cpa_applications SET status = 'approved', reviewed_at = NOW(), notes = 'Manually approved via admin endpoint' WHERE id = $1`,
+      [id]
+    );
+
+    const sessions = await createApplicationCheckoutSessions(app.id, app.email, app.full_name);
+    sendApprovalEmail({ email: app.email, fullName: app.full_name, appId: app.id, sessions });
+
+    const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
     sendEmail({
       to: adminEmail,
-      subject: `New CPA Application: ${fullName} (${firmName})`,
+      subject: `MANUALLY APPROVED: CPA Application #${app.id} -- ${app.full_name}`,
       html: `
-        <h2 style="color:#1e3a8a;">New CPA Application Received</h2>
-        <p><strong>Application ID:</strong> #${appId}</p>
-        <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Name</td><td style="padding:8px;border:1px solid #e2e8f0;">${fullName}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Email</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="mailto:${email}">${email}</a></td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Phone</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="tel:${phone}">${phone}</a></td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Firm</td><td style="padding:8px;border:1px solid #e2e8f0;">${firmName}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">CPA Number</td><td style="padding:8px;border:1px solid #e2e8f0;">${cpaNumber}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${province}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Designation</td><td style="padding:8px;border:1px solid #e2e8f0;">${designation}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Experience</td><td style="padding:8px;border:1px solid #e2e8f0;">${experience}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Client Size</td><td style="padding:8px;border:1px solid #e2e8f0;">${clientSize || 'Not specified'}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Referral Source</td><td style="padding:8px;border:1px solid #e2e8f0;">${referralSource || 'Not specified'}</td></tr>
-          <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#f8fafc;">Pricing Tier</td><td style="padding:8px;border:1px solid #e2e8f0;">${pricingTier}</td></tr>
-        </table>
-        <h3>Specializations</h3>
-        <ul>${specsHtml}</ul>
-        ${message ? `<h3>Message</h3><p style="background:#f8fafc;padding:12px;border-left:4px solid #2563eb;">${message.replace(/</g, '&lt;')}</p>` : ''}
-        ${ref ? `<p style="color:#666;font-size:13px;">Ref token: <code>${ref}</code></p>` : ''}
-        <p style="color:#666;font-size:12px;margin-top:24px;">Submitted: ${insert.rows[0].submitted_at}</p>
+        <h2 style="color:#059669;">Application Manually Approved</h2>
+        <p><strong>${app.full_name}</strong> (${app.email}) has been approved and sent the 3-tier payment email.</p>
+        <p>Application ID: #${app.id}</p>
       `,
-    }).catch(err => console.error('CPA application admin email error (non-fatal):', err.message));
+    }).catch(err => console.error('Manual approval admin email error (non-fatal):', err.message));
 
-    // Confirmation to applicant
-    sendEmail({
-      to: email,
-      subject: 'Application Received — CanadaAccountants.app',
-      html: `
-        <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-          <h2 style="color:#1e3a8a;">Application Received</h2>
-          <p>Hi ${fullName.split(' ')[0] || 'there'},</p>
-          <p>Thank you for applying to join <strong>CanadaAccountants.app</strong>. Your application has been received and our team will review it within 48 hours.</p>
-          <p>We will independently verify your CPA designation before activating your profile. <strong>No payment is required until your application is approved.</strong></p>
-          <p>If you have any questions in the meantime, reply to this email or contact <a href="mailto:support@canadaaccountants.app">support@canadaaccountants.app</a>.</p>
-          <p>Best regards,<br>The CanadaAccountants Team</p>
-          <p style="color:#999;font-size:11px;margin-top:32px;">Application ID: #${appId}</p>
-        </div>
-      `,
-    }).catch(err => console.error('CPA application applicant email error (non-fatal):', err.message));
+    console.log(`MANUALLY APPROVED application #${app.id} for ${app.full_name}`);
 
     res.json({
       success: true,
-      applicationId: appId,
-      message: 'Your application has been received. We will review it within 48 hours.',
+      applicationId: app.id,
+      fullName: app.full_name,
+      email: app.email,
+      message: 'Application approved. Payment email sent to applicant.',
     });
   } catch (error) {
-    console.error('❌ CPA application error:', error);
-    res.status(500).json({ error: 'Failed to process application', details: error.message });
+    console.error('Manual approval error:', error);
+    res.status(500).json({ error: 'Failed to approve application', details: error.message });
   }
 });
 
