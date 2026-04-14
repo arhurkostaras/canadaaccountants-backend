@@ -3153,6 +3153,51 @@ app.post('/api/admin/monitor/fire', async (req, res) => {
   }
 });
 
+// Profile sitemap generator — returns XML sitemap of all public profile URLs.
+// Used to generate static sitemap files for the frontend GitHub Pages repo.
+app.get('/api/sitemap-profiles.xml', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const perPage = 45000; // Under Google's 50K limit
+    const offset = (page - 1) * perPage;
+
+    const countQ = await pool.query(
+      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid'`
+    );
+    const total = parseInt(countQ.rows[0].n, 10);
+    const totalPages = Math.ceil(total / perPage);
+
+    if (req.query.index === 'true') {
+      // Return sitemap index
+      let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+      xml += '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+      for (let i = 1; i <= totalPages; i++) {
+        xml += `  <sitemap><loc>https://canadaaccountants.app/sitemap-profiles-${i}.xml</loc></sitemap>\n`;
+      }
+      xml += '</sitemapindex>';
+      res.set('Content-Type', 'application/xml');
+      return res.send(xml);
+    }
+
+    const rows = await pool.query(
+      `SELECT id FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid' ORDER BY id LIMIT $1 OFFSET $2`,
+      [perPage, offset]
+    );
+
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+    for (const row of rows.rows) {
+      xml += `  <url><loc>https://canadaaccountants.app/profile?id=${row.id}</loc><changefreq>monthly</changefreq></url>\n`;
+    }
+    xml += '</urlset>';
+
+    res.set('Content-Type', 'application/xml');
+    res.send(xml);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cleanup test claim records
 app.post('/api/admin/cleanup-test-claims', async (req, res) => {
   try {
