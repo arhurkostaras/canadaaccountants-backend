@@ -3740,6 +3740,43 @@ app.post('/api/claim/instant', async (req, res) => {
     const refResult = await pool.query(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
     const referralLink = `${FRONTEND_URL}/join-as-cpa?ref=${refResult.rows[0].referral_code}`;
 
+    // Create 3 Stripe Checkout sessions for plan upgrade
+    let tierButtonsHtml = '';
+    try {
+      const tiers = [
+        { key: 'associate', label: 'Associate', price: '$199/mo' },
+        { key: 'professional', label: 'Professional', price: '$299/mo' },
+        { key: 'enterprise', label: 'Enterprise', price: '$599/mo' },
+      ];
+      const tierLinks = {};
+      for (const t of tiers) {
+        if (!STRIPE_PRICES[t.key]) continue;
+        const session = await stripe.checkout.sessions.create({
+          mode: 'subscription',
+          payment_method_types: ['card'],
+          line_items: [{ price: STRIPE_PRICES[t.key], quantity: 1 }],
+          success_url: `${FRONTEND_URL}/welcome?upgraded=true&tier=${t.key}`,
+          cancel_url: `${FRONTEND_URL}/pricing`,
+          customer_email: email,
+          metadata: { source: 'claim_upgrade', tier: t.key },
+          allow_promotion_codes: true,
+        });
+        tierLinks[t.key] = session.url;
+      }
+      tierButtonsHtml = tiers.map(t => {
+        const url = tierLinks[t.key];
+        if (!url) return '';
+        const isPrimary = t.key === 'professional';
+        const bg = isPrimary ? 'background:linear-gradient(135deg,#059669 0%,#047857 100%);' : 'background:#1e3a8a;';
+        const size = isPrimary ? 'font-size:16px;padding:14px 36px;' : 'font-size:14px;padding:10px 28px;';
+        return `<tr><td style="${bg}border-radius:6px;${size}text-align:center;">
+          <a href="${url}" style="color:#fff;text-decoration:none;font-weight:600;">${t.label} — ${t.price}</a>
+        </td></tr><tr><td style="height:10px;"></td></tr>`;
+      }).join('');
+    } catch (stripeErr) {
+      console.error('[Claim] Stripe session creation error (non-fatal):', stripeErr.message);
+    }
+
     // Send magic link email — NO password, NO extra steps
     sendEmail({
       to: email,
@@ -3752,6 +3789,15 @@ app.post('/api/claim/instant', async (req, res) => {
           <p style="text-align: center; margin: 30px 0;">
             <a href="${magicLink}" style="display: inline-block; background: linear-gradient(135deg, #2563eb, #1e3a8a); color: white; padding: 16px 40px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 16px;">Access Your Dashboard &rarr;</a>
           </p>
+          ${tierButtonsHtml ? `
+          <div style="margin-top:32px;padding-top:24px;border-top:1px solid #e2e8f0;">
+            <h3 style="color:#1e3a8a;margin:0 0 12px;">Upgrade Your Profile</h3>
+            <p style="color:#333;font-size:14px;margin:0 0 16px;">Get priority placement, AI-matched client inquiries, and full analytics:</p>
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+              ${tierButtonsHtml}
+            </table>
+          </div>
+          ` : ''}
           <p style="color: #666; font-size: 14px;">This link logs you in automatically — no password needed. It expires in 30 days.</p>
           <p style="color: #666; font-size: 14px;">From your dashboard you can edit your bio, update your specializations, and see client matches.</p>
         </div>
