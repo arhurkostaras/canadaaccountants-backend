@@ -4252,6 +4252,103 @@ app.get('/api/profiles/:id', async (req, res) => {
   }
 });
 
+// ── Public Directory Endpoints (SEO landing pages) ──
+
+const PROVINCE_MAP = {
+  ON: 'Ontario', BC: 'British Columbia', AB: 'Alberta', QC: 'Quebec',
+  SK: 'Saskatchewan', MB: 'Manitoba', NS: 'Nova Scotia', NB: 'New Brunswick',
+  NL: 'Newfoundland and Labrador', PE: 'Prince Edward Island'
+};
+
+app.get('/api/directory/:province', async (req, res) => {
+  try {
+    const provinceCode = req.params.province.toUpperCase();
+    const provinceName = PROVINCE_MAP[provinceCode];
+    if (!provinceName) return res.status(404).json({ error: 'Province not found' });
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = 20;
+    const offset = (page - 1) * limit;
+
+    const [professionalsResult, countResult, designationCounts] = await Promise.all([
+      pool.query(
+        `SELECT full_name, first_name, last_name, firm_name, city, province, designation,
+                LEFT(generated_bio, 160) AS bio_snippet
+         FROM scraped_cpas WHERE UPPER(province) = $1
+         ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
+        [provinceCode, limit, offset]
+      ),
+      pool.query(
+        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1',
+        [provinceCode]
+      ),
+      pool.query(
+        `SELECT designation, COUNT(*) AS count FROM scraped_cpas
+         WHERE UPPER(province) = $1 AND designation IS NOT NULL AND designation != ''
+         GROUP BY designation ORDER BY count DESC`,
+        [provinceCode]
+      )
+    ]);
+
+    const total = parseInt(countResult.rows[0].count);
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({
+      province: provinceCode,
+      province_name: provinceName,
+      total,
+      page,
+      total_pages: Math.ceil(total / limit),
+      designation_counts: designationCounts.rows,
+      professionals: professionalsResult.rows
+    });
+  } catch (err) {
+    console.error('Directory province error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get('/api/directory/:province/:designation', async (req, res) => {
+  try {
+    const provinceCode = req.params.province.toUpperCase();
+    const provinceName = PROVINCE_MAP[provinceCode];
+    if (!provinceName) return res.status(404).json({ error: 'Province not found' });
+
+    const designation = req.params.designation;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = 20;
+    const offset = (page - 1) * limit;
+
+    const [professionalsResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT full_name, first_name, last_name, firm_name, city, province, designation,
+                LEFT(generated_bio, 160) AS bio_snippet
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
+         ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
+        [provinceCode, `%${designation.toUpperCase()}%`, limit, offset]
+      ),
+      pool.query(
+        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2',
+        [provinceCode, `%${designation.toUpperCase()}%`]
+      )
+    ]);
+
+    const total = parseInt(countResult.rows[0].count);
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({
+      province: provinceCode,
+      province_name: provinceName,
+      designation,
+      total,
+      page,
+      total_pages: Math.ceil(total / limit),
+      professionals: professionalsResult.rows
+    });
+  } catch (err) {
+    console.error('Directory province/designation error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Sentry error handler (must be before app.listen, after all routes)
 if (process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.errorHandler());
