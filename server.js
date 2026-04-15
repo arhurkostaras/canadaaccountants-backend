@@ -3474,6 +3474,16 @@ app.post('/api/claim/real-visit', async (req, res) => {
 
 // On-demand pipeline monitor — permanent endpoint so we never need temp diagnostics
 // for manual monitor fires again. Tech debt #7, closed 2026-04-13.
+// Trigger processQueue immediately (admin use)
+app.post('/api/admin/trigger-queue', async (req, res) => {
+  try {
+    outreachEngine.processQueue().catch(err => console.error('[Trigger] processQueue error:', err.message));
+    res.json({ success: true, message: 'processQueue triggered' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/admin/monitor/fire', async (req, res) => {
   try {
     const label = req.query.label || 'ad-hoc';
