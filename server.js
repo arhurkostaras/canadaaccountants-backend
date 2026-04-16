@@ -2813,35 +2813,19 @@ async function ensureCpaApplicationsTable() {
   _cpaApplicationsTableReady = true;
 }
 
-// Helper: create 3 Stripe Checkout sessions for an approved application
-async function createApplicationCheckoutSessions(appId, email, fullName) {
+// Helper: build redirect URLs for 3-tier approval email (no pre-generated Stripe sessions).
+// Links point to GET /api/checkout/:tier which creates a fresh Stripe session on click.
+function buildApprovalTierUrls(appId, email, fullName) {
   const tiers = [
-    { key: 'associate', name: 'Associate', price: STRIPE_PRICES.associate },
-    { key: 'professional', name: 'Professional', price: STRIPE_PRICES.professional },
-    { key: 'enterprise', name: 'Enterprise', price: STRIPE_PRICES.enterprise },
+    { key: 'associate', label: 'Associate' },
+    { key: 'professional', label: 'Professional' },
+    { key: 'enterprise', label: 'Enterprise' },
   ];
-  const sessions = {};
+  const urls = {};
   for (const tier of tiers) {
-    if (!tier.price) {
-      console.warn(`No Stripe price configured for ${tier.key}, skipping`);
-      continue;
-    }
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      customer_email: email,
-      line_items: [{ price: tier.price, quantity: 1 }],
-      success_url: `${FRONTEND_URL}/welcome?tier=${tier.key}&app=${appId}`,
-      cancel_url: `${FRONTEND_URL}/pricing`,
-      metadata: {
-        application_id: String(appId),
-        source: 'auto_approved_application',
-        tier: tier.key,
-        applicant_name: fullName,
-      },
-    });
-    sessions[tier.key] = session.url;
+    urls[tier.key] = `${BACKEND_URL}/api/checkout/${tier.key}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(fullName)}&app=${appId}`;
   }
-  return sessions;
+  return urls;
 }
 
 // Helper: send 3-tier approval email
@@ -2868,7 +2852,7 @@ function sendApprovalEmail({ email, fullName, appId, sessions }) {
                   <p style="font-weight:bold;color:#1e3a8a;margin:0 0 4px;">Associate</p>
                   <p style="font-size:24px;font-weight:bold;color:#1a1a1a;margin:0;">$199</p>
                   <p style="font-size:12px;color:#666;margin:4px 0 12px;">/month</p>
-                  ${sessions.associate ? `<a href="${sessions.associate}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select</a>` : ''}
+                  <a href="${sessions.associate}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select</a>
                 </div>
               </td>
               <td style="padding:8px;" width="33%" align="center">
@@ -2876,7 +2860,7 @@ function sendApprovalEmail({ email, fullName, appId, sessions }) {
                   <p style="font-weight:bold;color:#2563eb;margin:0 0 4px;">Professional</p>
                   <p style="font-size:24px;font-weight:bold;color:#1a1a1a;margin:0;">$299</p>
                   <p style="font-size:12px;color:#666;margin:4px 0 12px;">/month</p>
-                  ${sessions.professional ? `<a href="${sessions.professional}" style="display:inline-block;padding:10px 20px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select Plan</a>` : ''}
+                  <a href="${sessions.professional}" style="display:inline-block;padding:10px 20px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select Plan</a>
                 </div>
               </td>
               <td style="padding:8px;" width="33%" align="center">
@@ -2884,7 +2868,7 @@ function sendApprovalEmail({ email, fullName, appId, sessions }) {
                   <p style="font-weight:bold;color:#1e3a8a;margin:0 0 4px;">Enterprise</p>
                   <p style="font-size:24px;font-weight:bold;color:#1a1a1a;margin:0;">$599</p>
                   <p style="font-size:12px;color:#666;margin:4px 0 12px;">/month</p>
-                  ${sessions.enterprise ? `<a href="${sessions.enterprise}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select</a>` : ''}
+                  <a href="${sessions.enterprise}" style="display:inline-block;padding:10px 20px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Select</a>
                 </div>
               </td>
             </tr>
@@ -2989,7 +2973,7 @@ app.post('/api/cpa-application', async (req, res) => {
         [`Auto-approved: score ${matchScore}, matched ${matchedCpa?.full_name || (matchedCpa?.first_name + ' ' + matchedCpa?.last_name)}`, appId]
       );
 
-      const sessions = await createApplicationCheckoutSessions(appId, email, fullName);
+      const sessions = buildApprovalTierUrls(appId, email, fullName);
       sendApprovalEmail({ email, fullName, appId, sessions });
 
       // Admin notification: auto-approved
@@ -3119,7 +3103,7 @@ app.post('/api/admin/applications/:id/approve', async (req, res) => {
       [id]
     );
 
-    const sessions = await createApplicationCheckoutSessions(app.id, app.email, app.full_name);
+    const sessions = buildApprovalTierUrls(app.id, app.email, app.full_name);
     sendApprovalEmail({ email: app.email, fullName: app.full_name, appId: app.id, sessions });
 
     const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
@@ -3415,6 +3399,42 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
   } catch (error) {
     console.error('Stripe checkout error:', error);
     res.status(500).json({ error: 'Failed to create checkout session', details: error.message });
+  }
+});
+
+// On-demand Stripe Checkout — email links redirect here instead of pre-generated session URLs.
+// Stripe sessions expire after 24h, so emails must never contain pre-generated URLs.
+app.get('/api/checkout/:tier', async (req, res) => {
+  try {
+    const tier = req.params.tier;
+    const email = req.query.email;
+    const name = req.query.name || '';
+    const appId = req.query.app || '';
+
+    const priceId = STRIPE_PRICES[tier];
+    if (!priceId) return res.status(400).send('Invalid tier. Valid: associate, professional, enterprise');
+    if (!email) return res.status(400).send('Email required');
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: `${FRONTEND_URL}/welcome?upgraded=true&tier=${tier}`,
+      cancel_url: `${FRONTEND_URL}/pricing`,
+      customer_email: email,
+      metadata: {
+        source: appId ? 'auto_approved_application' : 'email_checkout',
+        application_id: appId,
+        tier,
+        name,
+      },
+      allow_promotion_codes: true,
+    });
+
+    res.redirect(303, session.url);
+  } catch (error) {
+    console.error('[Checkout] Error:', error.message);
+    res.status(500).send('Unable to create checkout session. Please try again or contact support.');
   }
 });
 
@@ -3750,42 +3770,21 @@ app.post('/api/claim/instant', async (req, res) => {
     const refResult = await pool.query(`SELECT referral_code FROM users WHERE id = $1`, [userId]);
     const referralLink = `${FRONTEND_URL}/join-as-cpa?ref=${refResult.rows[0].referral_code}`;
 
-    // Create 3 Stripe Checkout sessions for plan upgrade
-    let tierButtonsHtml = '';
-    try {
-      const tiers = [
-        { key: 'associate', label: 'Associate', price: '$199/mo' },
-        { key: 'professional', label: 'Professional', price: '$299/mo' },
-        { key: 'enterprise', label: 'Enterprise', price: '$599/mo' },
-      ];
-      const tierLinks = {};
-      for (const t of tiers) {
-        if (!STRIPE_PRICES[t.key]) continue;
-        const session = await stripe.checkout.sessions.create({
-          mode: 'subscription',
-          payment_method_types: ['card'],
-          line_items: [{ price: STRIPE_PRICES[t.key], quantity: 1 }],
-          success_url: `${FRONTEND_URL}/welcome?upgraded=true&tier=${t.key}`,
-          cancel_url: `${FRONTEND_URL}/pricing`,
-          customer_email: email,
-          metadata: { source: 'claim_upgrade', tier: t.key },
-          allow_promotion_codes: true,
-        });
-        tierLinks[t.key] = session.url;
-      }
-      tierButtonsHtml = tiers.map(t => {
-        const url = tierLinks[t.key];
-        if (!url) return '';
-        const isPrimary = t.key === 'professional';
-        const bg = isPrimary ? 'background:linear-gradient(135deg,#059669 0%,#047857 100%);' : 'background:#1e3a8a;';
-        const size = isPrimary ? 'font-size:16px;padding:14px 36px;' : 'font-size:14px;padding:10px 28px;';
-        return `<tr><td style="${bg}border-radius:6px;${size}text-align:center;">
-          <a href="${url}" style="color:#fff;text-decoration:none;font-weight:600;">${t.label} — ${t.price}</a>
-        </td></tr><tr><td style="height:10px;"></td></tr>`;
-      }).join('');
-    } catch (stripeErr) {
-      console.error('[Claim] Stripe session creation error (non-fatal):', stripeErr.message);
-    }
+    // Build tier upgrade buttons using redirect URLs (no pre-generated Stripe sessions)
+    const tiers = [
+      { key: 'associate', label: 'Associate', price: '$199/mo' },
+      { key: 'professional', label: 'Professional', price: '$299/mo' },
+      { key: 'enterprise', label: 'Enterprise', price: '$599/mo' },
+    ];
+    const tierButtonsHtml = tiers.map(t => {
+      const url = `${BACKEND_URL}/api/checkout/${t.key}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(claimName)}`;
+      const isPrimary = t.key === 'professional';
+      const bg = isPrimary ? 'background:linear-gradient(135deg,#059669 0%,#047857 100%);' : 'background:#1e3a8a;';
+      const size = isPrimary ? 'font-size:16px;padding:14px 36px;' : 'font-size:14px;padding:10px 28px;';
+      return `<tr><td style="${bg}border-radius:6px;${size}text-align:center;">
+        <a href="${url}" style="color:#fff;text-decoration:none;font-weight:600;">${t.label} — ${t.price}</a>
+      </td></tr><tr><td style="height:10px;"></td></tr>`;
+    }).join('');
 
     // Send magic link email — NO password, NO extra steps
     sendEmail({
