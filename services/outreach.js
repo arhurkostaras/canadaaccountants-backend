@@ -105,7 +105,32 @@ class OutreachEngine {
   }
 
   async listCampaigns() {
-    const result = await this.pool.query('SELECT * FROM outreach_campaigns ORDER BY created_at DESC');
+    // Override stale c.total_sent / total_queued counters with live counts from
+    // outreach_emails. The increment logic in _sendOutreachEmail can drift if
+    // sends happen during deploys or if early sends were never counted.
+    const result = await this.pool.query(`
+      SELECT c.*,
+             COALESCE(stats.total_recipients_live, 0) AS total_recipients,
+             COALESCE(stats.total_sent_live, c.total_sent, 0) AS total_sent,
+             COALESCE(stats.total_queued_live, c.total_queued, 0) AS total_queued,
+             COALESCE(stats.total_delivered_live, c.total_delivered, 0) AS total_delivered,
+             COALESCE(stats.total_opened_live, c.total_opened, 0) AS total_opened,
+             COALESCE(stats.total_clicked_live, c.total_clicked, 0) AS total_clicked,
+             COALESCE(stats.total_bounced_live, c.total_bounced, 0) AS total_bounced
+      FROM outreach_campaigns c
+      LEFT JOIN (
+        SELECT campaign_id,
+          COUNT(*) AS total_recipients_live,
+          COUNT(*) FILTER (WHERE status = 'queued') AS total_queued_live,
+          COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','complained')) AS total_sent_live,
+          COUNT(*) FILTER (WHERE status = 'delivered') AS total_delivered_live,
+          COUNT(*) FILTER (WHERE status = 'opened') AS total_opened_live,
+          COUNT(*) FILTER (WHERE status = 'clicked') AS total_clicked_live,
+          COUNT(*) FILTER (WHERE status = 'bounced') AS total_bounced_live
+        FROM outreach_emails GROUP BY campaign_id
+      ) stats ON stats.campaign_id = c.id
+      ORDER BY c.created_at DESC
+    `);
     return result.rows;
   }
 

@@ -1492,6 +1492,30 @@ app.post('/api/match-cpas', async (req, res) => {
 
     // Notify matched CPAs about new client interest (async, non-blocking)
     if (scoredMatches.length > 0 && (email || name)) {
+      // Admin notification: SME demand-side activity
+      sendEmail({
+        to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+        subject: `NEW SME MATCH REQUEST: ${name || email || 'Anonymous'} looking for ${searchSpec || 'CPA'} in ${searchProvince || 'Canada'}`,
+        html: `
+          <h2 style="color:#2563eb;">New SME Match Request</h2>
+          <p>An SME just submitted a find-a-CPA request on CanadaAccountants.</p>
+          <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Name</td><td style="padding:8px;border:1px solid #e2e8f0;">${name || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Email</td><td style="padding:8px;border:1px solid #e2e8f0;"><a href="mailto:${email}">${email || '—'}</a></td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Phone</td><td style="padding:8px;border:1px solid #e2e8f0;">${phone || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Service Type</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchSpec || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Business Size</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchBusinessSize || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchProvince || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Budget</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchBudgetRange || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Fee Preference</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchFeePreference || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Source</td><td style="padding:8px;border:1px solid #e2e8f0;">${req.body.source || 'unknown'}</td></tr>
+          </table>
+          <p><strong>Matches generated:</strong> ${scoredMatches.length}</p>
+          ${scoredMatches.slice(0,3).map(m => `<p style="margin:4px 0;color:#666;font-size:13px;">→ ${m.name} (${m.firmName || 'no firm'}) — score ${m.matchScore}</p>`).join('')}
+          <p style="color:#888;font-size:12px;">${new Date().toISOString()}</p>
+        `,
+      }).catch(err => console.error('[Match] Admin notification error:', err.message));
+
       for (const match of scoredMatches) {
         const cpaEmail = await pool.query('SELECT email FROM cpa_profiles WHERE id = $1', [match.id]);
         if (cpaEmail.rows[0]?.email) {
