@@ -1113,20 +1113,36 @@ class SequenceEngine {
       }
     } catch (e) { /* fall back to default */ }
 
+    // Pre-baked checkout URLs for upgrade emails. Use the redirect endpoint that
+    // creates a fresh Stripe session on click — links never expire.
+    const recipientEmail = professional.enriched_email || professional.email || '';
+    const fullName = professional.full_name || `${professional.first_name || ''} ${professional.last_name || ''}`.trim();
+    const checkoutBase = recipientEmail
+      ? `${backendUrl}/api/checkout`
+      : `${baseUrl}/pricing`;
+    const checkoutQuery = recipientEmail
+      ? `?email=${encodeURIComponent(recipientEmail)}&name=${encodeURIComponent(fullName)}`
+      : '';
+
     return {
       first_name: professional.first_name || '',
       last_name: professional.last_name || '',
-      full_name: professional.full_name || `${professional.first_name || ''} ${professional.last_name || ''}`.trim(),
+      full_name: fullName,
       firm_name: professional.firm_name || '',
       city: professional.city || '',
       province: professional.province || '',
       designation: professional.designation || '',
+      email: recipientEmail,
       platform_name: platformNames[this.platform] || this.platform,
       platform_url: baseUrl,
       social_proof_line: socialProofLine,
       social_proof_short: socialProofShort,
       claim_url: unsubToken ? `${baseUrl}/claim-profile?ref=${unsubToken}` : `${baseUrl}/claim-profile`,
-      unsubscribe_url: unsubToken ? `${backendUrl}/api/unsubscribe/${unsubToken}` : `${baseUrl}/unsubscribe/${professional.id}`
+      unsubscribe_url: unsubToken ? `${backendUrl}/api/unsubscribe/${unsubToken}` : `${baseUrl}/unsubscribe/${professional.id}`,
+      checkout_associate_url: recipientEmail ? `${checkoutBase}/associate${checkoutQuery}` : `${baseUrl}/pricing`,
+      checkout_professional_url: recipientEmail ? `${checkoutBase}/professional${checkoutQuery}` : `${baseUrl}/pricing`,
+      checkout_enterprise_url: recipientEmail ? `${checkoutBase}/enterprise${checkoutQuery}` : `${baseUrl}/pricing`,
+      pricing_url: `${baseUrl}/pricing`,
     };
   }
 

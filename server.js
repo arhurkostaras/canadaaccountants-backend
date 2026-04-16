@@ -1214,6 +1214,60 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p>See what a Professional membership can do for your practice:</p>
 <p><a href="{{platform_url}}/pricing" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">View Membership Options</a></p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
+            delay_days: 10,
+            subject_line: '{{first_name}}, here\'s exactly what your free profile does (and doesn\'t) get you',
+            body_template: `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;font-family:Arial,sans-serif;">
+<tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);padding:28px 32px;color:#ffffff;">
+<h1 style="margin:0;font-size:22px;font-weight:600;">CanadaAccountants</h1>
+<p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">Your profile vs. paid tier</p>
+</td></tr>
+<tr><td style="padding:32px 32px 12px;color:#111;line-height:1.65;font-size:15px;">
+<p>Hi {{first_name}},</p>
+<p>It's been about ten days since you claimed your profile on CanadaAccountants. I want to be honest with you about what your free profile actually does — and what it doesn't.</p>
+</td></tr>
+
+<tr><td style="padding:0 32px 12px;">
+<table cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:14px;">
+<tr>
+  <th style="text-align:left;padding:10px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;">What you get</th>
+  <th style="text-align:center;padding:10px 12px;background:#f8fafc;border-bottom:2px solid #e2e8f0;width:90px;">Free</th>
+  <th style="text-align:center;padding:10px 12px;background:#eff6ff;border-bottom:2px solid #2563eb;width:90px;">Paid</th>
+</tr>
+<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;">Profile visible in directory</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;">✓</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
+<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;">AI-generated bio</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;">✓</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
+<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Priority in search results</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
+<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Direct client match notifications</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
+<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Featured profile placement in {{city}}</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
+<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Verified badge</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
+<tr><td style="padding:10px 12px;">Analytics &amp; profile views</td><td style="text-align:center;padding:10px 12px;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;color:#059669;background:#fafcff;">✓</td></tr>
+</table>
+</td></tr>
+
+<tr><td style="padding:18px 32px 8px;color:#111;line-height:1.65;font-size:15px;">
+<p>The honest version: <strong>your free profile shows up in the directory</strong>. That is meaningful — clients searching CanadaAccountants can find you. But you're not at the top of {{city}} results, you don't get notified when a client matches your specialty, and you don't carry the verified badge that signals "this CPA is actively engaged."</p>
+<p>If those things matter to your practice, here are the options. Pick one:</p>
+</td></tr>
+
+<tr><td style="padding:8px 32px 8px;">
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+<tr><td style="background:#1e3a8a;border-radius:6px;padding:10px 28px;text-align:center;font-size:14px;"><a href="{{checkout_associate_url}}" style="color:#fff;text-decoration:none;font-weight:600;">Associate — $199/mo</a></td></tr>
+<tr><td style="height:10px;"></td></tr>
+<tr><td style="background:linear-gradient(135deg,#059669 0%,#047857 100%);border-radius:6px;padding:14px 36px;text-align:center;font-size:16px;"><a href="{{checkout_professional_url}}" style="color:#fff;text-decoration:none;font-weight:600;">Professional — $299/mo</a></td></tr>
+<tr><td style="height:10px;"></td></tr>
+<tr><td style="background:#1e3a8a;border-radius:6px;padding:10px 28px;text-align:center;font-size:14px;"><a href="{{checkout_enterprise_url}}" style="color:#fff;text-decoration:none;font-weight:600;">Enterprise — $599/mo</a></td></tr>
+</table>
+</td></tr>
+
+<tr><td style="padding:18px 32px 24px;color:#111;line-height:1.65;font-size:15px;">
+<p>If none of these are right for you yet, that's also useful information. Reply and tell me what's missing — I read every reply.</p>
+<p>Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
+</td></tr>
+<tr><td style="background:#f5f5f5;padding:14px 32px;color:#888;font-size:11px;text-align:center;">
+CanadaAccountants.app &middot; <a href="{{unsubscribe_url}}" style="color:#888;">Unsubscribe</a>
+</td></tr>
+</table>`
           }
     ];
     if (!seqMap['Post-Claim Welcome']) {
