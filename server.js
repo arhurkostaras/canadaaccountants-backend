@@ -3472,6 +3472,68 @@ app.post('/api/admin/outreach/create-campaign', async (req, res) => {
 });
 
 // Re-engagement campaign: send apology to CPAs who clicked but hit 404
+// Cleanup test conversion pollution. ?dry_run=true to preview, ?execute=true to commit.
+app.post('/api/admin/cleanup-test-conversions', async (req, res) => {
+  try {
+    const dryRun = req.query.execute !== 'true';
+    const targetIds = [22460, 5050]; // Parveen Bansal (admin click), Royal Auto Collision (orphan)
+
+    const before = await pool.query(
+      `SELECT id, recipient_email, recipient_name, campaign_id, converted, converted_at, converted_user_id
+       FROM outreach_emails WHERE id = ANY($1::int[])`,
+      [targetIds]
+    );
+    const c2Before = await pool.query(`SELECT id, name, total_converted FROM outreach_campaigns WHERE id = 2`);
+
+    if (dryRun) {
+      return res.json({
+        mode: 'DRY RUN',
+        will_update_outreach_emails: before.rows,
+        will_change_campaign: c2Before.rows[0],
+        proposed_changes: {
+          outreach_emails: 'SET converted=false, converted_at=NULL, converted_user_id=NULL',
+          outreach_campaigns_c2: `total_converted: ${c2Before.rows[0]?.total_converted} -> 0`,
+        },
+        execute_with: 'POST same URL with ?execute=true'
+      });
+    }
+
+    // EXECUTE
+    const updateRows = await pool.query(
+      `UPDATE outreach_emails
+       SET converted = false, converted_at = NULL, converted_user_id = NULL
+       WHERE id = ANY($1::int[])
+       RETURNING id, recipient_email`,
+      [targetIds]
+    );
+    const updateCampaign = await pool.query(
+      `UPDATE outreach_campaigns SET total_converted = 0, updated_at = NOW()
+       WHERE id = 2 RETURNING id, name, total_converted`
+    );
+
+    res.json({
+      mode: 'EXECUTED',
+      updated_outreach_emails: updateRows.rows,
+      updated_campaign: updateCampaign.rows[0],
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Investigate David Mark's conversion path
+app.get('/api/admin/david-mark-debug', async (req, res) => {
+  try {
+    const oe = await pool.query(`SELECT * FROM outreach_emails WHERE id = 26403`);
+    const user = await pool.query(`SELECT * FROM users WHERE id = 4`);
+    const cpaProfile = await pool.query(`SELECT * FROM cpa_profiles WHERE user_id = 4 OR LOWER(email) = 'david.mark@workday.com' LIMIT 1`);
+    const scrapedCpa = await pool.query(`SELECT id, full_name, first_name, last_name, COALESCE(enriched_email, email) as email, claim_status, claimed_by, firm_name, province, city FROM scraped_cpas WHERE LOWER(COALESCE(enriched_email, email)) = 'david.mark@workday.com'`);
+    res.json({ outreach_email: oe.rows[0], user: user.rows[0], cpa_profile: cpaProfile.rows[0], scraped_cpa: scrapedCpa.rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Investigate ACC conversions
 app.get('/api/admin/conversions-debug', async (req, res) => {
   try {
