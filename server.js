@@ -3525,6 +3525,68 @@ app.post('/api/admin/outreach/create-campaign', async (req, res) => {
   }
 });
 
+// C9 successor to C8 Tax Season — Q3 Pipeline Campaign
+// Seeds paused; user activates manually around April 29 after C8 completes.
+// Idempotent: returns existing campaign ID if already created.
+app.post('/api/admin/create-c9-campaign', async (req, res) => {
+  try {
+    const CAMPAIGN_NAME = 'Q3 Pipeline CPA Campaign';
+
+    const existing = await pool.query(
+      'SELECT id, name, status, daily_limit, total_limit, send_type FROM outreach_campaigns WHERE name = $1',
+      [CAMPAIGN_NAME]
+    );
+    if (existing.rows.length > 0) {
+      return res.json({
+        success: true,
+        already_exists: true,
+        campaignId: existing.rows[0].id,
+        campaign: existing.rows[0],
+      });
+    }
+
+    const subjectTemplate = '{{first_name}}, tax season is over — what comes next?';
+    const subjectVariants = [
+      'Q3 client pipeline starts now, {{first_name}}',
+      '{{first_name}}, the smart CPAs are building Q3 pipeline this week',
+      'While other CPAs are decompressing, {{first_name}}...'
+    ];
+
+    const bodyTemplate = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background-color:#f4f4f7;font-family:Arial,sans-serif;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7;"><tr><td align="center" style="padding:32px 16px;"><table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);"><tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);padding:28px 40px;text-align:center;"><h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;">CanadaAccountants</h1><p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">AI-Powered CPA-Client Matching</p></td></tr><tr><td style="padding:36px 40px;"><p style="margin:0 0 18px;color:#1a1a1a;font-size:15px;line-height:1.7;">Hi {{first_name}},</p><p style="margin:0 0 18px;color:#333;font-size:15px;line-height:1.7;">Tax season is done. Now\'s the window when smart CPAs build their pipeline for Q3 and year-end.</p><p style="margin:0 0 18px;color:#333;font-size:15px;line-height:1.7;">Most CPAs in {{province}} are decompressing this week — understandable after the April 30 crunch. But the firms that win the back half of 2026 are the ones positioning right now, while everyone else is offline.</p><p style="margin:0 0 18px;color:#333;font-size:15px;line-height:1.7;">Businesses in {{city}} are already searching CanadaAccountants for CPAs to handle:</p><ul style="margin:0 0 18px;padding-left:22px;color:#333;font-size:15px;line-height:1.8;"><li>Corporate year-end planning</li><li>Advisory work</li><li>Audit prep</li><li>Bookkeeping cleanup</li></ul><p style="margin:0 0 24px;color:#333;font-size:15px;line-height:1.7;">Claim your profile and appear in {{city}} search results before businesses lock in their Q3 partnerships.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 28px;"><tr><td style="background:linear-gradient(135deg,#2563eb,#1e3a8a);border-radius:6px;padding:14px 36px;"><a href="https://canadaaccountants.app/claim-profile" style="color:#fff;text-decoration:none;font-size:16px;font-weight:600;">See My Profile &rarr;</a></td></tr></table><p style="margin:0;color:#666;font-size:13px;line-height:1.6;">— The CanadaAccountants team</p></td></tr><tr><td style="padding:20px 40px;border-top:1px solid #eee;background:#fafafa;"><p style="margin:0;color:#999;font-size:11px;text-align:center;"><a href="{{unsubscribe_url}}" style="color:#999;text-decoration:underline;">Unsubscribe</a> &middot; &copy; 2026 CanadaAccountants.app</p></td></tr></table></td></tr></table></body></html>';
+
+    const insert = await pool.query(
+      `INSERT INTO outreach_campaigns
+         (name, type, subject_template, body_template, subject_variants,
+          daily_limit, total_limit, status, send_type, created_at)
+       VALUES ($1, 'cpa', $2, $3, $4, 150, NULL, 'paused', 'cold', NOW())
+       RETURNING id, name, status, daily_limit, total_limit, send_type`,
+      [CAMPAIGN_NAME, subjectTemplate, bodyTemplate, JSON.stringify(subjectVariants)]
+    );
+
+    res.json({
+      success: true,
+      already_exists: false,
+      campaignId: insert.rows[0].id,
+      campaign: insert.rows[0],
+      config_summary: {
+        name: CAMPAIGN_NAME,
+        type: 'cpa',
+        send_type: 'cold',
+        recipient_type: 'cpa',
+        daily_limit: 150,
+        total_limit: 'unlimited',
+        status: 'paused',
+        primary_subject: subjectTemplate,
+        variant_count: subjectVariants.length,
+        note: 'Paused — activate manually April 29-30 after C8 completes on April 28.',
+      },
+    });
+  } catch (err) {
+    console.error('[C9] create error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Re-engagement campaign: send apology to CPAs who clicked but hit 404
 // Cleanup test conversion pollution. ?dry_run=true to preview, ?execute=true to commit.
 app.post('/api/admin/cleanup-test-conversions', async (req, res) => {
