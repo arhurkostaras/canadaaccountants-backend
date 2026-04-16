@@ -4684,11 +4684,40 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
 // Known top firms for ACC (adds +20 to warmth score when firm_name matches)
 const ACC_TOP_FIRMS = ['KPMG', 'PwC', 'EY', 'Deloitte', 'BDO', 'MNP', 'Grant Thornton', 'RSM', 'Crowe', 'Baker Tilly', 'Welch'];
 const ROLE_EMAIL_PREFIXES = ['info@', 'admin@', 'contact@', 'office@', 'hello@', 'support@', 'sales@', 'team@', 'help@', 'inquiries@', 'enquiries@', 'reception@'];
+// Match role keywords anywhere in the local part (catches client.support@, exhibit.transportation@, etc.)
+const ROLE_KEYWORDS_REGEX = /(^|[._-])(support|info|contact|hello|sales|admin|office|reception|enquiries|inquiries|service|customer|customerservice|noreply|no-?reply|donotreply|webmaster|hostmaster|postmaster|abuse|fraud|spam|bounce|newsletter|exhibit|transportation|logistics|warehouse|shipping|billing|accounting|payable|receivable|hr|human-?resources|careers|jobs|recruitment|reservations|bookings|media|press|legal|compliance|privacy|foi)([._-]|$)/i;
 
 function isRoleEmail(email) {
   if (!email) return false;
   const lower = email.toLowerCase();
-  return ROLE_EMAIL_PREFIXES.some(p => lower.startsWith(p));
+  if (ROLE_EMAIL_PREFIXES.some(p => lower.startsWith(p))) return true;
+  const local = lower.split('@')[0] || '';
+  return ROLE_KEYWORDS_REGEX.test(local);
+}
+
+// Verify the email's local part actually contains some part of the person's name.
+// Catches Apollo/scraper enrichment errors where a firm-directory email got attributed
+// to the wrong person (e.g. "Chelsea Kraft" → "lisatrent@trentcpa.com").
+function nameMatchesEmail(name, email) {
+  if (!name || !email) return false;
+  const local = (email.split('@')[0] || '').toLowerCase();
+  const parts = name.toLowerCase().split(/[\s\-,.]+/).filter(p => p.length >= 2);
+  if (parts.length === 0) return false;
+  // Any name part of length >= 3 appears in the local part
+  for (const p of parts) {
+    if (p.length >= 3 && local.includes(p)) return true;
+  }
+  // First initial + last name pattern (e.g. "jdoe" for John Doe)
+  if (parts.length >= 2) {
+    const initial = parts[0][0] + parts[parts.length - 1];
+    if (local === initial || local.startsWith(initial)) return true;
+  }
+  // Last name + first initial pattern (e.g. "doej" for John Doe)
+  if (parts.length >= 2) {
+    const trailing = parts[parts.length - 1] + parts[0][0];
+    if (local === trailing) return true;
+  }
+  return false;
 }
 
 function firmMatchesTopList(firmName, topList) {
@@ -4786,16 +4815,15 @@ app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
           signals.push('has_bio');
         }
 
-        // Role-based email penalty
+        // Hard exclusions (drop entirely, not penalize)
         if (isRoleEmail(r.email)) {
-          score -= 10;
-          signals.push('role_email');
+          signals.push('exclude:role_email');
         }
-
-        // Unsubscribed
+        if (!nameMatchesEmail(r.name, r.email)) {
+          signals.push('exclude:name_email_mismatch');
+        }
         if (r.unsubscribed) {
-          score -= 50;
-          signals.push('unsubscribed');
+          signals.push('exclude:unsubscribed');
         }
 
         return {
@@ -4812,7 +4840,13 @@ app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
           recipient_type: 'scraped_cpa'
         };
       })
-      .filter(c => c.score > 0 && !c.signals.includes('unsubscribed'))
+      .filter(c => c.score > 0 && !c.signals.some(s => s.startsWith('exclude:')))
+      // Dedup by email (multiple people sharing same address — keep highest score)
+      .reduce((acc, c) => {
+        const key = (c.email || '').toLowerCase();
+        if (!acc.seen.has(key)) { acc.seen.add(key); acc.list.push(c); }
+        return acc;
+      }, { seen: new Set(), list: [] }).list
       .sort((a, b) => b.score - a.score)
       .slice(0, 10);
 
