@@ -2473,7 +2473,7 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
   try {
     // Exclude known test emails from counts. These 5 records were identified
     // on 2026-04-16 as polluting ACC dashboard metrics with non-real data.
-    const TEST_EMAILS = `'arthur@negotiateandwin.com','arthur+cpa-app-test@negotiateandwin.com','akrosfinancial@gmail.com','sarah.johnson@testcpa.com','sarah.williams@testcpa.com'`;
+    const TEST_EMAILS = `'test@cpa.com','arthur@negotiateandwin.com','arthur+cpa-app-test@negotiateandwin.com','akrosfinancial@gmail.com','sarah.johnson@testcpa.com','sarah.williams@testcpa.com'`;
     const stats = await pool.query(`
       SELECT
         (SELECT COUNT(*) FROM users WHERE user_type = 'CPA' AND email NOT IN (${TEST_EMAILS})) AS total_cpas,
@@ -2486,9 +2486,7 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
         (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days' AND email NOT IN (${TEST_EMAILS})) AS new_users_7d,
         (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days') AS new_requests_7d
     `);
-    // Also list the actual CPA users for debugging the test-record exclusion
-    const cpaUsers = await pool.query(`SELECT id, email, user_type, created_at FROM users WHERE user_type = 'CPA' ORDER BY id`);
-    res.json({ success: true, stats: stats.rows[0], cpa_users_debug: cpaUsers.rows });
+    res.json({ success: true, stats: stats.rows[0] });
   } catch (error) {
     console.error('Admin stats error:', error);
     res.status(500).json({ error: 'Failed to fetch dashboard stats', details: error.message });
