@@ -1044,14 +1044,14 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
           },
           {
             delay_days: 4,
-            subject_line: '{{first_name}}, {{city_claim_count}} accountants in {{city}} have already claimed',
+            subject_line: '{{first_name}}, {{social_proof_short}} have already claimed',
             body_template: `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;">
 <tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);padding:28px 24px;color:#ffffff;font-family:Arial,sans-serif;">
 <h1 style="margin:0;font-size:22px;font-weight:600;">CanadaAccountants</h1>
 </td></tr>
 <tr><td style="padding:28px 24px;font-family:Arial,sans-serif;color:#111;line-height:1.6;font-size:15px;">
 <p>Hi {{first_name}},</p>
-<p><strong>{{city_claim_count}} accountants in {{city}}</strong> have already claimed their profiles on CanadaAccountants. Momentum is building locally — and claimed profiles are the ones showing up first when businesses search.</p>
+<p><strong>{{social_proof_line}}</strong> have already claimed their profiles on CanadaAccountants. Momentum is building — and claimed profiles are the ones showing up first when businesses search.</p>
 <p>Don't be the one who misses out while peers in your market get the visibility.</p>
 <p style="text-align:center;margin:28px 0;"><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">Claim Before More Do</a></p>
 <p style="color:#888;font-size:13px;">Two minutes. Free. Yours to control.</p>
@@ -1063,7 +1063,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
           },
           {
             delay_days: 7,
-            subject_line: 'Final notice: your CanadaAccountants profile reverts to unclaimed',
+            subject_line: 'Final notice: we\'ll stop sending these reminders',
             body_template: `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;">
 <tr><td style="background:linear-gradient(135deg,#2563eb 0%,#1e3a8a 100%);padding:28px 24px;color:#ffffff;font-family:Arial,sans-serif;">
 <h1 style="margin:0;font-size:22px;font-weight:600;">CanadaAccountants</h1>
@@ -1071,7 +1071,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <tr><td style="padding:28px 24px;font-family:Arial,sans-serif;color:#111;line-height:1.6;font-size:15px;">
 <p>Hi {{first_name}},</p>
 <p>This is the last email about this.</p>
-<p>If you don't claim within the next few days, we'll mark your profile as <strong>confirmed-unclaimed</strong>. We'll stop sending follow-ups, and your listing will remain as basic public-record info only.</p>
+<p>If you don't claim within the next few days, <strong>we'll stop sending these reminders</strong>. Your listing will remain as basic public-record info only.</p>
 <p>You can always come back later — the profile won't disappear. After this, you'll only hear from us if a client actually matches you.</p>
 <p style="text-align:center;margin:28px 0;"><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">Claim Before Reverting</a></p>
 </td></tr>

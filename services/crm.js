@@ -911,12 +911,49 @@ class SequenceEngine {
 
   async checkAutoEnrollment(professionalId, newStatus) {
     const sequences = await this.db.query(
-      `SELECT id FROM crm_sequences WHERE platform = $1 AND trigger_status = $2 AND active = true`,
+      `SELECT id, name FROM crm_sequences WHERE platform = $1 AND trigger_status = $2 AND active = true`,
       [this.platform, newStatus]
     );
 
+    // For "Engaged No-Claim" sequence: require an actual click event, not just an open.
+    // Open-only enrollments dilute the warmest cohort and waste sends on bot scanners.
+    let hasClick = null; // lazy-checked
+
     for (const seq of sequences.rows) {
       try {
+        if (seq.name === 'Engaged No-Claim') {
+          if (hasClick === null) {
+            // Check both outreach_emails (LAW/ACC) and outreach_recipients (INV) for a clicked event
+            const recipientType = this._recipientType();
+            const r1 = await this.db.query(
+              `SELECT 1 FROM outreach_emails WHERE recipient_id = $1 AND recipient_type = $2 AND status = 'clicked' LIMIT 1`,
+              [professionalId, recipientType]
+            ).catch(() => ({ rows: [] }));
+            if (r1.rows.length > 0) {
+              hasClick = true;
+            } else {
+              // Fall back to outreach_recipients (INV uses email-based join, not id)
+              const profEmail = await this.db.query(
+                `SELECT COALESCE(enriched_email, email) as email FROM ${this.table} WHERE id = $1`,
+                [professionalId]
+              ).catch(() => ({ rows: [] }));
+              if (profEmail.rows[0]?.email) {
+                const r2 = await this.db.query(
+                  `SELECT 1 FROM outreach_recipients WHERE email = $1 AND status = 'clicked' LIMIT 1`,
+                  [profEmail.rows[0].email]
+                ).catch(() => ({ rows: [] }));
+                hasClick = r2.rows.length > 0;
+              } else {
+                hasClick = false;
+              }
+            }
+          }
+          if (!hasClick) {
+            console.log(`[Sequences:${this.platform}] Skipping #${professionalId} for Engaged No-Claim — opened but no click`);
+            continue;
+          }
+        }
+
         await this.enroll(professionalId, seq.id);
         console.log(`[Sequences:${this.platform}] Auto-enrolled #${professionalId} in sequence ${seq.id} (trigger: ${newStatus})`);
       } catch (e) {
@@ -1034,20 +1071,47 @@ class SequenceEngine {
     };
     const backendUrl = backendUrls[this.platform] || '';
 
-    // Resolve city_claim_count from the professional's city.
-    // Falls back to a small reasonable number if city is empty or query fails.
-    let cityClaimCount = '12';
-    if (professional.city) {
-      try {
-        const result = await this.db.query(
+    // Tiered social proof: returns a complete sentence fragment based on actual data.
+    //   0-2 city claims  → fall back to province count
+    //   3-9 city claims  → "a handful of professionals in {city}"
+    //   10+ city claims  → "{N} professionals in {city}"
+    //   Province fallback: "{N} professionals across {province}" if 10+, else generic
+    const profType = this.platform === 'investing' ? 'advisors'
+      : this.platform === 'lawyers' ? 'lawyers'
+      : 'accountants';
+    let socialProofLine = `professionals across Canada`;
+    let socialProofShort = `peers`;
+    try {
+      let cityCount = 0;
+      if (professional.city) {
+        const r = await this.db.query(
           `SELECT COUNT(*) as count FROM ${this.table} WHERE LOWER(city) = LOWER($1) AND claim_status = 'claimed'`,
           [professional.city]
         );
-        const real = parseInt(result.rows[0].count, 10);
-        // Floor at 12 so the social proof number is never embarrassingly small in the email
-        cityClaimCount = String(Math.max(real, 12));
-      } catch (e) { /* fall back to default */ }
-    }
+        cityCount = parseInt(r.rows[0].count, 10);
+      }
+      if (cityCount >= 10) {
+        socialProofLine = `${cityCount} ${profType} in ${professional.city}`;
+        socialProofShort = `${cityCount} ${profType} in ${professional.city}`;
+      } else if (cityCount >= 3) {
+        socialProofLine = `a handful of ${profType} in ${professional.city}`;
+        socialProofShort = `a handful of ${profType} in ${professional.city}`;
+      } else if (professional.province) {
+        // Province fallback when city count is too low
+        const pr = await this.db.query(
+          `SELECT COUNT(*) as count FROM ${this.table} WHERE UPPER(province) = UPPER($1) AND claim_status = 'claimed'`,
+          [professional.province]
+        );
+        const provCount = parseInt(pr.rows[0].count, 10);
+        if (provCount >= 10) {
+          socialProofLine = `${provCount} ${profType} across ${professional.province}`;
+          socialProofShort = `${provCount} ${profType} in your province`;
+        } else {
+          socialProofLine = `professionals across Canada`;
+          socialProofShort = `peers across Canada`;
+        }
+      }
+    } catch (e) { /* fall back to default */ }
 
     return {
       first_name: professional.first_name || '',
@@ -1059,7 +1123,8 @@ class SequenceEngine {
       designation: professional.designation || '',
       platform_name: platformNames[this.platform] || this.platform,
       platform_url: baseUrl,
-      city_claim_count: cityClaimCount,
+      social_proof_line: socialProofLine,
+      social_proof_short: socialProofShort,
       claim_url: unsubToken ? `${baseUrl}/claim-profile?ref=${unsubToken}` : `${baseUrl}/claim-profile`,
       unsubscribe_url: unsubToken ? `${backendUrl}/api/unsubscribe/${unsubToken}` : `${baseUrl}/unsubscribe/${professional.id}`
     };
