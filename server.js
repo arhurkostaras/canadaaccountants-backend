@@ -4701,7 +4701,23 @@ function firmMatchesTopList(firmName, topList) {
 // Returns top 10 warm candidates ranked for personal founder outreach
 app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
   try {
+    // Driver: only people who have ACTUALLY engaged (clicked OR claimed OR has top-firm bio)
+    // This avoids scanning 98K rows with nested subqueries.
     const { rows } = await pool.query(`
+      WITH clicks AS (
+        SELECT recipient_id, COUNT(*) AS click_count, MAX(clicked_at) AS last_click_at
+        FROM outreach_emails
+        WHERE recipient_type = 'scraped_cpa' AND clicked_at IS NOT NULL
+        GROUP BY recipient_id
+      ),
+      candidate_ids AS (
+        SELECT id FROM scraped_cpas WHERE claim_status = 'claimed'
+        UNION
+        SELECT recipient_id AS id FROM clicks
+        UNION
+        SELECT id FROM scraped_cpas WHERE generated_bio IS NOT NULL AND LENGTH(generated_bio) > 50
+        LIMIT 1000
+      )
       SELECT
         sc.id,
         COALESCE(sc.first_name || ' ' || sc.last_name, sc.full_name) AS name,
@@ -4715,17 +4731,8 @@ app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
         sc.generated_bio,
         cp.years_experience,
         cp.subscription_status,
-        (
-          SELECT COUNT(*) FROM outreach_emails oe
-          WHERE oe.recipient_id = sc.id
-            AND oe.recipient_type = 'scraped_cpa'
-            AND oe.clicked_at IS NOT NULL
-        ) AS click_count,
-        (
-          SELECT MAX(oe.clicked_at) FROM outreach_emails oe
-          WHERE oe.recipient_id = sc.id
-            AND oe.recipient_type = 'scraped_cpa'
-        ) AS last_click_at,
+        COALESCE(c.click_count, 0) AS click_count,
+        c.last_click_at,
         EXISTS (
           SELECT 1 FROM outreach_unsubscribes u
           WHERE u.email = COALESCE(sc.enriched_email, sc.email)
@@ -4736,11 +4743,11 @@ app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
             AND fo.sent_at > NOW() - INTERVAL '90 days'
         ) AS already_sent
       FROM scraped_cpas sc
+      JOIN candidate_ids ci ON ci.id = sc.id
+      LEFT JOIN clicks c ON c.recipient_id = sc.id
       LEFT JOIN cpa_profiles cp ON LOWER(cp.email) = LOWER(COALESCE(sc.enriched_email, sc.email))
       WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
         AND sc.status != 'invalid'
-      ORDER BY sc.id DESC
-      LIMIT 2000
     `);
 
     const scored = rows
