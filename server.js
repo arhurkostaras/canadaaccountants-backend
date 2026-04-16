@@ -3695,7 +3695,9 @@ app.post('/api/admin/c2-click-recovery', async (req, res) => {
   try {
     const dryRun = req.query.execute !== 'true';
 
-    // Get all C2 clickers who never submitted a match request
+    // Get all C2 clickers who never submitted a match request.
+    // Click signal is clicked_at IS NOT NULL (status may stay at 'opened' or 'delivered').
+    // NOT EXISTS used over NOT IN to be NULL-safe.
     const { rows: cohort } = await pool.query(`
       SELECT
         oe.id as outreach_id, oe.recipient_id, oe.recipient_email, oe.recipient_name,
@@ -3705,17 +3707,17 @@ app.post('/api/admin/c2-click-recovery', async (req, res) => {
       FROM outreach_emails oe
       LEFT JOIN scraped_smes ss ON ss.id = oe.recipient_id
       WHERE oe.campaign_id = 2
-        AND oe.status = 'clicked'
+        AND oe.clicked_at IS NOT NULL
         AND oe.recipient_email IS NOT NULL
-        AND LOWER(oe.recipient_email) NOT IN (
-          SELECT LOWER(contact_email) FROM client_profiles WHERE contact_email IS NOT NULL
-          UNION
-          SELECT LOWER(email) FROM client_search_requests WHERE email IS NOT NULL
-          UNION
-          SELECT LOWER(contact_email) FROM sme_friction_requests WHERE contact_email IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM client_profiles cp
+          WHERE cp.contact_email IS NOT NULL
+            AND LOWER(cp.contact_email) = LOWER(oe.recipient_email)
         )
-        AND LOWER(oe.recipient_email) NOT IN (
-          SELECT LOWER(email) FROM outreach_unsubscribes
+        AND NOT EXISTS (
+          SELECT 1 FROM client_search_requests csr
+          WHERE csr.email IS NOT NULL
+            AND LOWER(csr.email) = LOWER(oe.recipient_email)
         )
         AND NOT EXISTS (
           SELECT 1 FROM founder_outreach_log fo
