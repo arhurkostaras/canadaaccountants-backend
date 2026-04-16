@@ -3472,6 +3472,35 @@ app.post('/api/admin/outreach/create-campaign', async (req, res) => {
 });
 
 // Re-engagement campaign: send apology to CPAs who clicked but hit 404
+// Investigate ACC conversions
+app.get('/api/admin/conversions-debug', async (req, res) => {
+  try {
+    const conv = await pool.query(`
+      SELECT oe.id, oe.recipient_email, oe.recipient_name, oe.campaign_id,
+             oe.converted, oe.converted_at, oe.converted_user_id,
+             c.name as campaign_name,
+             u.email as user_email, u.created_at as user_created,
+             u.subscription_tier, u.subscription_status, u.stripe_customer_id
+      FROM outreach_emails oe
+      LEFT JOIN outreach_campaigns c ON c.id = oe.campaign_id
+      LEFT JOIN users u ON u.id = oe.converted_user_id
+      WHERE oe.converted = true
+      ORDER BY oe.converted_at DESC
+    `);
+    const campaignTotals = await pool.query(`
+      SELECT id, name, total_converted FROM outreach_campaigns
+      WHERE COALESCE(total_converted, 0) > 0 ORDER BY total_converted DESC
+    `);
+    const allPaying = await pool.query(`
+      SELECT id, email, subscription_tier, subscription_status, stripe_customer_id, created_at
+      FROM users WHERE subscription_status = 'active' ORDER BY created_at DESC
+    `);
+    res.json({ converted_emails: conv.rows, campaign_counters: campaignTotals.rows, paying_users: allPaying.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/admin/outreach/reengage-clicked', async (req, res) => {
   try {
     const { subject_template, body_template, daily_limit = 300 } = req.body;
