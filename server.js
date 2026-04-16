@@ -3588,6 +3588,88 @@ app.get('/api/admin/david-mark-debug', async (req, res) => {
   }
 });
 
+// C2 SME demand-side metrics: how many SME clicks led to find-cpa submissions?
+app.get('/api/admin/c2-demand-metrics', async (req, res) => {
+  try {
+    // C2 send funnel
+    const c2Funnel = await pool.query(`
+      SELECT
+        COUNT(*) AS sent,
+        COUNT(*) FILTER (WHERE status IN ('delivered','opened','clicked','bounced','complained')) AS delivered_or_better,
+        COUNT(*) FILTER (WHERE opened_at IS NOT NULL) AS opened,
+        COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS clicked,
+        COUNT(*) FILTER (WHERE bounced_at IS NOT NULL) AS bounced
+      FROM outreach_emails WHERE campaign_id = 2
+    `);
+
+    // SME submissions in each table (multiple possible storage locations)
+    const friction = await pool.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE created_at >= '2026-04-08') AS since_c2_launch
+      FROM sme_friction_requests
+    `).catch(() => ({ rows: [{ total: 0, since_c2_launch: 0 }] }));
+
+    const csr = await pool.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE created_at >= '2026-04-08') AS since_c2_launch
+      FROM client_search_requests
+    `).catch(() => ({ rows: [{ total: 0, since_c2_launch: 0 }] }));
+
+    const cp = await pool.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE created_at >= '2026-04-08') AS since_c2_launch
+      FROM client_profiles
+    `).catch(() => ({ rows: [{ total: 0, since_c2_launch: 0 }] }));
+
+    // Match: SME clicks whose recipient_email shows up as a search submitter
+    const matched = await pool.query(`
+      SELECT COUNT(DISTINCT oe.recipient_email) AS clicked_then_searched
+      FROM outreach_emails oe
+      WHERE oe.campaign_id = 2 AND oe.clicked_at IS NOT NULL
+        AND (
+          LOWER(oe.recipient_email) IN (SELECT LOWER(contact_email) FROM sme_friction_requests WHERE contact_email IS NOT NULL)
+          OR LOWER(oe.recipient_email) IN (SELECT LOWER(contact_email) FROM client_profiles WHERE contact_email IS NOT NULL)
+          OR LOWER(oe.recipient_email) IN (SELECT LOWER(email) FROM client_search_requests WHERE email IS NOT NULL)
+        )
+    `).catch(() => ({ rows: [{ clicked_then_searched: 0 }] }));
+
+    // Bounce rate breakdown
+    const bounceDetails = await pool.query(`
+      SELECT recipient_email, status, bounced_at FROM outreach_emails
+      WHERE campaign_id = 2 AND status = 'bounced'
+      ORDER BY bounced_at DESC NULLS LAST LIMIT 5
+    `).catch(() => ({ rows: [] }));
+
+    // SME data source check - where do scraped_smes come from?
+    const smeSource = await pool.query(`
+      SELECT source, COUNT(*) AS total, COUNT(*) FILTER (WHERE contact_email IS NOT NULL) AS with_email
+      FROM scraped_smes GROUP BY source ORDER BY total DESC LIMIT 10
+    `).catch(() => ({ rows: [] }));
+
+    const f = c2Funnel.rows[0];
+    const click_rate = f.delivered_or_better > 0 ? (f.clicked / f.delivered_or_better * 100).toFixed(2) : '0';
+    const bounce_rate = f.sent > 0 ? (f.bounced / f.sent * 100).toFixed(2) : '0';
+
+    res.json({
+      c2_funnel: {
+        ...f,
+        click_rate_pct: click_rate,
+        bounce_rate_pct: bounce_rate
+      },
+      submissions_since_c2_launch: {
+        sme_friction_requests: friction.rows[0],
+        client_search_requests: csr.rows[0],
+        client_profiles: cp.rows[0]
+      },
+      clicked_then_searched: matched.rows[0].clicked_then_searched,
+      recent_bounces: bounceDetails.rows,
+      sme_data_sources: smeSource.rows
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Investigate ACC conversions
 app.get('/api/admin/conversions-debug', async (req, res) => {
   try {
