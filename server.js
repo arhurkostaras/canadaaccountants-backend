@@ -3763,8 +3763,8 @@ app.post('/api/admin/c2-click-recovery', async (req, res) => {
         const firstName = (r.contact_name || r.business_name || r.recipient_name || 'there').split(/[\s,]+/)[0];
 
         const html = `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
-<p>Hi ${firstName.replace(/[<>]/g, '')},</p>
-<p>A few days ago you clicked through from our email looking for a CPA. The page you landed on was broken — it showed CPA listings but had no way to actually request a match.</p>
+<p>Good Morning,</p>
+<p>A few days ago you clicked through from our email looking for a CPA. The page you landed on was broken; it showed CPA listings but had no way to actually request a match.</p>
 <p>That was our fault. We've fixed it.</p>
 <p>Here's the working link with your search pre-filled:</p>
 <p style="margin:24px 0;text-align:center;">
@@ -3780,7 +3780,7 @@ app.post('/api/admin/c2-click-recovery', async (req, res) => {
           from: 'Arthur Kostaras <arthur@canadaaccountants.app>',
           to: r.recipient_email,
           reply_to: 'arthur@negotiateandwin.com',
-          subject: `${firstName}, we owe you an apology — the link was broken`,
+          subject: `We owe you an apology, the link was broken`,
           html
         });
 
