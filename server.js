@@ -2471,16 +2471,19 @@ app.put('/api/cpa/bio', authenticateToken, requireCPA, async (req, res) => {
 // Admin: Dashboard stats overview
 app.get('/api/admin/dashboard-stats', async (req, res) => {
   try {
+    // Exclude known test emails from counts. These 5 records were identified
+    // on 2026-04-16 as polluting ACC dashboard metrics with non-real data.
+    const TEST_EMAILS = `'arthur@negotiateandwin.com','arthur+cpa-app-test@negotiateandwin.com','akrosfinancial@gmail.com','sarah.johnson@testcpa.com','sarah.williams@testcpa.com'`;
     const stats = await pool.query(`
       SELECT
-        (SELECT COUNT(*) FROM users WHERE user_type = 'CPA') AS total_cpas,
-        (SELECT COUNT(*) FROM users WHERE user_type = 'SME') AS total_smes,
+        (SELECT COUNT(*) FROM users WHERE user_type = 'CPA' AND email NOT IN (${TEST_EMAILS})) AS total_cpas,
+        (SELECT COUNT(*) FROM users WHERE user_type = 'SME' AND email NOT IN (${TEST_EMAILS})) AS total_smes,
         (SELECT COUNT(*) FROM sme_friction_requests) AS total_sme_requests,
         (SELECT COUNT(*) FROM friction_matches) AS total_matches,
         (SELECT COUNT(*) FROM friction_matches WHERE partnership_formed = true) AS total_partnerships,
         (SELECT COUNT(*) FROM cpa_friction_profiles) AS total_cpa_friction_profiles,
         (SELECT COUNT(*) FROM cpa_profiles WHERE verification_status = 'verified') AS verified_cpas,
-        (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days') AS new_users_7d,
+        (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days' AND email NOT IN (${TEST_EMAILS})) AS new_users_7d,
         (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days') AS new_requests_7d
     `);
     res.json({ success: true, stats: stats.rows[0] });
