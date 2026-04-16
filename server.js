@@ -4715,8 +4715,7 @@ app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
         UNION
         SELECT recipient_id AS id FROM clicks
         UNION
-        SELECT id FROM scraped_cpas WHERE generated_bio IS NOT NULL AND LENGTH(generated_bio) > 50
-        LIMIT 1000
+        (SELECT id FROM scraped_cpas WHERE generated_bio IS NOT NULL AND LENGTH(generated_bio) > 50 ORDER BY id DESC LIMIT 5000)
       )
       SELECT
         sc.id,
