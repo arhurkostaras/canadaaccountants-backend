@@ -97,9 +97,9 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           console.log(`[Stripe] User ${userId} subscribed to ${tier}`);
         }
 
-        // Handle application payment (auto-approved or manually approved)
+        // Handle application payment (auto-approved, email checkout, or manually approved)
         const applicationId = session.metadata?.application_id;
-        if (applicationId && session.metadata?.source === 'auto_approved_application') {
+        if (applicationId && (session.metadata?.source === 'auto_approved_application' || session.metadata?.source === 'email_checkout')) {
           const appTier = session.metadata?.tier || 'professional';
           await pool.query(
             `UPDATE cpa_applications SET status = 'paid', reviewed_at = COALESCE(reviewed_at, NOW()), notes = COALESCE(notes || ' | ', '') || $1 WHERE id = $2`,
@@ -158,6 +158,50 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
             }).catch(err => console.error('Admin payment notification error (non-fatal):', err.message));
 
             console.log(`[Stripe] Application #${applicationId} paid: ${appTier} tier by ${applicant.full_name}`);
+
+            // Create cpa_profile so this CPA is visible to matching
+            try {
+              const existingProfile = await pool.query('SELECT id FROM cpa_profiles WHERE email = $1', [applicant.email]);
+              let profileId;
+              const nameParts = (applicant.full_name || '').split(' ');
+              const firstName = nameParts[0] || '';
+              const lastName = nameParts.slice(1).join(' ') || '';
+
+              if (existingProfile.rows.length > 0) {
+                profileId = existingProfile.rows[0].id;
+                await pool.query(
+                  `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active',
+                   profile_status = 'active', verification_status = 'verified', is_active = true, updated_date = NOW()
+                   WHERE id = $2`,
+                  [appTier || 'professional', profileId]
+                );
+              } else {
+                const passwordHash = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), 10);
+                const userResult = await pool.query(
+                  `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA')
+                   ON CONFLICT (email) DO UPDATE SET updated_at = NOW() RETURNING id`,
+                  [applicant.email, passwordHash]
+                );
+
+                const appFull = await pool.query('SELECT * FROM cpa_applications WHERE id = $1', [applicationId]);
+                const appData = appFull.rows[0] || {};
+
+                const newProfile = await pool.query(
+                  `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+                    specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
+                   RETURNING id`,
+                  [userResult.rows[0].id, firstName, lastName, applicant.email, applicant.firm_name || '',
+                   appData.province || '',
+                   JSON.stringify(appData.specializations || []),
+                   appTier || 'professional']
+                );
+                profileId = newProfile.rows[0].id;
+              }
+              console.log(`[Stripe] Created/updated cpa_profile #${profileId} for ${applicant.email}`);
+            } catch (profileErr) {
+              console.error('[Stripe] Profile creation error (non-fatal):', profileErr.message);
+            }
           }
         }
 
@@ -881,6 +925,23 @@ const crmIntelligence = new CRMIntelligence({
   // Add generated_bio column for SEO profile pages
   try {
     await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS generated_bio TEXT`);
+    await pool.query(`ALTER TABLE cpa_profiles ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50)`);
+    await pool.query(`ALTER TABLE cpa_profiles ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50)`);
+
+    // Client search requests table (for matching analytics)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS client_search_requests (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255),
+        name VARCHAR(200),
+        phone VARCHAR(50),
+        province VARCHAR(50),
+        city VARCHAR(100),
+        specialization VARCHAR(150),
+        matched_count INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS profile_visits (
         id SERIAL PRIMARY KEY,
@@ -1139,48 +1200,96 @@ app.post('/api/performance/score', async (req, res) => {
 // CPA Matching Algorithm (simplified version)
 app.post('/api/match-cpas', async (req, res) => {
   try {
-    const { businessRequirements } = req.body;
-    
-    // Mock CPA data for testing
-    const mockCPAs = [
-      {
-        id: 1,
-        name: "Sarah Johnson CPA",
-        specialties: ["Tax Planning", "Small Business"],
-        experience: 8,
-        rating: 4.9,
-        location: "Toronto, ON"
-      },
-      {
-        id: 2,
-        name: "Michael Chen CPA",
-        specialties: ["Corporate Finance", "Technology"],
-        experience: 12,
-        rating: 4.8,
-        location: "Vancouver, BC"
-      },
-      {
-        id: 3,
-        name: "Jennifer Smith CPA",
-        specialties: ["Audit", "Non-Profit"],
-        experience: 6,
-        rating: 4.7,
-        location: "Calgary, AB"
-      }
-    ];
+    const { province, city, specialization, email, name, phone, businessRequirements } = req.body;
+    const searchProvince = province || businessRequirements?.province || '';
+    const searchCity = city || businessRequirements?.city || '';
+    const searchSpec = specialization || businessRequirements?.specialization || businessRequirements?.industry || '';
 
-    // Simple matching logic
-    const matches = mockCPAs.map(cpa => ({
-      ...cpa,
-      matchScore: Math.floor(Math.random() * 20) + 80,
-      recommendationReason: `Expert in ${cpa.specialties[0]} with ${cpa.experience} years experience`
-    })).sort((a, b) => b.matchScore - a.matchScore);
+    // Find matching CPAs from profiles with active subscriptions
+    const matches = await pool.query(
+      `SELECT cp.id, cp.first_name, cp.last_name, cp.firm_name, cp.province, cp.city,
+              cp.specializations, cp.years_experience, cp.subscription_tier
+       FROM cpa_profiles cp
+       WHERE cp.is_active = true
+         AND cp.profile_status = 'active'
+         AND cp.subscription_status = 'active'
+       ORDER BY
+         CASE cp.subscription_tier WHEN 'enterprise' THEN 1 WHEN 'professional' THEN 2 WHEN 'associate' THEN 3 ELSE 4 END,
+         CASE WHEN LOWER(cp.province) = LOWER($1) THEN 0 ELSE 1 END,
+         CASE WHEN LOWER(cp.city) = LOWER($2) THEN 0 ELSE 1 END,
+         cp.years_experience DESC NULLS LAST
+       LIMIT 10`,
+      [searchProvince, searchCity]
+    );
+
+    // Score matches
+    const scoredMatches = matches.rows.map(cpa => {
+      let score = 50;
+      if (searchProvince && cpa.province && cpa.province.toLowerCase() === searchProvince.toLowerCase()) score += 20;
+      if (searchCity && cpa.city && cpa.city.toLowerCase() === searchCity.toLowerCase()) score += 15;
+      if (searchSpec) {
+        const specs = Array.isArray(cpa.specializations) ? cpa.specializations : [];
+        if (specs.some(s => (s || '').toLowerCase().includes(searchSpec.toLowerCase()))) score += 25;
+      }
+      if (cpa.years_experience >= 15) score += 10;
+      else if (cpa.years_experience >= 10) score += 7;
+      else if (cpa.years_experience >= 5) score += 4;
+      if (cpa.subscription_tier === 'enterprise') score += 10;
+      else if (cpa.subscription_tier === 'professional') score += 5;
+
+      return {
+        id: cpa.id,
+        name: `${cpa.first_name} ${cpa.last_name}`.trim(),
+        specialties: Array.isArray(cpa.specializations) ? cpa.specializations : [],
+        experience: cpa.years_experience,
+        location: [cpa.city, cpa.province].filter(Boolean).join(', '),
+        firmName: cpa.firm_name,
+        matchScore: Math.min(score, 100),
+        recommendationReason: `${cpa.years_experience || 0}+ years experience` +
+          (cpa.firm_name ? ` at ${cpa.firm_name}` : '') +
+          (cpa.city ? ` in ${cpa.city}` : '')
+      };
+    }).sort((a, b) => b.matchScore - a.matchScore).slice(0, 5);
+
+    // Log search event
+    pool.query(
+      `INSERT INTO search_events (platform, city, province, specialty, session_id) VALUES ($1, $2, $3, $4, $5)`,
+      ['accountants', searchCity || null, searchProvince || null, searchSpec || null, req.headers['x-session-id'] || null]
+    ).catch(() => {});
+
+    // Notify matched CPAs about new client interest (async)
+    if (scoredMatches.length > 0 && (email || name)) {
+      for (const match of scoredMatches) {
+        const cpaEmail = await pool.query('SELECT email FROM cpa_profiles WHERE id = $1', [match.id]);
+        if (cpaEmail.rows[0]?.email) {
+          sendEmail({
+            to: cpaEmail.rows[0].email,
+            subject: `New Client Match: ${searchCity || searchProvince || 'A client'} is looking for a ${searchSpec || 'CPA'}`,
+            html: `
+              <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+                <div style="background:linear-gradient(135deg,#2563eb,#1e3a8a);padding:24px 32px;border-radius:8px 8px 0 0;">
+                  <h2 style="margin:0;color:#fff;font-size:20px;">New Client Match</h2>
+                  <p style="margin:4px 0 0;color:rgba(255,255,255,0.8);font-size:13px;">CanadaAccountants.app</p>
+                </div>
+                <div style="padding:28px 32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;">
+                  <p style="color:#333;font-size:15px;">A potential client in <strong>${searchCity || searchProvince || 'Canada'}</strong> is looking for help with <strong>${searchSpec || 'accounting services'}</strong>.</p>
+                  <p style="color:#333;font-size:14px;">Your profile matched based on your experience and location. Log in to your dashboard to view details and respond.</p>
+                  <div style="text-align:center;margin:24px 0;">
+                    <a href="${FRONTEND_URL}/dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
+                  </div>
+                </div>
+              </div>
+            `,
+          }).catch(() => {});
+        }
+      }
+    }
 
     res.json({
       success: true,
-      matches: matches,
-      totalMatches: matches.length,
-      searchCriteria: businessRequirements
+      matches: scoredMatches,
+      totalMatches: scoredMatches.length,
+      searchCriteria: { province: searchProvince, city: searchCity, specialization: searchSpec }
     });
   } catch (error) {
     console.error('CPA matching error:', error);
@@ -3078,6 +3187,44 @@ app.post('/api/cpa-application', async (req, res) => {
 });
 
 // Manual approval endpoint (no auth, admin use only)
+// Admin: manually create profile from application (for already-paid applicants)
+app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
+  try {
+    const appResult = await pool.query('SELECT * FROM cpa_applications WHERE id = $1', [req.params.id]);
+    if (appResult.rows.length === 0) return res.status(404).json({ error: 'Application not found' });
+    const a = appResult.rows[0];
+    const nameParts = (a.full_name || '').split(' ');
+    const firstName = nameParts[0] || '';
+    const lastName = nameParts.slice(1).join(' ') || '';
+
+    const passwordHash = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), 10);
+    const userResult = await pool.query(
+      `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA')
+       ON CONFLICT (email) DO UPDATE SET updated_at = NOW() RETURNING id`,
+      [a.email, passwordHash]
+    );
+
+    const profile = await pool.query(
+      `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+        specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
+       ON CONFLICT (email) DO UPDATE SET subscription_tier = EXCLUDED.subscription_tier,
+         subscription_status = 'active', profile_status = 'active', is_active = true, verification_status = 'verified',
+         updated_date = NOW()
+       RETURNING id`,
+      [userResult.rows[0].id, firstName, lastName, a.email, a.firm_name || '',
+       a.province || '',
+       JSON.stringify(a.specializations || []),
+       req.body.tier || 'professional']
+    );
+
+    res.json({ success: true, profileId: profile.rows[0].id, email: a.email, name: a.full_name });
+  } catch (error) {
+    console.error('[Admin] Create profile error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/admin/applications/:id/approve', async (req, res) => {
   try {
     const { id } = req.params;
