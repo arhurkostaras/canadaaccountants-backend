@@ -3688,6 +3688,144 @@ app.get('/api/admin/david-mark-debug', async (req, res) => {
   }
 });
 
+// C2 click recovery: send personalized apology + working link to the 174 SMEs
+// who clicked the broken /matched link. Defaults to dry-run; pass ?execute=true
+// to actually send. Sends are rate-limited (1 per 4 seconds).
+app.post('/api/admin/c2-click-recovery', async (req, res) => {
+  try {
+    const dryRun = req.query.execute !== 'true';
+
+    // Get all C2 clickers who never submitted a match request
+    const { rows: cohort } = await pool.query(`
+      SELECT
+        oe.id as outreach_id, oe.recipient_id, oe.recipient_email, oe.recipient_name,
+        oe.clicked_at,
+        ss.business_name, ss.contact_name, ss.contact_email,
+        ss.province, ss.industry, ss.city
+      FROM outreach_emails oe
+      LEFT JOIN scraped_smes ss ON ss.id = oe.recipient_id
+      WHERE oe.campaign_id = 2
+        AND oe.status = 'clicked'
+        AND oe.recipient_email IS NOT NULL
+        AND LOWER(oe.recipient_email) NOT IN (
+          SELECT LOWER(contact_email) FROM client_profiles WHERE contact_email IS NOT NULL
+          UNION
+          SELECT LOWER(email) FROM client_search_requests WHERE email IS NOT NULL
+          UNION
+          SELECT LOWER(contact_email) FROM sme_friction_requests WHERE contact_email IS NOT NULL
+        )
+        AND LOWER(oe.recipient_email) NOT IN (
+          SELECT LOWER(email) FROM outreach_unsubscribes
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM founder_outreach_log fo
+          WHERE LOWER(fo.recipient_email) = LOWER(oe.recipient_email)
+            AND fo.platform = 'c2_recovery'
+        )
+      ORDER BY oe.clicked_at DESC
+    `);
+
+    if (dryRun) {
+      // Build URL preview for first 3
+      const preview = cohort.slice(0, 5).map(r => {
+        const prov = r.province || 'ON';
+        const spec = (r.industry || 'tax').toLowerCase().replace(/[\s&,]+/g, '-');
+        const url = `https://canadaaccountants.app/find-cpa.html?province=${encodeURIComponent(prov)}&specialty=${encodeURIComponent(spec)}`;
+        const name = (r.contact_name || r.business_name || r.recipient_name || 'there').split(/[\s,]+/)[0];
+        return { name, email: r.recipient_email, province: prov, industry: r.industry, prefilled_url: url };
+      });
+      return res.json({
+        mode: 'DRY RUN',
+        total_to_send: cohort.length,
+        sample_first_5: preview,
+        execute_with: 'POST same URL with ?execute=true'
+      });
+    }
+
+    // EXECUTE: send with rate limiting
+    const RESEND_KEY = process.env.RESEND_API_KEY;
+    if (!RESEND_KEY) return res.status(500).json({ error: 'RESEND_API_KEY not configured' });
+    const https = require('https');
+
+    let sent = 0, failed = 0;
+    const errors = [];
+
+    // Respond immediately, send in background
+    res.json({ mode: 'EXECUTING', total: cohort.length, status: 'Sending in background, check founder_outreach_log' });
+
+    for (const r of cohort) {
+      try {
+        const prov = r.province || 'ON';
+        const spec = (r.industry || 'tax').toLowerCase().replace(/[\s&,]+/g, '-');
+        const url = `https://canadaaccountants.app/find-cpa.html?province=${encodeURIComponent(prov)}&specialty=${encodeURIComponent(spec)}`;
+        const firstName = (r.contact_name || r.business_name || r.recipient_name || 'there').split(/[\s,]+/)[0];
+
+        const html = `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
+<p>Hi ${firstName.replace(/[<>]/g, '')},</p>
+<p>A few days ago you clicked through from our email looking for a CPA. The page you landed on was broken — it showed CPA listings but had no way to actually request a match.</p>
+<p>That was our fault. We've fixed it.</p>
+<p>Here's the working link with your search pre-filled:</p>
+<p style="margin:24px 0;text-align:center;">
+  <a href="${url}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:14px 32px;border-radius:6px;font-weight:600;">Find My CPA Match &rarr;</a>
+</p>
+<p>Takes 90 seconds. You'll get matched with up to 5 CPAs in ${prov === 'ON' ? 'Ontario' : prov} within 24 hours.</p>
+<p>Sorry about the friction.</p>
+<p style="margin-top:28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
+<p style="color:#999;font-size:11px;margin-top:24px;">Reply STOP if you don't want any more emails from us.</p>
+</div>`;
+
+        const payload = JSON.stringify({
+          from: 'Arthur Kostaras <arthur@canadaaccountants.app>',
+          to: r.recipient_email,
+          reply_to: 'arthur@negotiateandwin.com',
+          subject: `${firstName}, we owe you an apology — the link was broken`,
+          html
+        });
+
+        const result = await new Promise((resolve, reject) => {
+          const req2 = https.request('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${RESEND_KEY}`,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload)
+            },
+            timeout: 15000
+          }, (res2) => {
+            let body = '';
+            res2.on('data', c => body += c);
+            res2.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({ error: 'parse_error' }); } });
+          });
+          req2.on('error', reject);
+          req2.on('timeout', () => { req2.destroy(); reject(new Error('timeout')); });
+          req2.write(payload);
+          req2.end();
+        });
+
+        if (result.id) {
+          sent++;
+          await pool.query(
+            `INSERT INTO founder_outreach_log (recipient_email, recipient_name, platform, resend_id) VALUES ($1, $2, $3, $4)`,
+            [r.recipient_email, firstName, 'c2_recovery', result.id]
+          ).catch(() => {});
+        } else {
+          failed++;
+          errors.push({ email: r.recipient_email, error: result.error || 'no id returned' });
+        }
+
+        // Rate limit: 1 per 4 seconds = ~12 minutes for 174
+        await new Promise(r => setTimeout(r, 4000));
+      } catch (e) {
+        failed++;
+        errors.push({ email: r.recipient_email, error: e.message });
+      }
+    }
+    console.log(`[C2 Recovery] Complete: sent=${sent}, failed=${failed}`);
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
+});
+
 // C2 SME demand-side metrics: how many SME clicks led to find-cpa submissions?
 app.get('/api/admin/c2-demand-metrics', async (req, res) => {
   try {
