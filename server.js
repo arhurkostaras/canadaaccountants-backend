@@ -942,6 +942,52 @@ const crmIntelligence = new CRMIntelligence({
         created_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+
+    // Client profiles table (6-factor matching)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS client_profiles (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        service_type VARCHAR(100),
+        business_size VARCHAR(50),
+        budget_range VARCHAR(50),
+        fee_preference VARCHAR(50),
+        province VARCHAR(50),
+        city VARCHAR(100),
+        meeting_preference VARCHAR(20),
+        contact_name VARCHAR(200),
+        contact_email VARCHAR(255),
+        contact_phone VARCHAR(50),
+        total_matches INTEGER DEFAULT 0,
+        successful_matches INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // Matches table (6-factor matching)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS matches (
+        id SERIAL PRIMARY KEY,
+        cpa_profile_id INTEGER,
+        client_profile_id INTEGER,
+        overall_score DECIMAL(5,2),
+        specialization_score DECIMAL(5,2),
+        client_size_score DECIMAL(5,2),
+        fee_score DECIMAL(5,2),
+        regulatory_score DECIMAL(5,2),
+        geographic_score DECIMAL(5,2),
+        availability_score DECIMAL(5,2),
+        algorithm_version VARCHAR(10) DEFAULT 'v1.0',
+        match_factors JSONB,
+        status VARCHAR(20) DEFAULT 'pending',
+        cpa_responded_at TIMESTAMPTZ,
+        client_responded_at TIMESTAMPTZ,
+        expires_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS profile_visits (
         id SERIAL PRIMARY KEY,
@@ -1197,67 +1243,179 @@ app.post('/api/performance/score', async (req, res) => {
   }
 });
 
-// CPA Matching Algorithm (simplified version)
-app.post('/api/match-cpas', async (req, res) => {
-  try {
-    const { province, city, specialization, email, name, phone, businessRequirements } = req.body;
-    const searchProvince = province || businessRequirements?.province || '';
-    const searchCity = city || businessRequirements?.city || '';
-    const searchSpec = specialization || businessRequirements?.specialization || businessRequirements?.industry || '';
+// =====================================================
+// 6-FACTOR MATCHING ALGORITHM
+// =====================================================
 
-    // Find matching CPAs from profiles with active subscriptions
-    const matches = await pool.query(
-      `SELECT cp.id, cp.first_name, cp.last_name, cp.firm_name, cp.province, cp.city,
-              cp.specializations, cp.years_experience, cp.subscription_tier
-       FROM cpa_profiles cp
-       WHERE cp.is_active = true
-         AND cp.profile_status = 'active'
+async function runCPAMatchingAlgorithm(clientProfile) {
+  try {
+    const cpas = await pool.query(
+      `SELECT cp.* FROM cpa_profiles cp
+       WHERE cp.is_active = true AND cp.profile_status = 'active'
          AND cp.subscription_status = 'active'
-       ORDER BY
-         CASE cp.subscription_tier WHEN 'enterprise' THEN 1 WHEN 'professional' THEN 2 WHEN 'associate' THEN 3 ELSE 4 END,
-         CASE WHEN LOWER(cp.province) = LOWER($1) THEN 0 ELSE 1 END,
-         CASE WHEN LOWER(cp.city) = LOWER($2) THEN 0 ELSE 1 END,
-         cp.years_experience DESC NULLS LAST
-       LIMIT 10`,
-      [searchProvince, searchCity]
+       ORDER BY CASE cp.subscription_tier WHEN 'enterprise' THEN 1 WHEN 'professional' THEN 2 ELSE 3 END`
     );
 
-    // Score matches
-    const scoredMatches = matches.rows.map(cpa => {
-      let score = 50;
-      if (searchProvince && cpa.province && cpa.province.toLowerCase() === searchProvince.toLowerCase()) score += 20;
-      if (searchCity && cpa.city && cpa.city.toLowerCase() === searchCity.toLowerCase()) score += 15;
-      if (searchSpec) {
-        const specs = Array.isArray(cpa.specializations) ? cpa.specializations : [];
-        if (specs.some(s => (s || '').toLowerCase().includes(searchSpec.toLowerCase()))) score += 25;
+    const scored = cpas.rows.map(cpa => {
+      // Factor 1: Specialization Match (25%)
+      let specScore = 50;
+      const specs = typeof cpa.specializations === 'string' ? JSON.parse(cpa.specializations) : (cpa.specializations || []);
+      if (clientProfile.service_type && specs.some(s => (s || '').toLowerCase().includes(clientProfile.service_type.toLowerCase()))) specScore = 95;
+      else if (specs.length > 3) specScore = 70;
+
+      // Factor 2: Client Size Fit (20%)
+      let sizeScore = 50;
+      const firmSize = (cpa.firm_size || '').toLowerCase();
+      const clientSize = (clientProfile.business_size || '').toLowerCase();
+      if (!clientSize) sizeScore = 70; // no preference
+      else if (clientSize === 'large' && ['large', 'big 4', 'national'].some(s => firmSize.includes(s))) sizeScore = 95;
+      else if (clientSize === 'large' && firmSize.includes('medium')) sizeScore = 70;
+      else if (clientSize === 'medium' && ['medium', 'large', 'regional'].some(s => firmSize.includes(s))) sizeScore = 90;
+      else if (clientSize === 'medium' && ['small', 'solo'].some(s => firmSize.includes(s))) sizeScore = 60;
+      else if (clientSize === 'small' && ['small', 'solo', 'boutique'].some(s => firmSize.includes(s))) sizeScore = 90;
+      else if (clientSize === 'small' && firmSize.includes('medium')) sizeScore = 75;
+      else if (clientSize === 'solo' && ['solo', 'small', 'boutique'].some(s => firmSize.includes(s))) sizeScore = 95;
+      else if (clientSize === 'solo') sizeScore = 60;
+      else sizeScore = 65;
+
+      // Factor 3: Fee Alignment (15%)
+      let feeScore = 60;
+      const feePreference = (clientProfile.fee_preference || '').toLowerCase();
+      if (feePreference === 'no-preference' || !feePreference) feeScore = 80;
+      else {
+        const hourlyRate = parseFloat(cpa.hourly_rate_min) || 0;
+        if (feePreference === 'budget') {
+          feeScore = hourlyRate === 0 ? 75 : (hourlyRate < 150 ? 90 : (hourlyRate < 250 ? 60 : 30));
+        } else if (feePreference === 'moderate') {
+          feeScore = hourlyRate === 0 ? 70 : (hourlyRate >= 150 && hourlyRate <= 350 ? 90 : (hourlyRate < 150 ? 75 : 50));
+        } else if (feePreference === 'premium') {
+          feeScore = hourlyRate >= 300 ? 90 : (hourlyRate >= 200 ? 70 : 50);
+        } else {
+          feeScore = 60;
+        }
       }
-      if (cpa.years_experience >= 15) score += 10;
-      else if (cpa.years_experience >= 10) score += 7;
-      else if (cpa.years_experience >= 5) score += 4;
-      if (cpa.subscription_tier === 'enterprise') score += 10;
-      else if (cpa.subscription_tier === 'professional') score += 5;
+
+      // Factor 4: Regulatory Verification (pass/fail gate)
+      let regScore = cpa.verification_status === 'verified' ? 100 : (cpa.designation ? 70 : 30);
+
+      // Factor 5: Geographic Proximity (20%)
+      let geoScore = 50;
+      if (clientProfile.province && cpa.province && clientProfile.province.toLowerCase() === cpa.province.toLowerCase()) geoScore = 95;
+      else if (['ON','QC'].includes((clientProfile.province || '').toUpperCase()) && ['ON','QC'].includes((cpa.province || '').toUpperCase())) geoScore = 70;
+      else geoScore = 40;
+      if ((clientProfile.meeting_preference || '').toLowerCase() === 'virtual') geoScore = Math.max(geoScore, 80);
+
+      // Factor 6: Availability & Capacity (20%)
+      let availScore = 70;
+      if (cpa.subscription_tier === 'enterprise') availScore = 95;
+      else if (cpa.subscription_tier === 'professional') availScore = 80;
+      else availScore = 60;
+
+      const overall = (specScore * 0.25) + (sizeScore * 0.20) + (feeScore * 0.15) + (regScore * 0.00) + (geoScore * 0.20) + (availScore * 0.20);
+      // Regulatory is a gate: if < 50, cap overall at 40
+      const finalScore = regScore < 50 ? Math.min(overall, 40) : overall;
 
       return {
-        id: cpa.id,
-        name: `${cpa.first_name} ${cpa.last_name}`.trim(),
-        specialties: Array.isArray(cpa.specializations) ? cpa.specializations : [],
-        experience: cpa.years_experience,
-        location: [cpa.city, cpa.province].filter(Boolean).join(', '),
-        firmName: cpa.firm_name,
-        matchScore: Math.min(score, 100),
-        recommendationReason: `${cpa.years_experience || 0}+ years experience` +
-          (cpa.firm_name ? ` at ${cpa.firm_name}` : '') +
-          (cpa.city ? ` in ${cpa.city}` : '')
+        cpa, overall_score: Math.round(finalScore * 100) / 100,
+        specialization_score: specScore, client_size_score: sizeScore,
+        fee_score: feeScore, regulatory_score: regScore,
+        geographic_score: geoScore, availability_score: availScore
       };
-    }).sort((a, b) => b.matchScore - a.matchScore).slice(0, 5);
+    });
 
-    // Log search event
+    scored.sort((a, b) => b.overall_score - a.overall_score);
+    const topMatches = scored.slice(0, 5);
+
+    // Store matches in DB
+    for (const match of topMatches) {
+      await pool.query(
+        `INSERT INTO matches (cpa_profile_id, client_profile_id, overall_score, specialization_score, client_size_score, fee_score, regulatory_score, geographic_score, availability_score, algorithm_version, status, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'v1.0','pending', NOW() + INTERVAL '7 days')`,
+        [match.cpa.id, clientProfile.id, match.overall_score, match.specialization_score, match.client_size_score, match.fee_score, match.regulatory_score, match.geographic_score, match.availability_score]
+      );
+    }
+
+    return topMatches;
+  } catch (error) {
+    console.error('CPA matching algorithm error:', error);
+    return [];
+  }
+}
+
+// CPA Matching Algorithm - 6-factor weighted scoring
+app.post('/api/match-cpas', async (req, res) => {
+  try {
+    const { province, city, specialization, email, name, phone, businessRequirements,
+            businessSize, budgetRange, feePreference, meetingPreference, serviceType } = req.body;
+    const searchProvince = province || businessRequirements?.province || '';
+    const searchCity = city || businessRequirements?.city || '';
+    const searchSpec = specialization || serviceType || businessRequirements?.specialization || businessRequirements?.industry || '';
+    const searchBusinessSize = businessSize || businessRequirements?.businessSize || '';
+    const searchFeePreference = feePreference || businessRequirements?.feePreference || '';
+    const searchMeetingPreference = meetingPreference || businessRequirements?.meetingPreference || '';
+    const searchBudgetRange = budgetRange || businessRequirements?.budgetRange || '';
+
+    // Create client profile
+    const clientResult = await pool.query(
+      `INSERT INTO client_profiles (service_type, business_size, budget_range, fee_preference, province, city, meeting_preference, contact_name, contact_email, contact_phone)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [searchSpec, searchBusinessSize, searchBudgetRange, searchFeePreference, searchProvince, searchCity, searchMeetingPreference, name || '', email || '', phone || '']
+    );
+
+    // Store in legacy table too (backwards compat)
+    try {
+      await pool.query(
+        `INSERT INTO client_search_requests (email, name, phone, province, city, specialization, matched_count)
+         VALUES ($1, $2, $3, $4, $5, $6, 0)`,
+        [email || '', name || '', phone || '', searchProvince, searchCity, searchSpec]
+      );
+    } catch (searchErr) {
+      console.error('[Match] Search request storage error (non-fatal):', searchErr.message);
+    }
+
+    // Log search event (non-blocking)
     pool.query(
       `INSERT INTO search_events (platform, city, province, specialty, session_id) VALUES ($1, $2, $3, $4, $5)`,
       ['accountants', searchCity || null, searchProvince || null, searchSpec || null, req.headers['x-session-id'] || null]
     ).catch(() => {});
 
-    // Notify matched CPAs about new client interest (async)
+    // Run 6-factor matching algorithm
+    const matches = await runCPAMatchingAlgorithm(clientResult.rows[0]);
+
+    // Update matched count on client profile
+    pool.query(`UPDATE client_profiles SET total_matches = $1 WHERE id = $2`, [matches.length, clientResult.rows[0].id]).catch(() => {});
+
+    // Format response (preserve existing response shape for frontend compat)
+    const scoredMatches = matches.map(m => ({
+      id: m.cpa.id,
+      name: `${m.cpa.first_name} ${m.cpa.last_name}`.trim(),
+      specialties: Array.isArray(m.cpa.specializations) ? m.cpa.specializations : (typeof m.cpa.specializations === 'string' ? JSON.parse(m.cpa.specializations) : []),
+      experience: m.cpa.years_experience,
+      location: [m.cpa.city, m.cpa.province].filter(Boolean).join(', '),
+      firmName: m.cpa.firm_name,
+      matchScore: Math.min(Math.round(m.overall_score), 100),
+      factorScores: {
+        specialization: m.specialization_score,
+        clientSize: m.client_size_score,
+        fee: m.fee_score,
+        regulatory: m.regulatory_score,
+        geographic: m.geographic_score,
+        availability: m.availability_score
+      },
+      recommendationReason: `${m.cpa.years_experience || 0}+ years experience` +
+        (m.cpa.firm_name ? ` at ${m.cpa.firm_name}` : '') +
+        (m.cpa.city ? ` in ${m.cpa.city}` : '')
+    }));
+
+    res.json({
+      success: true,
+      matches: scoredMatches,
+      totalMatches: scoredMatches.length,
+      searchCriteria: { province: searchProvince, city: searchCity, specialization: searchSpec },
+      algorithmVersion: 'v1.0'
+    });
+
+    // Notify matched CPAs about new client interest (async, non-blocking)
     if (scoredMatches.length > 0 && (email || name)) {
       for (const match of scoredMatches) {
         const cpaEmail = await pool.query('SELECT email FROM cpa_profiles WHERE id = $1', [match.id]);
@@ -1284,13 +1442,6 @@ app.post('/api/match-cpas', async (req, res) => {
         }
       }
     }
-
-    res.json({
-      success: true,
-      matches: scoredMatches,
-      totalMatches: scoredMatches.length,
-      searchCriteria: { province: searchProvince, city: searchCity, specialization: searchSpec }
-    });
   } catch (error) {
     console.error('CPA matching error:', error);
     res.status(500).json({ error: 'CPA matching failed' });
