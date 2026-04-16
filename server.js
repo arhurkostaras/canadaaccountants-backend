@@ -2486,7 +2486,9 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
         (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days' AND email NOT IN (${TEST_EMAILS})) AS new_users_7d,
         (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days') AS new_requests_7d
     `);
-    res.json({ success: true, stats: stats.rows[0] });
+    // Also list the actual CPA users for debugging the test-record exclusion
+    const cpaUsers = await pool.query(`SELECT id, email, user_type, created_at FROM users WHERE user_type = 'CPA' ORDER BY id`);
+    res.json({ success: true, stats: stats.rows[0], cpa_users_debug: cpaUsers.rows });
   } catch (error) {
     console.error('Admin stats error:', error);
     res.status(500).json({ error: 'Failed to fetch dashboard stats', details: error.message });
