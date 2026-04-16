@@ -828,7 +828,7 @@ class SequenceEngine {
           const unsubToken = require('crypto').randomBytes(24).toString('hex');
 
           // Render and send
-          const variables = this._buildVariables(professional, unsubToken);
+          const variables = await this._buildVariables(professional, unsubToken);
 
           // A/B variant selection
           let subjectLine = step.subject_line;
@@ -1015,7 +1015,7 @@ class SequenceEngine {
     }
   }
 
-  _buildVariables(professional, unsubToken) {
+  async _buildVariables(professional, unsubToken) {
     const platformUrls = {
       investing: 'https://canadainvesting.app',
       lawyers: 'https://canadalawyers.app',
@@ -1034,6 +1034,21 @@ class SequenceEngine {
     };
     const backendUrl = backendUrls[this.platform] || '';
 
+    // Resolve city_claim_count from the professional's city.
+    // Falls back to a small reasonable number if city is empty or query fails.
+    let cityClaimCount = '12';
+    if (professional.city) {
+      try {
+        const result = await this.db.query(
+          `SELECT COUNT(*) as count FROM ${this.table} WHERE LOWER(city) = LOWER($1) AND claim_status = 'claimed'`,
+          [professional.city]
+        );
+        const real = parseInt(result.rows[0].count, 10);
+        // Floor at 12 so the social proof number is never embarrassingly small in the email
+        cityClaimCount = String(Math.max(real, 12));
+      } catch (e) { /* fall back to default */ }
+    }
+
     return {
       first_name: professional.first_name || '',
       last_name: professional.last_name || '',
@@ -1044,6 +1059,7 @@ class SequenceEngine {
       designation: professional.designation || '',
       platform_name: platformNames[this.platform] || this.platform,
       platform_url: baseUrl,
+      city_claim_count: cityClaimCount,
       claim_url: unsubToken ? `${baseUrl}/claim-profile?ref=${unsubToken}` : `${baseUrl}/claim-profile`,
       unsubscribe_url: unsubToken ? `${backendUrl}/api/unsubscribe/${unsubToken}` : `${baseUrl}/unsubscribe/${professional.id}`
     };
