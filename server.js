@@ -1008,7 +1008,22 @@ const crmIntelligence = new CRMIntelligence({
       )
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_ab_test_variant ON ab_test_results (variant, form_completed_at)`);
-    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table verified');
+
+    // Founder outreach log: tracks personal founder emails sent by Arthur to warm candidates
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS founder_outreach_log (
+        id SERIAL PRIMARY KEY,
+        recipient_email VARCHAR(255) NOT NULL,
+        recipient_name VARCHAR(255),
+        platform VARCHAR(20),
+        sent_at TIMESTAMPTZ DEFAULT NOW(),
+        resend_id VARCHAR(100),
+        replied BOOLEAN DEFAULT FALSE
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_founder_outreach_log_email ON founder_outreach_log (recipient_email, sent_at)`);
+
+    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table + founder_outreach_log table verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
   }
@@ -4661,6 +4676,344 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// =====================================================
+// Founder outreach: weekly digest + per-candidate send
+// =====================================================
+
+// Known top firms for ACC (adds +20 to warmth score when firm_name matches)
+const ACC_TOP_FIRMS = ['KPMG', 'PwC', 'EY', 'Deloitte', 'BDO', 'MNP', 'Grant Thornton', 'RSM', 'Crowe', 'Baker Tilly', 'Welch'];
+const ROLE_EMAIL_PREFIXES = ['info@', 'admin@', 'contact@', 'office@', 'hello@', 'support@', 'sales@', 'team@', 'help@', 'inquiries@', 'enquiries@', 'reception@'];
+
+function isRoleEmail(email) {
+  if (!email) return false;
+  const lower = email.toLowerCase();
+  return ROLE_EMAIL_PREFIXES.some(p => lower.startsWith(p));
+}
+
+function firmMatchesTopList(firmName, topList) {
+  if (!firmName) return false;
+  const lower = firmName.toLowerCase();
+  return topList.some(tf => lower.includes(tf.toLowerCase()));
+}
+
+// GET /api/admin/founder-outreach-candidates
+// Returns top 10 warm candidates ranked for personal founder outreach
+app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        sc.id,
+        COALESCE(sc.first_name || ' ' || sc.last_name, sc.full_name) AS name,
+        sc.first_name,
+        sc.last_name,
+        COALESCE(sc.enriched_email, sc.email) AS email,
+        sc.firm_name,
+        sc.city,
+        sc.province,
+        sc.claim_status,
+        sc.generated_bio,
+        cp.years_experience,
+        cp.subscription_status,
+        (
+          SELECT COUNT(*) FROM outreach_emails oe
+          WHERE oe.recipient_id = sc.id
+            AND oe.recipient_type = 'scraped_cpa'
+            AND oe.clicked_at IS NOT NULL
+        ) AS click_count,
+        (
+          SELECT MAX(oe.clicked_at) FROM outreach_emails oe
+          WHERE oe.recipient_id = sc.id
+            AND oe.recipient_type = 'scraped_cpa'
+        ) AS last_click_at,
+        EXISTS (
+          SELECT 1 FROM outreach_unsubscribes u
+          WHERE u.email = COALESCE(sc.enriched_email, sc.email)
+        ) AS unsubscribed,
+        EXISTS (
+          SELECT 1 FROM founder_outreach_log fo
+          WHERE fo.recipient_email = COALESCE(sc.enriched_email, sc.email)
+            AND fo.sent_at > NOW() - INTERVAL '90 days'
+        ) AS already_sent
+      FROM scraped_cpas sc
+      LEFT JOIN cpa_profiles cp ON LOWER(cp.email) = LOWER(COALESCE(sc.enriched_email, sc.email))
+      WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
+        AND sc.status != 'invalid'
+      ORDER BY sc.id DESC
+      LIMIT 2000
+    `);
+
+    const scored = rows
+      .filter(r => !r.already_sent)
+      .map(r => {
+        let score = 0;
+        const signals = [];
+
+        // Claimed but no active subscription (warmest)
+        const isClaimed = r.claim_status === 'claimed';
+        const hasSub = r.subscription_status && ['active', 'trialing'].includes(r.subscription_status);
+        if (isClaimed && !hasSub) { score += 50; signals.push('claimed_no_sub'); }
+        else if (isClaimed) { signals.push('claimed'); }
+
+        // Click events (+30 each)
+        const clicks = parseInt(r.click_count) || 0;
+        if (clicks > 0) {
+          score += 30 * clicks;
+          signals.push(`clicked_${clicks}x`);
+        }
+
+        // Top firm
+        if (firmMatchesTopList(r.firm_name, ACC_TOP_FIRMS)) {
+          score += 20;
+          signals.push('top_firm');
+        }
+
+        // Experience
+        if (r.years_experience && r.years_experience >= 10) {
+          score += 15;
+          signals.push('experienced_10yr');
+        }
+
+        // Has generated bio (data for personalization)
+        if (r.generated_bio && r.generated_bio.length > 50) {
+          score += 10;
+          signals.push('has_bio');
+        }
+
+        // Role-based email penalty
+        if (isRoleEmail(r.email)) {
+          score -= 10;
+          signals.push('role_email');
+        }
+
+        // Unsubscribed
+        if (r.unsubscribed) {
+          score -= 50;
+          signals.push('unsubscribed');
+        }
+
+        return {
+          id: r.id,
+          name: r.name,
+          first_name: r.first_name,
+          email: r.email,
+          firm_name: r.firm_name,
+          city: r.city,
+          province: r.province,
+          score,
+          signals,
+          last_click_at: r.last_click_at,
+          recipient_type: 'scraped_cpa'
+        };
+      })
+      .filter(c => c.score > 0 && !c.signals.includes('unsubscribed'))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10);
+
+    res.json({ candidates: scored });
+  } catch (err) {
+    console.error('[FounderOutreach] candidates error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Build the founder email (HTML + plain text) for a given name + platform
+function buildFounderEmail({ firstName, platformDomain, platformName }) {
+  const name = firstName || 'there';
+  const subject = `${name}, a 60-second question from the founder`;
+  const html = `<div style="font-family:Arial,sans-serif;max-width:540px;margin:0 auto;color:#222;line-height:1.6;">
+<p>Hi ${name},</p>
+
+<p>I am Arthur Kostaras, the founder of ${platformDomain}.</p>
+
+<p>Your profile is on the platform and you received payment options from us. You have not activated a paid plan, and that is actually useful information for me.</p>
+
+<p>I would value 60 seconds of your honest feedback on a single question:</p>
+
+<p style="padding:14px 18px;background:#f5f5f5;border-left:3px solid #2563eb;margin:18px 0;"><strong>What would make ${platformDomain} worth paying for?</strong></p>
+
+<p>I am not asking you to buy. I am asking what is missing.</p>
+
+<p>One sentence is enough. Reply directly to this email &mdash; it goes straight to me.</p>
+
+<p>Thanks for your time,<br>
+Arthur Kostaras<br>
+<a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
+</div>`;
+  const text = `Hi ${name},
+
+I am Arthur Kostaras, the founder of ${platformDomain}.
+
+Your profile is on the platform and you received payment options from us. You have not activated a paid plan, and that is actually useful information for me.
+
+I would value 60 seconds of your honest feedback on a single question:
+
+What would make ${platformDomain} worth paying for?
+
+I am not asking you to buy. I am asking what is missing.
+
+One sentence is enough. Reply directly to this email - it goes straight to me.
+
+Thanks for your time,
+Arthur Kostaras
+arthur@negotiateandwin.com`;
+  return { subject, html, text };
+}
+
+// POST /api/admin/founder-outreach/send
+// Sends founder email to a single recipient (API, not link-triggered)
+app.post('/api/admin/founder-outreach/send', async (req, res) => {
+  try {
+    const { email, firstName, platform } = req.body || {};
+    if (!email) return res.status(400).json({ error: 'email required' });
+
+    // 90-day dedupe
+    const recent = await pool.query(
+      `SELECT id FROM founder_outreach_log WHERE recipient_email = $1 AND sent_at > NOW() - INTERVAL '90 days' LIMIT 1`,
+      [email]
+    );
+    if (recent.rows.length > 0) {
+      return res.status(409).json({ error: 'already sent within 90 days' });
+    }
+
+    const platformMap = {
+      accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>' },
+      lawyers: { domain: 'canadalawyers.app', from: 'Arthur Kostaras <arthur@canadalawyers.app>' },
+      investing: { domain: 'canadainvesting.app', from: 'Arthur Kostaras <arthur@canadainvesting.app>' }
+    };
+    const platformKey = platform || 'accountants';
+    const pconf = platformMap[platformKey] || platformMap.accountants;
+    const { subject, html, text } = buildFounderEmail({ firstName, platformDomain: pconf.domain });
+
+    const result = await sendEmail({
+      to: email,
+      subject,
+      html,
+      text,
+      from: pconf.from,
+      replyTo: 'arthur@negotiateandwin.com'
+    });
+
+    if (!result || result.success === false) {
+      return res.status(500).json({ error: 'send failed', detail: result });
+    }
+
+    await pool.query(
+      `INSERT INTO founder_outreach_log (recipient_email, recipient_name, platform, resend_id) VALUES ($1, $2, $3, $4)`,
+      [email, firstName || null, platformKey, result.id || null]
+    );
+
+    res.json({ success: true, id: result.id });
+  } catch (err) {
+    console.error('[FounderOutreach] send error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Build the Monday founder digest email (HTML body) from 3 platforms' candidate lists
+async function buildFounderDigestHTML() {
+  const fetchJSON = (url) => new Promise((resolve) => {
+    const mod = url.startsWith('https://') ? require('https') : require('http');
+    mod.get(url, (r) => {
+      let b = '';
+      r.on('data', c => b += c);
+      r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({ candidates: [] }); } });
+      r.on('error', () => resolve({ candidates: [] }));
+    }).on('error', () => resolve({ candidates: [] }));
+  });
+
+  // Call the endpoints on each backend
+  const [accLocal, lawRemote, invRemote] = await Promise.all([
+    fetchJSON(`http://127.0.0.1:${PORT}/api/admin/founder-outreach-candidates`),
+    fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/founder-outreach-candidates'),
+    fetchJSON('https://canadainvesting-backend-production.up.railway.app/api/admin/founder-outreach-candidates')
+  ]);
+
+  const platforms = [
+    { key: 'accountants', label: 'Accountants', domain: 'canadaaccountants.app', candidates: accLocal.candidates || [] },
+    { key: 'lawyers', label: 'Lawyers', domain: 'canadalawyers.app', candidates: lawRemote.candidates || [] },
+    { key: 'investing', label: 'Investing', domain: 'canadainvesting.app', candidates: invRemote.candidates || [] }
+  ];
+
+  const renderPlatform = (p) => {
+    if (!p.candidates.length) {
+      return `<h2 style="margin:24px 0 8px;color:#1a1a1a;font-size:18px;">${p.label}</h2><p style="color:#666;">No candidates this week.</p>`;
+    }
+    const rows = p.candidates.map((c, i) => {
+      const { subject, text } = buildFounderEmail({ firstName: c.first_name || c.name?.split(' ')[0], platformDomain: p.domain });
+      const mailto = `mailto:${encodeURIComponent(c.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`;
+      const signals = (c.signals || []).join(', ');
+      return `<tr>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top;"><strong>${i + 1}.</strong></td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top;">
+    <div style="font-weight:600;">${c.name || '(no name)'}</div>
+    <div style="color:#555;font-size:12px;">${c.firm_name || ''}${c.firm_name && c.city ? ' &middot; ' : ''}${c.city || ''}${c.province ? ', ' + c.province : ''}</div>
+    <div style="color:#888;font-size:11px;">${c.email}</div>
+  </td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top;text-align:right;"><strong style="color:#2563eb;">${c.score}</strong></td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top;font-size:11px;color:#666;">${signals}</td>
+  <td style="padding:8px 10px;border-bottom:1px solid #eee;vertical-align:top;">
+    <a href="${mailto}" style="display:inline-block;background:#2563eb;color:#fff;padding:6px 12px;border-radius:4px;text-decoration:none;font-size:12px;">Send Founder Email</a>
+  </td>
+</tr>`;
+    }).join('');
+    return `<h2 style="margin:24px 0 8px;color:#1a1a1a;font-size:18px;">${p.label} (${p.candidates.length})</h2>
+<table role="presentation" style="width:100%;border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px;">
+  <thead><tr style="background:#f5f5f5;">
+    <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #ddd;">#</th>
+    <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #ddd;">Candidate</th>
+    <th style="padding:8px 10px;text-align:right;border-bottom:1px solid #ddd;">Score</th>
+    <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #ddd;">Signals</th>
+    <th style="padding:8px 10px;text-align:left;border-bottom:1px solid #ddd;">Action</th>
+  </tr></thead>
+  <tbody>${rows}</tbody>
+</table>`;
+  };
+
+  const total = platforms.reduce((s, p) => s + p.candidates.length, 0);
+  const html = `<div style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;color:#222;">
+<h1 style="color:#1e3a8a;font-size:22px;">Weekly Founder Outreach Digest</h1>
+<p style="color:#555;">Top ${total} candidates across 3 platforms, ranked by warmth signals. Click "Send Founder Email" to open a pre-filled message in your mail client.</p>
+${platforms.map(renderPlatform).join('')}
+<p style="color:#999;font-size:11px;margin-top:32px;">Generated Monday 9 AM ET. Score = claim_no_sub (+50) + clicks (+30 each) + top_firm (+20) + experience (+15) + bio (+10) - role_email (-10) - unsubscribed (-50). 90-day dedupe via founder_outreach_log.</p>
+</div>`;
+  return { html, total };
+}
+
+// POST /api/admin/founder-outreach/digest/send — manually trigger the digest
+app.post('/api/admin/founder-outreach/digest/send', async (req, res) => {
+  try {
+    const { html, total } = await buildFounderDigestHTML();
+    const result = await sendEmail({
+      to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+      subject: `Weekly Founder Outreach Digest (${total} candidates)`,
+      html,
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
+    });
+    res.json({ success: true, total, result });
+  } catch (err) {
+    console.error('[FounderOutreach] digest error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cron: Monday 9 AM America/Toronto — send founder outreach digest to admin
+cron.schedule('0 9 * * 1', async () => {
+  try {
+    const { html, total } = await buildFounderDigestHTML();
+    await sendEmail({
+      to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+      subject: `Weekly Founder Outreach Digest (${total} candidates)`,
+      html,
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
+    });
+    console.log(`[FounderOutreach] Monday digest sent: ${total} candidates`);
+  } catch (err) {
+    console.error('[FounderOutreach] cron error:', err.message);
+  }
+}, { timezone: 'America/Toronto' });
+
+console.log('[FounderOutreach] Monday 9 AM ET digest scheduled');
 
 // Sentry error handler (must be before app.listen, after all routes)
 if (process.env.SENTRY_DSN && Sentry.Handlers) {

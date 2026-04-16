@@ -63,7 +63,7 @@ function wrapInBrandTemplate(content, platformName = 'CanadaAccountants') {
 /**
  * Shared email sender with graceful fallback
  */
-async function sendEmail({ to, subject, html, text, headers, from }) {
+async function sendEmail({ to, subject, html, text, headers, from, replyTo }) {
   if (!resend) {
     console.log(`[Email] RESEND_API_KEY not set. Would send to ${to}: "${subject}"`);
     return { success: false, reason: 'api_key_missing' };
@@ -81,6 +81,7 @@ async function sendEmail({ to, subject, html, text, headers, from }) {
       text: plainText,
     };
     if (headers) payload.headers = headers;
+    if (replyTo) payload.reply_to = replyTo;
     const { data, error } = await resend.emails.send(payload);
 
     if (error) {
