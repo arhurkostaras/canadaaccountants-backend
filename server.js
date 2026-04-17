@@ -6794,6 +6794,67 @@ app.get('/api/dashboard/matches', authenticateToken, async (req, res) => {
   }
 });
 
+// CAC re-engagement pool extraction — loads C1 recipients into C9 (CAC Re-engagement)
+app.post('/api/admin/cac-pool-load', async (req, res) => {
+  const execute = req.query.execute === 'true';
+  const SOURCE_CAMPAIGN_IDS = [1];
+  const TARGET_CAMPAIGN_ID = 9;
+
+  try {
+    const cohort = await pool.query(`
+      SELECT DISTINCT ON (oe.recipient_email)
+             oe.recipient_email,
+             oe.recipient_name,
+             oe.recipient_id
+      FROM outreach_emails oe
+      WHERE oe.campaign_id = ANY($1::int[])
+        AND oe.status IN ('sent', 'delivered', 'opened')
+        AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
+        AND oe.recipient_email NOT IN (
+          SELECT recipient_email FROM outreach_emails WHERE campaign_id = $2
+        )
+        AND oe.recipient_email NOT IN (
+          SELECT email FROM cpa_profiles
+        )
+      ORDER BY oe.recipient_email, oe.sent_at DESC
+    `, [SOURCE_CAMPAIGN_IDS, TARGET_CAMPAIGN_ID]);
+
+    const sample = cohort.rows.slice(0, 5).map(r => ({
+      email: r.recipient_email,
+      name: r.recipient_name
+    }));
+
+    if (!execute) {
+      return res.json({
+        dry_run: true,
+        cohort_count: cohort.rows.length,
+        sample,
+        message: `Would queue ${cohort.rows.length} recipients into campaign C${TARGET_CAMPAIGN_ID}. Pass ?execute=true to load.`
+      });
+    }
+
+    let queued = 0;
+    for (const r of cohort.rows) {
+      const unsubToken = require('crypto').randomBytes(24).toString('hex');
+      await pool.query(
+        `INSERT INTO outreach_emails (campaign_id, recipient_type, recipient_id, recipient_email, recipient_name, status, unsubscribe_token, variant_index, sequence_number)
+         VALUES ($1, 'cpa', $2, $3, $4, 'queued', $5, 0, 1)`,
+        [TARGET_CAMPAIGN_ID, r.recipient_id, r.recipient_email, r.recipient_name, unsubToken]
+      );
+      queued++;
+    }
+
+    await pool.query(
+      `UPDATE outreach_campaigns SET total_queued = COALESCE(total_queued, 0) + $2, updated_at = NOW() WHERE id = $1`,
+      [TARGET_CAMPAIGN_ID, queued]
+    );
+
+    res.json({ success: true, queued, campaign_id: TARGET_CAMPAIGN_ID });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
