@@ -3104,6 +3104,32 @@ app.get('/api/unsubscribe/:token', async (req, res) => {
 });
 
 // Process unsubscribe (POST)
+// Backfill: set outreach_emails.status='unsubscribed' for all emails in outreach_unsubscribes
+app.post('/api/admin/backfill-unsub-status', async (req, res) => {
+  try {
+    const dryRun = req.query.execute !== 'true';
+    const count = await pool.query(`
+      SELECT COUNT(*) AS count FROM outreach_emails oe
+      JOIN outreach_unsubscribes ou ON LOWER(ou.email) = LOWER(oe.recipient_email)
+      WHERE oe.status != 'unsubscribed'
+    `);
+    if (dryRun) {
+      return res.json({ mode: 'DRY RUN', rows_to_update: parseInt(count.rows[0].count) });
+    }
+    const result = await pool.query(`
+      UPDATE outreach_emails SET status = 'unsubscribed', updated_at = NOW()
+      WHERE id IN (
+        SELECT oe.id FROM outreach_emails oe
+        JOIN outreach_unsubscribes ou ON LOWER(ou.email) = LOWER(oe.recipient_email)
+        WHERE oe.status != 'unsubscribed'
+      )
+    `);
+    res.json({ mode: 'EXECUTED', rows_updated: result.rowCount });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/unsubscribe/:token', express.urlencoded({ extended: true }), async (req, res) => {
   try {
     const success = await outreachEngine.processUnsubscribe(req.params.token, req.body.reason || 'user_request');
