@@ -4640,23 +4640,29 @@ app.post('/api/claim/instant', async (req, res) => {
     const welcomeFirstName = profile.rows[0].first_name || 'there';
     const welcomeProvince = profile.rows[0].province || 'your area';
     const welcomeFirm = profile.rows[0].firm_name;
+    const checkoutUrl = `${BACKEND_URL}/api/checkout/professional?email=${encodeURIComponent(email)}&name=${encodeURIComponent(claimName)}`;
     setTimeout(() => {
       sendEmail({
         to: email,
         subject: `Welcome aboard, ${welcomeFirstName}`,
         html: `
-          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; color: #1a1a1a;">
-            <p style="font-size: 15px; line-height: 1.7;">Hi ${welcomeFirstName},</p>
-            <p style="font-size: 15px; line-height: 1.7;">I saw you just claimed your profile on CanadaAccountants${welcomeFirm ? ' for ' + welcomeFirm : ''}. Welcome.</p>
-            <p style="font-size: 15px; line-height: 1.7;">You're one of the first CPAs in ${welcomeProvince} to join the platform. Your AI bio is live and your founding member badge is active. Clients searching for accountants in your area can now find you.</p>
-            <p style="font-size: 15px; line-height: 1.7;">If you want to update your bio, add specializations, or have any questions at all, just reply to this email. It comes straight to me.</p>
-            <p style="font-size: 15px; line-height: 1.7; margin-top: 28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
-          </div>
-        `,
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
+        <p>Hi ${welcomeFirstName},</p>
+        <p>I saw you just claimed your profile on CanadaAccountants${welcomeFirm ? ' for ' + welcomeFirm : ''}. Welcome.</p>
+        <p>You're one of the first CPAs in ${welcomeProvince} to join the platform. Your profile is live and clients searching for accountants in your area can now find you.</p>
+        <p>At $150/hour, five hours of networking costs $750. Your CanadaAccountants subscription costs $199/month. Clients who find you through the platform skip the networking entirely — they're already searching for a CPA in ${welcomeProvince}. One new client covers your subscription many times over.</p>
+        <p>When you're ready to upgrade to priority placement and client match notifications:</p>
+        <p style="margin:24px 0;text-align:center;">
+          <a href="${checkoutUrl}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:14px 32px;border-radius:6px;font-weight:600;">Upgrade to Professional — $299/mo</a>
+        </p>
+        <p>If you want to update your bio, add specializations, or have any questions at all, just reply to this email. It comes straight to me.</p>
+        <p style="margin-top:28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
+      </div>
+    `,
         from: 'Arthur Kostaras <connect@canadaaccountants.app>',
         replyTo: 'arthur@negotiateandwin.com',
       }).catch(err => console.error('[Claim] Welcome email error:', err.message));
-      console.log(`[Claim] Welcome email sent to ${email} (10 min delayed)`);
+      console.log(`[Claim] Welcome + upgrade email sent to ${email} (10 min delayed)`);
     }, 10 * 60 * 1000); // 10 minutes
 
     res.json({ success: true, token, userId, magicLink, referralLink });
