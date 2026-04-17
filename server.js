@@ -5544,6 +5544,101 @@ app.listen(PORT, '0.0.0.0', () => {
 
 
 // Purge all bounced emails: suppress + dequeue + invalidate
+// C2 SME pool ZB cleanup: cross-reference queued C2 emails against existing
+// email_validations + suppression list. Dequeues known-bad emails WITHOUT
+// making new ZB API calls. This is the "30-minute job" — a JOIN, not 19K API requests.
+// Defaults to dry-run; pass ?execute=true to dequeue.
+app.post('/api/admin/c2-sme-zb-cleanup', async (req, res) => {
+  try {
+    const dryRun = req.query.execute !== 'true';
+
+    // 1. How many C2 queued emails already have ZB validation results?
+    const overlapStats = await pool.query(`
+      SELECT
+        ev.status AS zb_status,
+        COUNT(*) AS count
+      FROM outreach_emails oe
+      JOIN email_validations ev ON LOWER(ev.email) = LOWER(oe.recipient_email)
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+      GROUP BY ev.status
+      ORDER BY count DESC
+    `);
+
+    // 2. How many C2 queued emails are on the suppression list?
+    const suppressed = await pool.query(`
+      SELECT COUNT(*) AS count FROM outreach_emails oe
+      JOIN outreach_unsubscribes ou ON LOWER(ou.email) = LOWER(oe.recipient_email)
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+    `);
+
+    // 3. How many C2 queued emails have NO validation at all?
+    const unvalidated = await pool.query(`
+      SELECT COUNT(*) AS count FROM outreach_emails oe
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM email_validations ev WHERE LOWER(ev.email) = LOWER(oe.recipient_email)
+        )
+    `);
+
+    // 4. Total C2 queued
+    const totalQueued = await pool.query(`
+      SELECT COUNT(*) AS count FROM outreach_emails WHERE campaign_id = 2 AND status = 'queued'
+    `);
+
+    // Identify emails to dequeue: invalid, do_not_mail, abuse, OR on suppression list
+    const toDequeue = await pool.query(`
+      SELECT oe.id, oe.recipient_email, ev.status AS zb_status, 'validation' AS reason
+      FROM outreach_emails oe
+      JOIN email_validations ev ON LOWER(ev.email) = LOWER(oe.recipient_email)
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+        AND ev.status IN ('invalid', 'do_not_mail', 'abuse')
+      UNION ALL
+      SELECT oe.id, oe.recipient_email, 'suppressed' AS zb_status, 'suppression_list' AS reason
+      FROM outreach_emails oe
+      JOIN outreach_unsubscribes ou ON LOWER(ou.email) = LOWER(oe.recipient_email)
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+    `);
+
+    if (dryRun) {
+      const statusBreakdown = {};
+      for (const r of overlapStats.rows) statusBreakdown[r.zb_status] = parseInt(r.count);
+      return res.json({
+        mode: 'DRY RUN',
+        c2_total_queued: parseInt(totalQueued.rows[0].count),
+        already_validated: overlapStats.rows.reduce((sum, r) => sum + parseInt(r.count), 0),
+        validation_breakdown: statusBreakdown,
+        on_suppression_list: parseInt(suppressed.rows[0].count),
+        unvalidated_no_zb_data: parseInt(unvalidated.rows[0].count),
+        to_dequeue: toDequeue.rows.length,
+        dequeue_sample: toDequeue.rows.slice(0, 5).map(r => ({ email: r.recipient_email, zb_status: r.zb_status, reason: r.reason })),
+        execute_with: 'POST same URL with ?execute=true'
+      });
+    }
+
+    // EXECUTE: dequeue the bad emails
+    let dequeued = 0;
+    const ids = toDequeue.rows.map(r => r.id);
+    if (ids.length > 0) {
+      const result = await pool.query(
+        `UPDATE outreach_emails SET status = 'failed', updated_at = NOW() WHERE id = ANY($1) AND status = 'queued'`,
+        [ids]
+      );
+      dequeued = result.rowCount;
+    }
+
+    res.json({
+      mode: 'EXECUTED',
+      dequeued,
+      remaining_queued: parseInt(totalQueued.rows[0].count) - dequeued,
+      unvalidated_still_in_queue: parseInt(unvalidated.rows[0].count)
+    });
+
+    console.log(`[C2-ZB-Cleanup] Dequeued ${dequeued} known-bad emails from C2 queue`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/admin/purge-bounces', async (req, res) => {
   try {
     // 1. Find all bounced emails
