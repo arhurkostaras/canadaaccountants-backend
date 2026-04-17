@@ -1333,6 +1333,11 @@ class OutreachEngine {
        ON CONFLICT (email) DO UPDATE SET reason = $3, unsubscribed_at = NOW()`,
       [info.email, token, reason || 'user_request']
     );
+    // Update outreach_emails status so campaign stats reflect the unsub
+    await this.pool.query(
+      `UPDATE outreach_emails SET status = 'unsubscribed' WHERE recipient_email = $1 AND status != 'unsubscribed'`,
+      [info.email]
+    ).catch(() => {});
     return true;
   }
 
