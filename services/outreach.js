@@ -414,6 +414,21 @@ class OutreachEngine {
         return;
       }
 
+      // Suppress queued sends to CPAs who have since claimed a profile.
+      try {
+        const suppressed = await this.pool.query(`
+          UPDATE outreach_emails SET status = 'suppressed'
+          WHERE status = 'queued'
+            AND (
+              LOWER(recipient_email) IN (SELECT LOWER(COALESCE(enriched_email, email)) FROM scraped_cpas WHERE claim_status = 'claimed')
+              OR LOWER(recipient_email) IN (SELECT LOWER(email) FROM cpa_profiles)
+            )
+        `);
+        if (suppressed.rowCount > 0) {
+          console.log(`[Outreach] Suppressed ${suppressed.rowCount} queued sends to claimed CPAs`);
+        }
+      } catch (e) { console.error('[Outreach] Claims suppression check error:', e.message); }
+
       // Auto-relaunch: reactivate campaigns matching today's send types
       // Never relaunch archived or superseded campaigns
       const stalled = await this.pool.query(
