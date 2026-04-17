@@ -1191,6 +1191,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
             subject_line: 'Welcome to CanadaAccountants, {{first_name}}!',
             body_template: `<p>Hi {{first_name}},</p>
 <p>Congratulations — your profile on <strong>CanadaAccountants</strong> is now verified and live!</p>
+<p>CPAs typically spend hundreds of hours a year on client development — networking, referrals, word of mouth. Your CanadaAccountants profile puts you in front of businesses that are already searching for a CPA in {{city}}. That's time back in your week.</p>
 <p>Here are 3 things you can do right now to start attracting clients:</p>
 <ol>
 <li><strong>Complete your bio</strong> — accountants with a full bio get 2x more views</li>
@@ -1247,7 +1248,8 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 
 <tr><td style="padding:18px 32px 8px;color:#111;line-height:1.65;font-size:15px;">
 <p>The honest version: <strong>your free profile shows up in the directory</strong>. That is meaningful — clients searching CanadaAccountants can find you. But you're not at the top of {{city}} results, you don't get notified when a client matches your specialty, and you don't carry the verified badge that signals "this CPA is actively engaged."</p>
-<p>If those things matter to your practice, here are the options. Pick one:</p>
+<p>Here's the math: at $150/hour, five hours of networking costs $750. Your CanadaAccountants subscription starts at $199/month. Clients who find you through the platform skip the networking entirely — they're already searching for a CPA in {{city}}. One new client covers your subscription many times over.</p>
+<p>If that math works for your practice, pick a tier:</p>
 </td></tr>
 
 <tr><td style="padding:8px 32px 8px;">
