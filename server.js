@@ -5639,6 +5639,58 @@ app.post('/api/admin/c2-sme-zb-cleanup', async (req, res) => {
   }
 });
 
+// Hold unvalidated C2 emails: move from 'queued' to 'pending_validation'.
+// Only emails with ZB status of valid/unknown/catch-all stay queued.
+app.post('/api/admin/c2-hold-unvalidated', async (req, res) => {
+  try {
+    const dryRun = req.query.execute !== 'true';
+
+    const countResult = await pool.query(`
+      SELECT COUNT(*) AS count FROM outreach_emails oe
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM email_validations ev
+          WHERE LOWER(ev.email) = LOWER(oe.recipient_email)
+            AND ev.status IN ('valid', 'unknown', 'catch-all')
+        )
+    `);
+
+    const remaining = await pool.query(`
+      SELECT COUNT(*) AS count FROM outreach_emails oe
+      WHERE oe.campaign_id = 2 AND oe.status = 'queued'
+        AND EXISTS (
+          SELECT 1 FROM email_validations ev
+          WHERE LOWER(ev.email) = LOWER(oe.recipient_email)
+            AND ev.status IN ('valid', 'unknown', 'catch-all')
+        )
+    `);
+
+    if (dryRun) {
+      return res.json({
+        mode: 'DRY RUN',
+        to_hold: parseInt(countResult.rows[0].count),
+        remaining_sendable: parseInt(remaining.rows[0].count),
+        execute_with: 'POST same URL with ?execute=true'
+      });
+    }
+
+    const result = await pool.query(`
+      UPDATE outreach_emails SET status = 'pending_validation', updated_at = NOW()
+      WHERE campaign_id = 2 AND status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM email_validations ev
+          WHERE LOWER(ev.email) = LOWER(outreach_emails.recipient_email)
+            AND ev.status IN ('valid', 'unknown', 'catch-all')
+        )
+    `);
+
+    res.json({ mode: 'EXECUTED', held: result.rowCount, remaining_sendable: parseInt(remaining.rows[0].count) });
+    console.log(`[C2-Hold] Held ${result.rowCount} unvalidated emails, ${remaining.rows[0].count} remain sendable`);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/admin/purge-bounces', async (req, res) => {
   try {
     // 1. Find all bounced emails
