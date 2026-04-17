@@ -4056,7 +4056,13 @@ app.get('/api/outreach/health', async (req, res) => {
     const bounced7d = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'bounced' AND sent_at > NOW() - INTERVAL '7 days'`);
     const unsub7d = await pool.query(`SELECT COUNT(*) FROM outreach_unsubscribes WHERE unsubscribed_at > NOW() - INTERVAL '7 days'`);
     const campaigns = await pool.query(`SELECT id, name, status, daily_limit, total_sent FROM outreach_campaigns WHERE status = 'active'`);
-    const claims = await pool.query(`SELECT COUNT(*) FROM cpa_profiles WHERE email NOT IN ('sarah.johnson@testcpa.com','sarah.williams@testcpa.com','akrosfinancial@gmail.com','arthur@negotiateandwin.com')`).catch(() => ({ rows: [{ count: 0 }] }));
+    const claims = await pool.query(`
+      SELECT COUNT(*) FROM (
+        SELECT email FROM cpa_profiles WHERE email NOT IN ('sarah.johnson@testcpa.com','sarah.williams@testcpa.com','akrosfinancial@gmail.com','arthur@negotiateandwin.com')
+        UNION
+        SELECT COALESCE(enriched_email, email) FROM scraped_cpas WHERE claim_status = 'claimed'
+      ) AS all_claims
+    `).catch(() => ({ rows: [{ count: 0 }] }));
     const outreachConv = await pool.query(`SELECT COALESCE(SUM(total_converted), 0) AS conv FROM outreach_campaigns`).catch(() => ({ rows: [{ conv: 0 }] }));
     res.json({
       sent_today: parseInt(today.rows[0].count),
