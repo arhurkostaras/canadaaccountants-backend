@@ -3376,48 +3376,27 @@ app.post('/api/cpa-application', async (req, res) => {
         `,
       }).catch(err => console.error('Admin auto-approve email error (non-fatal):', err.message));
 
-      res.json({
-        success: true,
-        applicationId: appId,
-        verified: true,
-        message: 'Your CPA credentials have been verified! Check your email for next steps.',
-      });
     } else {
-      // --- NOT VERIFIED: send pending email + admin MANUAL REVIEW alert ---
-      console.log(`PENDING REVIEW application #${appId} for ${fullName} (score: ${matchScore})`);
+      // Not auto-verified: accept immediately, send checkout links.
+      // Verification happens async (admin review gives verified badge later).
+      console.log(`ACCEPTED (not auto-verified) application #${appId} for ${fullName} (score: ${matchScore})`);
 
-      // Confirmation to applicant (48h review)
-      sendEmail({
-        to: email,
-        subject: 'Application Received -- CanadaAccountants.app',
-        html: `
-          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
-            <div style="background:linear-gradient(135deg,#2563eb,#1e3a8a);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
-              <h1 style="color:#ffffff;margin:0;font-size:24px;">Application Received</h1>
-              <p style="color:#e0e7ff;margin:8px 0 0;font-size:14px;">AI-Powered CPA-Client Matching</p>
-            </div>
-            <div style="padding:32px 24px;background:#ffffff;">
-              <p style="color:#1a1a1a;font-size:16px;">Hi ${firstName || 'there'},</p>
-              <p style="color:#333;font-size:15px;">Thank you for applying to join <strong>CanadaAccountants.app</strong>. Your application has been received and our team will review it within 48 hours.</p>
-              <p style="color:#333;font-size:15px;">We will independently verify your CPA designation before activating your profile. <strong>No payment is required until your application is approved.</strong></p>
-              <p style="color:#333;font-size:15px;">If you have any questions in the meantime, reply to this email or contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a>.</p>
-              <p style="color:#333;font-size:15px;">Best regards,<br>The CanadaAccountants Team</p>
-            </div>
-            <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
-              <p style="color:#999;font-size:11px;margin:0;">Application ID: #${appId}</p>
-            </div>
-          </div>
-        `,
-      }).catch(err => console.error('CPA application applicant email error (non-fatal):', err.message));
+      await pool.query(
+        `UPDATE cpa_applications SET status = 'approved', reviewed_at = NOW(), notes = $1 WHERE id = $2`,
+        [`Accepted immediately (not auto-verified): score ${matchScore}`, appId]
+      );
 
-      // Admin: MANUAL REVIEW needed
+      const sessionsForEmail = buildApprovalTierUrls(appId, email, fullName);
+      sendApprovalEmail({ email, fullName, appId, sessions: sessionsForEmail });
+
+      // Admin notification (informational, not a manual review request)
       const specsHtml = specializations.map(s => `<li>${s}</li>`).join('');
       sendEmail({
         to: adminEmail,
-        subject: `MANUAL REVIEW: CPA Application -- ${fullName} (${firmName})`,
+        subject: `NEW CPA APPLICATION: ${fullName} (${firmName}) -- accepted, awaiting payment`,
         html: `
-          <h2 style="color:#dc2626;">Manual Review Required</h2>
-          <p>This applicant could not be auto-verified against the scraped CPA directory.</p>
+          <h2 style="color:#2563eb;">New CPA Application (Accepted)</h2>
+          <p>Applicant was not auto-verified against the scraped CPA directory (may be a new CPA not yet in our database). Application accepted immediately; checkout links sent. Verify credentials manually for verified badge.</p>
           <p><strong>Application ID:</strong> #${appId}</p>
           <p><strong>Match score:</strong> ${matchScore} (threshold: 2)</p>
           <table style="width:100%;border-collapse:collapse;margin:16px 0;">
@@ -3437,18 +3416,22 @@ app.post('/api/cpa-application', async (req, res) => {
           <ul>${specsHtml}</ul>
           ${message ? `<h3>Message</h3><p style="background:#f8fafc;padding:12px;border-left:4px solid #2563eb;">${message.replace(/</g, '&lt;')}</p>` : ''}
           ${ref ? `<p style="color:#666;font-size:13px;">Ref token: <code>${ref}</code></p>` : ''}
-          <p style="margin-top:24px;"><strong>To approve manually:</strong></p>
-          <p><code>POST ${BACKEND_URL}/api/admin/applications/${appId}/approve</code></p>
+          <p style="color:#2563eb;font-weight:bold;">Payment links have been sent. Awaiting tier selection.</p>
         `,
       }).catch(err => console.error('CPA application admin email error (non-fatal):', err.message));
-
-      res.json({
-        success: true,
-        applicationId: appId,
-        verified: false,
-        message: 'Your application has been received. We will review it within 48 hours.',
-      });
     }
+
+    // Always return checkoutUrl so frontend can redirect to Stripe immediately
+    const tierUrlMap = buildApprovalTierUrls(appId, email, fullName);
+    const selectedCheckoutUrl = tierUrlMap[pricingTier] || tierUrlMap['professional'];
+
+    res.json({
+      success: true,
+      applicationId: appId,
+      verified,
+      checkoutUrl: selectedCheckoutUrl,
+      message: 'Your application has been accepted! Redirecting to payment...',
+    });
   } catch (error) {
     console.error('CPA application error:', error);
     res.status(500).json({ error: 'Failed to process application', details: error.message });
