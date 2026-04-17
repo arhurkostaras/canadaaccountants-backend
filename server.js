@@ -6808,7 +6808,7 @@ app.post('/api/admin/cac-pool-load', async (req, res) => {
              oe.recipient_id
       FROM outreach_emails oe
       WHERE oe.campaign_id = ANY($1::int[])
-        AND oe.status IN ('sent', 'delivered', 'opened')
+        AND oe.status IN ('sent', 'delivered', 'opened', 'clicked')
         AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
         AND oe.recipient_email NOT IN (
           SELECT recipient_email FROM outreach_emails WHERE campaign_id = $2
