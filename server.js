@@ -3104,6 +3104,17 @@ app.get('/api/unsubscribe/:token', async (req, res) => {
 });
 
 // Process unsubscribe (POST)
+app.get('/api/admin/claimed-cpas', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, full_name, firm_name, claim_status, claimed_by, founding_member
+      FROM scraped_cpas
+      WHERE claim_status IS NOT NULL AND claim_status != 'unclaimed'
+    `);
+    res.json({ count: result.rows.length, rows: result.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Backfill: set outreach_emails.status='unsubscribed' for all emails in outreach_unsubscribes
 app.post('/api/admin/backfill-unsub-status', async (req, res) => {
   try {
