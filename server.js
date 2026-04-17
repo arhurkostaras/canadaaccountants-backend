@@ -6977,11 +6977,8 @@ async function runPipelineMonitor(label) {
   const day = now.getDay();
   const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
 
-  // Skip weekends only (Monday enabled 2026-04-13, holidays cleared)
-  if (day === 0 || day === 6) {
-    console.log(`[Monitor] Skipping — non-send day (${etDate})`);
-    return;
-  }
+  // Weekend skip removed 2026-04-17 — campaigns run 7 days/week,
+  // monitor should too. Weekend schedule is 10am/1pm/4pm via separate crons.
 
   const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'America/Toronto', hour: '2-digit', minute: '2-digit' });
   const dateStr = now.toLocaleDateString('en-US', { timeZone: 'America/Toronto', month: 'long', day: 'numeric', year: 'numeric' });
@@ -7100,7 +7097,10 @@ cron.schedule('5 10 * * 1-5', () => runPipelineMonitor('10:05 AM').catch(e => co
 cron.schedule('5 11 * * 1-5', () => runPipelineMonitor('11:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 cron.schedule('5 14 * * 1-5', () => runPipelineMonitor('2:05 PM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 
-cron.schedule('0 15 * * *', () => runPipelineMonitor('3 PM ET').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+// Weekend monitors: 10am, 1pm, 4pm Sat+Sun
+cron.schedule('0 10 * * 0,6', () => runPipelineMonitor('10 AM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+cron.schedule('0 13 * * 0,6', () => runPipelineMonitor('1 PM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+cron.schedule('0 16 * * 0,6', () => runPipelineMonitor('4 PM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 
 console.log('[Monitor] Pipeline monitor scheduled: 9:05/9:30/10:05/11:05/14:05 Mon-Fri + 15:00 daily');
 
