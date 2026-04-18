@@ -3104,6 +3104,17 @@ app.get('/api/unsubscribe/:token', async (req, res) => {
 });
 
 // Process unsubscribe (POST)
+app.get('/api/admin/magic-link/:userId', async (req, res) => {
+  try {
+    const user = await pool.query('SELECT id, email, user_type FROM users WHERE id = $1', [req.params.userId]);
+    if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const u = user.rows[0];
+    const token = jwt.sign({ userId: u.id, email: u.email, userType: u.user_type || 'CPA' }, process.env.JWT_SECRET || 'your_jwt_secret_key', { expiresIn: '30d' });
+    const magicLink = `${FRONTEND_URL}/admin?token=${token}`;
+    res.json({ userId: u.id, email: u.email, magicLink });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/admin/claimed-cpas', async (req, res) => {
   try {
     const result = await pool.query(`
