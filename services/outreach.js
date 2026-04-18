@@ -359,6 +359,7 @@ class OutreachEngine {
       try {
         await this.pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS send_type VARCHAR(10) DEFAULT 'cold'`);
         await this.pool.query(`ALTER TABLE outreach_campaigns ADD COLUMN IF NOT EXISTS superseded_by INTEGER`);
+        await this.pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS send_day_type VARCHAR(7)`);
         await this.pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
         this._sendTypeMigrated = true;
       } catch (e) { /* ignore */ }
@@ -837,7 +838,8 @@ class OutreachEngine {
       });
 
       if (result.success) {
-        await this._setEmailStatus(emailRecord.id, 'sent', 'sent_at = NOW(), resend_email_id = $3, rendered_subject = $4, rendered_body = $5', [result.id, subject, body]);
+        const dayType = isWeekend ? 'weekend' : 'weekday';
+        await this._setEmailStatus(emailRecord.id, 'sent', 'sent_at = NOW(), resend_email_id = $3, rendered_subject = $4, rendered_body = $5, send_day_type = $6', [result.id, subject, body, dayType]);
         await this.pool.query(
           `UPDATE outreach_campaigns SET total_sent = total_sent + 1, updated_at = NOW() WHERE id = $1`,
           [campaign.id]
