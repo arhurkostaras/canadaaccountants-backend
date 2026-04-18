@@ -5587,7 +5587,7 @@ app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin
   try {
     const claimed = await pool.query(
       `SELECT sc.id, sc.first_name, sc.last_name, sc.enriched_email, sc.email,
-              sc.firm_name, sc.province, sc.city, sc.specializations, sc.claimed_by
+              sc.firm_name, sc.province, sc.city, sc.claimed_by
        FROM scraped_cpas sc
        WHERE sc.claim_status = 'claimed' AND sc.claimed_by IS NOT NULL`
     );
@@ -5611,10 +5611,10 @@ app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin
         await pool.query(
           `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
            specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'free', 'active', 'active', true, 'pending')
+           VALUES ($1, $2, $3, $4, $5, $6, '[]', 'free', 'active', 'active', true, 'pending')
            ON CONFLICT (user_id) DO NOTHING`,
           [row.claimed_by, row.first_name, row.last_name, email,
-           row.firm_name, row.province || row.city, row.specializations || '[]']
+           row.firm_name, row.province || row.city]
         );
       }
     }
