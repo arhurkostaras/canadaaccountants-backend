@@ -370,12 +370,6 @@ class OutreachEngine {
     const now = new Date();
     const day = now.getDay(); // 0=Sun,1=Mon,2=Tue,3=Wed,4=Thu,5=Fri,6=Sat
 
-    // No sends on Sat, Sun, Mon
-    if (day === 0 || day === 6) {
-      console.log('[Outreach] No-send day (Sat/Sun). Skipping.');
-      return;
-    }
-
     // Holiday check (YYYY-MM-DD in ET)
     const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
     const holidays = []; // Easter 2026 passed, clear until next holiday window
@@ -384,25 +378,11 @@ class OutreachEngine {
       return;
     }
 
-    // Determine which send types run today
-    const coldDay = day >= 1 && day <= 5; // Tue-Fri (was Tue-Thu, expanded 2026-04-10 to build cold volume faster) // Tue, Wed, Thu
-    let warmDay = day >= 1 && day <= 5; // Friday normally
-
-    // If Friday is a holiday, move warm sends to Thursday
-    if (day === 4) {
-      const friday = new Date(now);
-      friday.setDate(friday.getDate() + 1);
-      const fridayStr = friday.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-      if (holidays.includes(fridayStr)) {
-        warmDay = true;
-        console.log('[Outreach] Friday is a holiday — warm sends moved to today (Thursday)');
-      }
-    }
-
-    const sendTypes = [];
-    if (coldDay) sendTypes.push('cold');
-    if (warmDay) sendTypes.push('warm');
-    console.log(`[Outreach] Day ${day} (${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]}) — processing: ${sendTypes.join(', ')}`);
+    // Weekend sends enabled at 50% daily limit (added 2026-04-18).
+    // All send types (cold + warm) run every day including weekends.
+    const isWeekend = (day === 0 || day === 6);
+    const sendTypes = ['cold', 'warm'];
+    console.log(`[Outreach] Day ${day} (${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]}${isWeekend ? ' — weekend 50% limits' : ''}) — processing: ${sendTypes.join(', ')}`);
 
     this.processing = true;
 
@@ -461,9 +441,11 @@ class OutreachEngine {
         );
         const sentToday = parseInt(todayCount.rows[0].count);
 
-        if (sentToday >= campaign.daily_limit) continue;
+        // Weekend: 50% daily limit to preserve pool while testing engagement
+        const effectiveLimit = isWeekend ? Math.ceil(campaign.daily_limit / 2) : campaign.daily_limit;
+        if (sentToday >= effectiveLimit) continue;
 
-        const remaining = campaign.daily_limit - sentToday;
+        const remaining = effectiveLimit - sentToday;
 
         // Get queued emails for this campaign — filter to in-window provinces only.
         // Bug fix 2026-04-09: previously pulled rows regardless of province, then
