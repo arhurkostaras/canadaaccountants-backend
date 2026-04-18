@@ -5608,11 +5608,12 @@ app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin
         has_profile: hasProfile
       });
       if (!hasProfile && execute) {
+        const cpaId = `claim_${row.claimed_by}_${Date.now()}`;
         await pool.query(
-          `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+          `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
            specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-           VALUES ($1, $2, $3, $4, $5, $6, '[]', 'free', 'active', 'active', true, 'pending')`,
-          [row.claimed_by, row.first_name, row.last_name, email,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, '[]', 'free', 'active', 'active', true, 'pending')`,
+          [cpaId, row.claimed_by, row.first_name, row.last_name, email,
            row.firm_name, row.province || row.city]
         );
       }
