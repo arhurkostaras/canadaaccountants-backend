@@ -5581,6 +5581,57 @@ cron.schedule('0 9 * * 1', async () => {
 
 console.log('[FounderOutreach] Monday 9 AM ET digest scheduled');
 
+// ==================== PROFILE BACKFILL ====================
+app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin, async (req, res) => {
+  const execute = req.query.execute === 'true';
+  try {
+    const claimed = await pool.query(
+      `SELECT sc.id, sc.first_name, sc.last_name, sc.enriched_email, sc.email,
+              sc.firm_name, sc.province, sc.city, sc.specializations, sc.claimed_by
+       FROM scraped_cpas sc
+       WHERE sc.claim_status = 'claimed' AND sc.claimed_by IS NOT NULL`
+    );
+
+    const results = [];
+    for (const row of claimed.rows) {
+      const existing = await pool.query(
+        'SELECT id FROM cpa_profiles WHERE user_id = $1',
+        [row.claimed_by]
+      );
+      const hasProfile = existing.rows.length > 0;
+      const email = row.enriched_email || row.email;
+      results.push({
+        scraped_id: row.id,
+        user_id: row.claimed_by,
+        name: `${row.first_name} ${row.last_name}`,
+        email,
+        has_profile: hasProfile
+      });
+      if (!hasProfile && execute) {
+        await pool.query(
+          `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+           specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'free', 'active', 'active', true, 'pending')
+           ON CONFLICT (user_id) DO NOTHING`,
+          [row.claimed_by, row.first_name, row.last_name, email,
+           row.firm_name, row.province || row.city, row.specializations || '[]']
+        );
+      }
+    }
+
+    const missing = results.filter(r => !r.has_profile);
+    res.json({
+      dry_run: !execute,
+      total_claimed: results.length,
+      missing_profiles: missing.length,
+      created: execute ? missing.length : 0,
+      records: results
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Sentry error handler (must be before app.listen, after all routes)
 if (process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.errorHandler());
