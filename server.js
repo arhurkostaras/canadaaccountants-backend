@@ -4508,7 +4508,9 @@ app.post('/api/claim/instant', async (req, res) => {
 
     // Fetch scraped profile
     const profile = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, email, enriched_email, claim_status FROM scraped_cpas WHERE id = $1`,
+      `SELECT id, first_name, last_name, full_name, firm_name, email, enriched_email, claim_status,
+              province, city, designation, specializations
+       FROM scraped_cpas WHERE id = $1`,
       [recipient_id]
     );
     if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
@@ -4550,6 +4552,22 @@ app.post('/api/claim/instant', async (req, res) => {
       `UPDATE scraped_cpas SET claim_status = 'claimed', claimed_by = $1, founding_member = TRUE WHERE id = $2`,
       [userId, recipient_id]
     );
+
+    // Create cpa_profiles row so dashboard endpoints work
+    const scraped = profile.rows[0];
+    try {
+      await pool.query(
+        `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+         specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'free', 'active', 'active', true, 'pending')
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, scraped.first_name, scraped.last_name, email,
+         scraped.firm_name, scraped.province || scraped.city,
+         scraped.specializations || '[]']
+      );
+    } catch (profileErr) {
+      console.error('[Claim] Profile creation error (non-fatal):', profileErr.message);
+    }
 
     // Track conversion
     outreachEngine.trackConversion(email, userId, refToken).catch(err => {
