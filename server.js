@@ -5611,8 +5611,7 @@ app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin
         await pool.query(
           `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
            specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-           VALUES ($1, $2, $3, $4, $5, $6, '[]', 'free', 'active', 'active', true, 'pending')
-           ON CONFLICT (user_id) DO NOTHING`,
+           VALUES ($1, $2, $3, $4, $5, $6, '[]', 'free', 'active', 'active', true, 'pending')`,
           [row.claimed_by, row.first_name, row.last_name, email,
            row.firm_name, row.province || row.city]
         );
