@@ -4377,6 +4377,40 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
 });
 
 // Reset stuck processing flag (if processQueue crashed without hitting finally block)
+// Test send: try to send ONE queued email and report every step
+app.post('/api/admin/test-single-send', async (req, res) => {
+  try {
+    const steps = [];
+    // Get one queued email from C9
+    const q = await pool.query(`SELECT * FROM outreach_emails WHERE campaign_id = 9 AND status = 'queued' LIMIT 1`);
+    if (q.rows.length === 0) return res.json({ error: 'No queued emails in C9' });
+    const email = q.rows[0];
+    steps.push({ step: 'found_email', id: email.id, to: email.recipient_email, type: email.recipient_type });
+
+    // Province check
+    if (email.recipient_id) {
+      const prov = await pool.query('SELECT province FROM scraped_cpas WHERE id = $1', [email.recipient_id]);
+      const province = prov.rows[0]?.province;
+      steps.push({ step: 'province_lookup', province, recipient_id: email.recipient_id });
+    }
+
+    // Get campaign
+    const camp = await pool.query('SELECT * FROM outreach_campaigns WHERE id = $1', [email.campaign_id]);
+    steps.push({ step: 'campaign', name: camp.rows[0]?.name, type: camp.rows[0]?.type, has_template: !!(camp.rows[0]?.body_template || camp.rows[0]?.template) });
+
+    // Check if template exists
+    const template = camp.rows[0]?.body_template || camp.rows[0]?.template;
+    steps.push({ step: 'template_check', template_length: template?.length || 0, first_50: template?.substring(0, 50) });
+
+    // Check Resend key
+    steps.push({ step: 'resend_key', present: !!process.env.RESEND_API_KEY, from: process.env.FROM_EMAIL });
+
+    res.json({ steps });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0,3) });
+  }
+});
+
 app.post('/api/admin/reset-queue-lock', async (req, res) => {
   const was = outreachEngine.processing;
   outreachEngine.processing = false;
