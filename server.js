@@ -5086,6 +5086,28 @@ app.get('/api/profiles/:id', async (req, res) => {
       url: `https://canadaaccountants.app/profile?id=${p.id}`
     };
 
+    // Related profiles for internal SEO linking
+    let related = [];
+    try {
+        const relatedQuery = await pool.query(
+            `SELECT id, first_name, last_name, firm_name, city, province, designation
+             FROM scraped_cpas
+             WHERE province = $1 AND id != $2
+               AND COALESCE(enriched_email, email) IS NOT NULL
+             ORDER BY claim_status DESC NULLS LAST, RANDOM()
+             LIMIT 6`,
+            [p.province, p.id]
+        );
+        related = relatedQuery.rows.map(r => ({
+            id: r.id,
+            name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+            firm: r.firm_name,
+            city: r.city,
+            province: r.province,
+            designation: r.designation
+        }));
+    } catch (relErr) { /* non-fatal */ }
+
     res.json({
       profile: {
         id: p.id,
@@ -5102,7 +5124,8 @@ app.get('/api/profiles/:id', async (req, res) => {
         founding_member: p.founding_member || false
       },
       seo_score: seoScore,
-      structured_data: jsonLd
+      structured_data: jsonLd,
+      related
     });
 
     // Track profile visit asynchronously (fire and forget)
