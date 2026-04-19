@@ -4377,6 +4377,53 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
 });
 
 // Reset stuck processing flag (if processQueue crashed without hitting finally block)
+// Force-send: bypass processQueue, directly send ONE queued email from C9
+app.post('/api/admin/force-send-one', async (req, res) => {
+  try {
+    const steps = [];
+    // Get one queued ON/QC email from C9
+    const q = await pool.query(`
+      SELECT oe.* FROM outreach_emails oe
+      LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+      WHERE oe.campaign_id = 9 AND oe.status = 'queued' AND oe.recipient_type = 'cpa'
+        AND sc.province IN ('ON','QC')
+      LIMIT 1
+    `);
+    if (q.rows.length === 0) return res.json({ error: 'No ON/QC queued emails in C9' });
+    const emailRow = q.rows[0];
+    steps.push({ found: emailRow.recipient_email, id: emailRow.id });
+
+    // Get campaign template
+    const camp = await pool.query('SELECT * FROM outreach_campaigns WHERE id = 9');
+    const template = camp.rows[0].body_template;
+    const subjectTemplate = camp.rows[0].subject_template;
+
+    // Render template (basic variable replacement)
+    const name = emailRow.recipient_name || 'there';
+    const firstName = name.split(/[\s,]+/)[0];
+    let subject = (subjectTemplate || 'Your profile').replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
+    let html = template;
+
+    // Send via Resend
+    const result = await sendEmail({
+      to: emailRow.recipient_email,
+      subject,
+      html,
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
+    });
+    steps.push({ send_result: result });
+
+    if (result && result.success) {
+      await pool.query(`UPDATE outreach_emails SET status = 'sent', sent_at = NOW(), resend_email_id = $2, send_day_type = 'weekend' WHERE id = $1`, [emailRow.id, result.id]);
+      steps.push({ status: 'SENT', resend_id: result.id });
+    }
+
+    res.json({ steps });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Test send: try to send ONE queued email and report every step
 app.post('/api/admin/test-single-send', async (req, res) => {
   try {
