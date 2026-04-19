@@ -831,6 +831,13 @@ const crmIntelligence = new CRMIntelligence({
     // Tag re-engagement campaigns as warm
     await pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
     await pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS variant_index INTEGER DEFAULT 0`);
+    try {
+      await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS lead_status VARCHAR(20) DEFAULT 'new_lead'`);
+      await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS status_updated_at TIMESTAMPTZ`);
+      await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS advisor_response VARCHAR(20)`);
+      await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS outcome VARCHAR(20)`);
+      await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS outcome_notes TEXT`);
+    } catch (e) { console.error('[Migration] Lead status columns:', e.message); }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_validations (
         id SERIAL PRIMARY KEY,
@@ -927,6 +934,7 @@ const crmIntelligence = new CRMIntelligence({
     await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS generated_bio TEXT`);
     await pool.query(`ALTER TABLE cpa_profiles ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50)`);
     await pool.query(`ALTER TABLE cpa_profiles ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50)`);
+    await pool.query(`ALTER TABLE cpa_profiles ADD COLUMN IF NOT EXISTS founding_member BOOLEAN DEFAULT false`);
 
     // Client search requests table (for matching analytics)
     await pool.query(`
@@ -5286,6 +5294,30 @@ app.post('/api/admin/generate-bios', async (req, res) => {
   }
 });
 
+// ==================== FOUNDING MEMBER COUNTER ====================
+app.get('/api/founding-members', async (req, res) => {
+  try {
+    const LIMIT = 25;
+    const paid = await pool.query(`
+      SELECT COUNT(*) FROM cpa_profiles
+      WHERE founding_member = true AND subscription_tier != 'free'
+    `);
+    const total = await pool.query(`
+      SELECT COUNT(*) FROM cpa_profiles WHERE founding_member = true
+    `);
+    const paidCount = parseInt(paid.rows[0].count);
+    const totalClaimed = parseInt(total.rows[0].count);
+    const spotsRemaining = Math.max(0, LIMIT - paidCount);
+    res.json({
+      founding_member_limit: LIMIT,
+      paid_founding_members: paidCount,
+      claimed_founding_members: totalClaimed,
+      spots_remaining: spotsRemaining,
+      founding_member_active: spotsRemaining > 0
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ==================== PUBLIC PROFILE PAGE (SEO) ====================
 app.get('/api/profiles/:id', async (req, res) => {
   try {
@@ -7270,6 +7302,88 @@ app.post('/api/admin/cac-pool-load', async (req, res) => {
     );
 
     res.json({ success: true, queued, campaign_id: TARGET_CAMPAIGN_ID });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lead status pipeline endpoints
+const VALID_LEAD_STATUSES = ['new_lead', 'advisor_notified', 'advisor_accepted', 'client_contacted', 'won', 'lost'];
+
+app.put('/api/admin/leads/:matchId/status', async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { lead_status, advisor_response, outcome, outcome_notes } = req.body;
+    if (lead_status && !VALID_LEAD_STATUSES.includes(lead_status)) {
+      return res.status(400).json({ error: `Invalid lead_status. Must be one of: ${VALID_LEAD_STATUSES.join(', ')}` });
+    }
+    const result = await pool.query(
+      `UPDATE friction_matches SET
+        lead_status = COALESCE($1, lead_status),
+        advisor_response = COALESCE($2, advisor_response),
+        outcome = COALESCE($3, outcome),
+        outcome_notes = COALESCE($4, outcome_notes),
+        status_updated_at = NOW()
+       WHERE match_id = $5
+       RETURNING *`,
+      [lead_status || null, advisor_response || null, outcome || null, outcome_notes || null, matchId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Match not found' });
+    res.json({ success: true, match: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/leads', async (req, res) => {
+  try {
+    const { status, limit = 100, offset = 0 } = req.query;
+    const params = [];
+    let where = '';
+    if (status) {
+      params.push(status);
+      where = `WHERE fm.lead_status = $${params.length}`;
+    }
+    params.push(parseInt(limit), parseInt(offset));
+    const result = await pool.query(
+      `SELECT fm.*, fm.status_updated_at
+       FROM friction_matches fm
+       ${where}
+       ORDER BY fm.status_updated_at DESC NULLS LAST, fm.match_id DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+    res.json({ leads: result.rows, total: result.rows.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/leads/funnel', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        lead_status,
+        COUNT(*) AS count,
+        COUNT(*) FILTER (WHERE status_updated_at >= NOW() - INTERVAL '7 days') AS this_week
+      FROM friction_matches
+      GROUP BY lead_status
+      ORDER BY ARRAY_POSITION(
+        ARRAY['new_lead','advisor_notified','advisor_accepted','client_contacted','won','lost'],
+        lead_status
+      )
+    `);
+    const weekly = await pool.query(`
+      SELECT
+        DATE_TRUNC('week', COALESCE(status_updated_at, created_at)) AS week,
+        lead_status,
+        COUNT(*) AS count
+      FROM friction_matches
+      WHERE COALESCE(status_updated_at, created_at) >= NOW() - INTERVAL '8 weeks'
+      GROUP BY 1, 2
+      ORDER BY 1 DESC, 2
+    `);
+    res.json({ funnel: result.rows, weekly_breakdown: weekly.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
