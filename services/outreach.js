@@ -396,17 +396,23 @@ class OutreachEngine {
       }
 
       // Suppress queued sends to CPAs who have since claimed a profile.
+      // Uses a targeted approach: first get the small set of claimed emails,
+      // then update only matching queued rows. Avoids full-table scans.
       try {
-        const suppressed = await this.pool.query(`
-          UPDATE outreach_emails SET status = 'suppressed'
-          WHERE status = 'queued'
-            AND (
-              LOWER(recipient_email) IN (SELECT LOWER(COALESCE(enriched_email, email)) FROM scraped_cpas WHERE claim_status = 'claimed')
-              OR LOWER(recipient_email) IN (SELECT LOWER(email) FROM cpa_profiles)
-            )
+        const claimedEmails = await this.pool.query(`
+          SELECT LOWER(COALESCE(enriched_email, email)) AS email FROM scraped_cpas WHERE claim_status = 'claimed' AND COALESCE(enriched_email, email) IS NOT NULL
+          UNION
+          SELECT LOWER(email) FROM cpa_profiles WHERE email IS NOT NULL
         `);
-        if (suppressed.rowCount > 0) {
-          console.log(`[Outreach] Suppressed ${suppressed.rowCount} queued sends to claimed CPAs`);
+        if (claimedEmails.rows.length > 0) {
+          const emails = claimedEmails.rows.map(r => r.email);
+          const suppressed = await this.pool.query(
+            `UPDATE outreach_emails SET status = 'suppressed' WHERE status = 'queued' AND LOWER(recipient_email) = ANY($1)`,
+            [emails]
+          );
+          if (suppressed.rowCount > 0) {
+            console.log(`[Outreach] Suppressed ${suppressed.rowCount} queued sends to claimed CPAs`);
+          }
         }
       } catch (e) { console.error('[Outreach] Claims suppression check error:', e.message); }
 
