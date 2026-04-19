@@ -4371,6 +4371,8 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
       day, isWeekend, nowUTC, inWindowProvinces: inWindow,
       bounceCheck: { bounced, total: bounceTotal, wouldPause: bounceTotal >= 50 && bounced/bounceTotal > 0.15 },
       processing: outreachEngine.processing,
+      currentStep: outreachEngine._step || 'idle',
+      stepDurationMs: outreachEngine._stepTime ? Date.now() - outreachEngine._stepTime : 0,
       campaigns: campaignDiag
     });
   } catch (e) { res.status(500).json({ error: e.message }); }

@@ -386,6 +386,8 @@ class OutreachEngine {
     console.log(`[Outreach] Day ${day} (${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]}${isWeekend ? ' — weekend 50% limits' : ''}) — processing: ${sendTypes.join(', ')}`);
 
     this.processing = true;
+    this._step = 'starting';
+    this._stepTime = Date.now();
     // Safety timeout: release lock after 5 minutes to prevent indefinite hangs
     const processingTimeout = setTimeout(() => {
       if (this.processing) {
@@ -395,6 +397,7 @@ class OutreachEngine {
     }, 5 * 60 * 1000);
 
     try {
+      this._step = 'bounce_check'; this._stepTime = Date.now();
       // Bounce rate circuit breaker
       const bounceCheck = await this._checkBounceRate();
       if (bounceCheck.paused) {
@@ -402,6 +405,7 @@ class OutreachEngine {
         return;
       }
 
+      this._step = 'claims_suppression'; this._stepTime = Date.now();
       // Suppress queued sends to CPAs who have since claimed a profile.
       // Uses a targeted approach: first get the small set of claimed emails,
       // then update only matching queued rows. Avoids full-table scans.
@@ -423,6 +427,7 @@ class OutreachEngine {
         }
       } catch (e) { console.error('[Outreach] Claims suppression check error:', e.message); }
 
+      this._step = 'auto_relaunch'; this._stepTime = Date.now();
       // Auto-relaunch: reactivate campaigns matching today's send types
       // Never relaunch archived or superseded campaigns
       const stalled = await this.pool.query(
@@ -441,6 +446,7 @@ class OutreachEngine {
         console.log(`[Outreach] Auto-relaunched campaign ${camp.id} "${camp.name}" (was ${camp.status})`);
       }
 
+      this._step = 'campaign_query'; this._stepTime = Date.now();
       // Get active campaigns filtered by today's send types
       const campaigns = await this.pool.query(
         `SELECT * FROM outreach_campaigns WHERE status = 'active' AND COALESCE(send_type, 'cold') = ANY($1)`,
@@ -448,6 +454,7 @@ class OutreachEngine {
       );
 
       for (const campaign of campaigns.rows) {
+        this._step = `sending_C${campaign.id}_${campaign.name.substring(0,20)}`; this._stepTime = Date.now();
         // Count emails sent today for this campaign
         const todayCount = await this.pool.query(
           `SELECT COUNT(*) FROM outreach_emails WHERE campaign_id = $1 AND sent_at >= CURRENT_DATE`,
