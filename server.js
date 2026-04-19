@@ -3179,15 +3179,43 @@ app.post('/api/unsubscribe/:token', express.urlencoded({ extended: true }), asyn
 // =====================================================
 // CONTACT FORM ENDPOINT
 // =====================================================
+let _contactSubmissionsTableReady = false;
+async function ensureContactSubmissionsTable() {
+  if (_contactSubmissionsTableReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contact_submissions (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      phone VARCHAR(50),
+      company VARCHAR(255),
+      subject VARCHAR(500),
+      message TEXT NOT NULL,
+      source_page VARCHAR(255),
+      platform VARCHAR(20),
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  _contactSubmissionsTableReady = true;
+}
+
 app.post('/api/contact', async (req, res) => {
   try {
-    const { name, email, phone, company, subject, message } = req.body;
+    const { name, email, phone, company, subject, message, source_page } = req.body;
 
     if (!name || !email || !message) {
       return res.status(400).json({ error: 'Name, email, and message are required' });
     }
 
     console.log(`📧 Contact form submission from ${name} (${email})`);
+
+    // Store submission in database
+    await ensureContactSubmissionsTable();
+    await pool.query(
+      `INSERT INTO contact_submissions (name, email, phone, company, subject, message, source_page, platform)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [name, email, phone || null, company || null, subject || null, message, source_page || req.headers.referer || null, 'accountants']
+    );
 
     // Send emails (async, non-blocking)
     sendContactFormEmail({ name, email, phone, company, subject, message }).catch(err => {
