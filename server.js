@@ -7458,6 +7458,126 @@ app.get('/api/admin/leads/funnel', async (req, res) => {
   }
 });
 
+// Hook comparison: CAC vs AI Bio campaigns
+app.get('/api/admin/hook-comparison', async (req, res) => {
+  try {
+    const CAC_CAMPAIGNS = [9];
+    const BIO_CAMPAIGNS = [8, 3, 5, 1];
+
+    async function getCampaignMetrics(campaignIds, label) {
+      const stats = await pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced','unsubscribed')) AS sent,
+          COUNT(*) FILTER (WHERE status IN ('opened','clicked')) AS opened,
+          COUNT(*) FILTER (WHERE status = 'clicked') AS clicked,
+          COUNT(*) FILTER (WHERE status = 'unsubscribed') AS unsubscribed,
+          COUNT(*) FILTER (WHERE status = 'bounced') AS bounced
+        FROM outreach_emails
+        WHERE campaign_id = ANY($1)
+      `, [campaignIds]);
+
+      const claims = await pool.query(`
+        SELECT COUNT(DISTINCT oe.recipient_email) AS claimed
+        FROM outreach_emails oe
+        WHERE oe.campaign_id = ANY($1)
+          AND oe.status = 'clicked'
+          AND (
+            LOWER(oe.recipient_email) IN (SELECT LOWER(COALESCE(enriched_email, email)) FROM scraped_cpas WHERE claim_status = 'claimed')
+            OR LOWER(oe.recipient_email) IN (SELECT LOWER(email) FROM cpa_profiles)
+          )
+      `, [campaignIds]);
+
+      const s = stats.rows[0];
+      const sent = parseInt(s.sent);
+      const opened = parseInt(s.opened);
+      const clicked = parseInt(s.clicked);
+      const unsub = parseInt(s.unsubscribed);
+      const claimed = parseInt(claims.rows[0].claimed);
+
+      return {
+        label,
+        campaigns: campaignIds,
+        sent,
+        opened,
+        open_rate: sent > 0 ? (opened / sent * 100).toFixed(1) + '%' : '0%',
+        clicked,
+        click_rate: sent > 0 ? (clicked / sent * 100).toFixed(1) + '%' : '0%',
+        claimed,
+        click_to_claim_rate: clicked > 0 ? (claimed / clicked * 100).toFixed(1) + '%' : '0%',
+        unsubscribed: unsub,
+        unsub_rate: sent > 0 ? (unsub / sent * 100).toFixed(1) + '%' : '0%'
+      };
+    }
+
+    const cac = await getCampaignMetrics(CAC_CAMPAIGNS, 'CAC (financial argument)');
+    const bio = await getCampaignMetrics(BIO_CAMPAIGNS, 'AI Bio (profile/technology)');
+
+    res.json({
+      comparison_date: new Date().toISOString(),
+      cac_hook: cac,
+      bio_hook: bio,
+      verdict: parseFloat(cac.click_to_claim_rate) > parseFloat(bio.click_to_claim_rate)
+        ? 'CAC outperforming AI Bio on click-to-claim'
+        : parseFloat(cac.click_to_claim_rate) === parseFloat(bio.click_to_claim_rate)
+          ? 'Equal performance'
+          : 'AI Bio outperforming CAC on click-to-claim'
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Fresh contact pool estimate (read-only)
+app.get('/api/admin/fresh-pool-estimate', async (req, res) => {
+  try {
+    const fresh = await pool.query(`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE province = 'ON') AS ontario,
+             COUNT(*) FILTER (WHERE province = 'BC') AS bc,
+             COUNT(*) FILTER (WHERE province = 'AB') AS alberta,
+             COUNT(*) FILTER (WHERE province = 'QC') AS quebec
+      FROM scraped_cpas s
+      WHERE COALESCE(s.enriched_email, s.email) IS NOT NULL
+        AND s.status != 'invalid'
+        AND COALESCE(s.enriched_email, s.email) NOT IN (SELECT email FROM outreach_unsubscribes)
+        AND COALESCE(s.enriched_email, s.email) NOT IN (
+          SELECT DISTINCT recipient_email FROM outreach_emails
+        )
+    `);
+
+    let validated = { valid: 0, invalid: 0, unvalidated: 0 };
+    try {
+      const v = await pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE ev.status = 'valid') AS valid,
+          COUNT(*) FILTER (WHERE ev.status = 'invalid') AS invalid,
+          COUNT(*) FILTER (WHERE ev.status IS NULL) AS unvalidated
+        FROM scraped_cpas s
+        LEFT JOIN email_validations ev ON LOWER(ev.email) = LOWER(COALESCE(s.enriched_email, s.email))
+        WHERE COALESCE(s.enriched_email, s.email) IS NOT NULL
+          AND s.status != 'invalid'
+          AND COALESCE(s.enriched_email, s.email) NOT IN (SELECT email FROM outreach_unsubscribes)
+          AND COALESCE(s.enriched_email, s.email) NOT IN (
+            SELECT DISTINCT recipient_email FROM outreach_emails
+          )
+      `);
+      validated = { valid: parseInt(v.rows[0].valid), invalid: parseInt(v.rows[0].invalid), unvalidated: parseInt(v.rows[0].unvalidated) };
+    } catch (e) { /* email_validations may not exist */ }
+
+    res.json({
+      fresh_contacts: parseInt(fresh.rows[0].total),
+      by_province: {
+        ON: parseInt(fresh.rows[0].ontario),
+        BC: parseInt(fresh.rows[0].bc),
+        AB: parseInt(fresh.rows[0].alberta),
+        QC: parseInt(fresh.rows[0].quebec)
+      },
+      validation: validated,
+      ready_to_send: validated.valid,
+      needs_validation: validated.unvalidated,
+      note: 'Read-only estimate. Use /api/admin/cac-pool-load to actually queue contacts.'
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 404 catch-all
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
