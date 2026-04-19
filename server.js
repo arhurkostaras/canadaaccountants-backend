@@ -4376,6 +4376,13 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Reset stuck processing flag (if processQueue crashed without hitting finally block)
+app.post('/api/admin/reset-queue-lock', async (req, res) => {
+  const was = outreachEngine.processing;
+  outreachEngine.processing = false;
+  res.json({ was_locked: was, now: 'unlocked' });
+});
+
 // On-demand pipeline monitor — permanent endpoint so we never need temp diagnostics
 // for manual monitor fires again. Tech debt #7, closed 2026-04-13.
 // Trigger processQueue immediately (admin use)
