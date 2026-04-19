@@ -7520,7 +7520,14 @@ app.get('/api/admin/hook-comparison', async (req, res) => {
         ? 'CAC outperforming AI Bio on click-to-claim'
         : parseFloat(cac.click_to_claim_rate) === parseFloat(bio.click_to_claim_rate)
           ? 'Equal performance'
-          : 'AI Bio outperforming CAC on click-to-claim'
+          : 'AI Bio outperforming CAC on click-to-claim',
+      confidence: {
+        cac: (cac.sent >= 1000 && cac.clicked >= 50) ? 'HIGH' : 'LOW',
+        bio: (bio.sent >= 1000 && bio.clicked >= 50) ? 'HIGH' : 'LOW',
+        decision_ready: (cac.sent >= 1000 && cac.clicked >= 50 && bio.sent >= 1000 && bio.clicked >= 50) ? 'READY — act on these numbers' : 'WAIT — need more volume before deciding',
+        cac_needs: cac.sent < 1000 ? `${1000 - cac.sent} more sends` : cac.clicked < 50 ? `${50 - cac.clicked} more clicks` : 'sufficient',
+        bio_needs: bio.sent < 1000 ? `${1000 - bio.sent} more sends` : bio.clicked < 50 ? `${50 - bio.clicked} more clicks` : 'sufficient'
+      }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
