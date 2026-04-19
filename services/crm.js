@@ -915,23 +915,29 @@ class SequenceEngine {
       [this.platform, newStatus]
     );
 
-    // For "Engaged No-Claim" sequence: require an actual click event, not just an open.
+    // For "Engaged No-Claim" and "CAC Engaged No-Claim": require an actual click event, not just an open.
     // Open-only enrollments dilute the warmest cohort and waste sends on bot scanners.
     let hasClick = null; // lazy-checked
+    let clickedCampaignIds = null; // lazy-checked: campaign IDs this contact clicked from
+
+    // CAC campaign IDs per platform: ACC=9, INV=9, LAW=7
+    const cacCampaignIds = this.platform === 'lawyers' ? [7] : [9];
 
     for (const seq of sequences.rows) {
       try {
-        if (seq.name === 'Engaged No-Claim') {
+        if (seq.name === 'Engaged No-Claim' || seq.name === 'CAC Engaged No-Claim') {
+          // Lazy-load click data (shared between both sequences)
           if (hasClick === null) {
-            // Check both outreach_emails (LAW/ACC) and outreach_recipients (INV) for a clicked event
+            clickedCampaignIds = [];
             const recipientType = this._recipientType();
             const r1 = await this.db.query(
-              `SELECT 1 FROM outreach_emails WHERE recipient_id = $1 AND recipient_type = $2 AND status = 'clicked' LIMIT 1`,
+              `SELECT DISTINCT campaign_id FROM outreach_emails WHERE recipient_id = $1 AND recipient_type = $2 AND status = 'clicked'`,
               [professionalId, recipientType]
             ).catch(() => ({ rows: [] }));
-            if (r1.rows.length > 0) {
-              hasClick = true;
-            } else {
+            for (const row of r1.rows) {
+              if (row.campaign_id) clickedCampaignIds.push(row.campaign_id);
+            }
+            if (clickedCampaignIds.length === 0) {
               // Fall back to outreach_recipients (INV uses email-based join, not id)
               const profEmail = await this.db.query(
                 `SELECT COALESCE(enriched_email, email) as email FROM ${this.table} WHERE id = $1`,
@@ -939,18 +945,28 @@ class SequenceEngine {
               ).catch(() => ({ rows: [] }));
               if (profEmail.rows[0]?.email) {
                 const r2 = await this.db.query(
-                  `SELECT 1 FROM outreach_recipients WHERE email = $1 AND status = 'clicked' LIMIT 1`,
+                  `SELECT DISTINCT campaign_id FROM outreach_recipients WHERE email = $1 AND status = 'clicked'`,
                   [profEmail.rows[0].email]
                 ).catch(() => ({ rows: [] }));
-                hasClick = r2.rows.length > 0;
-              } else {
-                hasClick = false;
+                for (const row of r2.rows) {
+                  if (row.campaign_id) clickedCampaignIds.push(row.campaign_id);
+                }
               }
             }
+            hasClick = clickedCampaignIds.length > 0;
           }
           if (!hasClick) {
-            console.log(`[Sequences:${this.platform}] Skipping #${professionalId} for Engaged No-Claim — opened but no click`);
+            console.log(`[Sequences:${this.platform}] Skipping #${professionalId} for ${seq.name} — opened but no click`);
             continue;
+          }
+
+          // Route to correct sequence based on which campaign the click came from
+          const hasCacClick = clickedCampaignIds.some(id => cacCampaignIds.includes(id));
+          if (seq.name === 'CAC Engaged No-Claim' && !hasCacClick) {
+            continue; // Not a CAC clicker, skip CAC sequence
+          }
+          if (seq.name === 'Engaged No-Claim' && hasCacClick) {
+            continue; // CAC clicker goes to CAC sequence instead
           }
         }
 
@@ -1143,6 +1159,11 @@ class SequenceEngine {
       checkout_professional_url: recipientEmail ? `${checkoutBase}/professional${checkoutQuery}` : `${baseUrl}/pricing`,
       checkout_enterprise_url: recipientEmail ? `${checkoutBase}/enterprise${checkoutQuery}` : `${baseUrl}/pricing`,
       pricing_url: `${baseUrl}/pricing`,
+      // Featured professional for CAC Day 4 social proof (defaults to count if no permission yet)
+      featured_professional: 'Their profiles now appear in client search results with a verified badge.',
+      // TODO: Replace with named professional once permission is granted
+      // e.g., "Nicholas Hanna at Connor Clark & Lunn Private Capital claimed his profile on April 16."
+      profile_url: `${baseUrl}/profile?id=${professional.recipient_id || professional.id}`,
     };
   }
 

@@ -1118,6 +1118,75 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
       console.log('[CRM] Updated sequence: Engaged No-Claim (' + seqMap['Engaged No-Claim'].stepCount + ' → ' + engagedSteps.length + ' steps)');
     }
 
+    const cacEngagedSteps = [
+      {
+        delay_days: 1,
+        subject_line: 'You looked at the math. Here\'s what happens when you claim.',
+        body_template: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
+<p>Hi {{first_name}},</p>
+<p>You clicked through on the client acquisition cost email yesterday. That tells me you're thinking about practice economics, not just marketing.</p>
+<p>Here's what claiming your profile actually unlocks:</p>
+<ul style="margin:16px 0;">
+<li><strong>AI Bio Generator</strong> — creates a polished professional bio from your credentials in seconds</li>
+<li><strong>Profile SEO Score</strong> — shows how you rank and what to improve</li>
+<li><strong>Client Match Notifications</strong> — get notified when someone in your area submits a request</li>
+</ul>
+<p>Takes 30 seconds:</p>
+<p style="margin:20px 0;text-align:center;">
+  <a href="{{claim_url}}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Claim Your Profile &rarr;</a>
+</p>
+<p style="margin-top:24px;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
+</div>
+<p style="color:#999;font-size:11px;">CanadaAccountants | <a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+      },
+      {
+        delay_days: 4,
+        subject_line: '{{social_proof_short}} in {{province}} have already claimed',
+        body_template: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
+<p>Hi {{first_name}},</p>
+<p>{{social_proof_line}} have already claimed their profiles on CanadaAccountants.</p>
+<p>{{featured_professional}}</p>
+<p>Claimed profiles appear higher in search results, receive direct client match notifications, and carry a verified badge that clients look for when choosing a CPA.</p>
+<p>The difference between claimed and unclaimed is who controls what clients see when they search your name.</p>
+<p style="margin:20px 0;text-align:center;">
+  <a href="{{claim_url}}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Claim Your Profile &rarr;</a>
+</p>
+<p style="margin-top:24px;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
+</div>
+<p style="color:#999;font-size:11px;">CanadaAccountants | <a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+      },
+      {
+        delay_days: 7,
+        subject_line: '{{first_name}}, your profile is live whether you claim it or not',
+        body_template: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
+<p>Hi {{first_name}},</p>
+<p>This is my last note about your profile on CanadaAccountants.</p>
+<p>Your listing is public right now — built from your CPA directory registration. Anyone searching for a CPA in {{province}} can see it.</p>
+<p>The question isn't whether you want a profile. You already have one. The question is whether you want to control what it says.</p>
+<p>See what's currently public:</p>
+<p style="margin:20px 0;text-align:center;">
+  <a href="{{profile_url}}" style="display:inline-block;background:#333;color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">View My Current Profile &rarr;</a>
+</p>
+<p>If you want to update it, claim it, or remove it entirely, reply to this email. I handle every request personally.</p>
+<p style="margin-top:24px;">Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
+</div>
+<p style="color:#999;font-size:11px;">CanadaAccountants | <a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+      }
+    ];
+    if (!seqMap['CAC Engaged No-Claim']) {
+      await sequenceEngine.createSequence({
+        name: 'CAC Engaged No-Claim',
+        description: 'Follow-up for CAC campaign clickers who viewed the financial argument but did not claim. Reinforces ROI framing.',
+        triggerStatus: 'engaged',
+        steps: cacEngagedSteps,
+        active: true
+      });
+      console.log('[CRM] Seeded sequence: CAC Engaged No-Claim');
+    } else if (seqMap['CAC Engaged No-Claim'].stepCount !== cacEngagedSteps.length) {
+      await sequenceEngine.updateSequence(seqMap['CAC Engaged No-Claim'].id, { steps: cacEngagedSteps });
+      console.log('[CRM] Updated sequence: CAC Engaged No-Claim (' + seqMap['CAC Engaged No-Claim'].stepCount + ' → ' + cacEngagedSteps.length + ' steps)');
+    }
+
     const outreachSteps = [
           {
             delay_days: 0,
