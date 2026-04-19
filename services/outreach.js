@@ -386,6 +386,13 @@ class OutreachEngine {
     console.log(`[Outreach] Day ${day} (${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]}${isWeekend ? ' — weekend 50% limits' : ''}) — processing: ${sendTypes.join(', ')}`);
 
     this.processing = true;
+    // Safety timeout: release lock after 5 minutes to prevent indefinite hangs
+    const processingTimeout = setTimeout(() => {
+      if (this.processing) {
+        console.error('[Outreach] processQueue exceeded 5-minute timeout — releasing lock');
+        this.processing = false;
+      }
+    }, 5 * 60 * 1000);
 
     try {
       // Bounce rate circuit breaker
@@ -532,6 +539,7 @@ class OutreachEngine {
     } catch (error) {
       console.error('[Outreach] Queue processing error:', error.message);
     } finally {
+      clearTimeout(processingTimeout);
       this.processing = false;
     }
   }
