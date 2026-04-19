@@ -4324,6 +4324,58 @@ app.post('/api/claim/real-visit', async (req, res) => {
   }
 });
 
+// Queue diagnostic: simulates processQueue logic and reports what would happen
+app.get('/api/admin/queue-diagnostic', async (req, res) => {
+  try {
+    const now = new Date();
+    const day = now.getDay();
+    const isWeekend = (day === 0 || day === 6);
+    const nowUTC = now.getUTCHours();
+
+    // Inline province check
+    const PROV_TZ = { NL:14,NS:14,NB:14,PE:14,ON:15,QC:15,MB:16,SK:16,AB:17,BC:18 };
+    const inWindow = Object.entries(PROV_TZ).filter(([,h]) => nowUTC >= h-2 && nowUTC <= h+7).map(([p]) => p);
+
+    // Bounce check
+    const bounceResult = await pool.query(`SELECT COUNT(*) FILTER (WHERE status='bounced') AS bounced, COUNT(*) AS total FROM outreach_emails WHERE sent_at >= NOW() - INTERVAL '2 hours' AND status IN ('sent','delivered','opened','clicked','bounced','complained')`);
+    const bounced = parseInt(bounceResult.rows[0].bounced);
+    const bounceTotal = parseInt(bounceResult.rows[0].total);
+
+    // Active campaigns matching sendTypes
+    const campaigns = await pool.query(`SELECT id, name, type, send_type, daily_limit, status FROM outreach_campaigns WHERE status = 'active' AND COALESCE(send_type, 'cold') = ANY($1)`, [['cold','warm']]);
+
+    const campaignDiag = [];
+    for (const c of campaigns.rows) {
+      const effectiveLimit = isWeekend ? Math.ceil(c.daily_limit / 2) : c.daily_limit;
+      const todayCount = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE campaign_id = $1 AND sent_at >= CURRENT_DATE`, [c.id]);
+      const sentToday = parseInt(todayCount.rows[0].count);
+
+      let queuedCount = 0;
+      if (c.type === 'cpa') {
+        const q = await pool.query(`SELECT COUNT(*) FROM outreach_emails oe LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND oe.recipient_type = 'cpa' AND (sc.province IS NULL OR sc.province = ANY($2::text[]))`, [c.id, inWindow]);
+        queuedCount = parseInt(q.rows[0].count);
+      } else if (c.type === 'sme') {
+        const q = await pool.query(`SELECT COUNT(*) FROM outreach_emails oe LEFT JOIN scraped_smes ss ON ss.id = oe.recipient_id WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND oe.recipient_type = 'sme' AND (ss.province IS NULL OR ss.province = ANY($2::text[]))`, [c.id, inWindow]);
+        queuedCount = parseInt(q.rows[0].count);
+      }
+
+      campaignDiag.push({
+        id: c.id, name: c.name, type: c.type, send_type: c.send_type,
+        daily_limit: c.daily_limit, effective_limit: effectiveLimit,
+        sent_today: sentToday, at_limit: sentToday >= effectiveLimit,
+        queued_in_window: queuedCount
+      });
+    }
+
+    res.json({
+      day, isWeekend, nowUTC, inWindowProvinces: inWindow,
+      bounceCheck: { bounced, total: bounceTotal, wouldPause: bounceTotal >= 50 && bounced/bounceTotal > 0.15 },
+      processing: outreachEngine.processing,
+      campaigns: campaignDiag
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // On-demand pipeline monitor — permanent endpoint so we never need temp diagnostics
 // for manual monitor fires again. Tech debt #7, closed 2026-04-13.
 // Trigger processQueue immediately (admin use)
