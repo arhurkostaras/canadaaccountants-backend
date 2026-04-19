@@ -362,7 +362,7 @@ class OutreachEngine {
         await this.pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS send_day_type VARCHAR(7)`);
         await this.pool.query(`UPDATE outreach_campaigns SET send_type = 'warm' WHERE (send_type IS NULL OR send_type = 'cold') AND name ILIKE '%re-engagement%'`);
         this._sendTypeMigrated = true;
-      } catch (e) { /* ignore */ }
+      } catch (e) { console.error('[Outreach] send_type migration error:', e.message); }
     }
 
     // Cold/warm send day split schedule
@@ -676,7 +676,7 @@ class OutreachEngine {
 
           await new Promise(r => setTimeout(r, 500)); // Rate limit polling
         } catch (err) {
-          // Skip individual email errors
+          console.error(`[Outreach] Status poll error for ${email.resend_email_id}:`, err.message);
         }
       }
 
@@ -803,7 +803,7 @@ class OutreachEngine {
             // Not in this province's send window — skip, will retry next cycle
             return;
           }
-        } catch (e) { /* proceed if lookup fails */ }
+        } catch (e) { console.error('[Outreach] Province lookup failed, proceeding with send:', e.message); }
       }
 
       // ZeroBounce email validation (if API key configured)
@@ -854,14 +854,14 @@ class OutreachEngine {
         await this.pool.query(
           `UPDATE outreach_emails SET unsubscribe_token = $2 WHERE id = $1`,
           [emailRecord.id, unsubToken]
-        ).catch(() => {});
+        ).catch((e) => { console.error('[Outreach] Failed to store unsubscribe token:', e.message); });
 
         // CASL compliance: track first contact timestamp for 2-year expiry
         if (emailRecord.recipient_type === 'cpa' && emailRecord.recipient_id) {
           await this.pool.query(
             `UPDATE scraped_cpas SET first_contacted_at = NOW() WHERE id = $1 AND first_contacted_at IS NULL`,
             [emailRecord.recipient_id]
-          ).catch(() => {});
+          ).catch((e) => { console.error('[Outreach] Failed to set first_contacted_at:', e.message); });
         }
       } else {
         // Increment retry count; mark as 'failed' after 5 attempts
@@ -917,7 +917,7 @@ class OutreachEngine {
            ON CONFLICT (email) DO UPDATE SET status = 'do_not_mail', sub_status = 'role_based_pre_filter', validated_at = NOW()`,
           [email]
         );
-      } catch (e) { /* cache save non-critical */ }
+      } catch (e) { console.error('[Outreach] ZB cache save failed (non-critical):', e.message); }
       return { valid: false, status: 'do_not_mail', sub_status: 'role_based_pre_filter' };
     }
 
@@ -1181,7 +1181,7 @@ class OutreachEngine {
     try {
       const totalCpas = await this.pool.query('SELECT COUNT(*) FROM scraped_cpas');
       totalCpasCount = parseInt(totalCpas.rows[0].count).toLocaleString('en-CA');
-    } catch (e) { /* fallback */ }
+    } catch (e) { console.error('[Outreach] Failed to fetch CPA count for template, using fallback:', e.message); }
 
     const sampleVars = campaign.type === 'cpa'
       ? { cpa_name: 'Jane Smith', city: 'Vancouver', province: 'BC', firm_name: 'Smith & Associates', firm_name_line: ' (listed under Smith & Associates)', sme_count: '1,247', total_cpas: totalCpasCount, active_requests: '38' }
@@ -1341,7 +1341,7 @@ class OutreachEngine {
     await this.pool.query(
       `UPDATE outreach_emails SET status = 'unsubscribed' WHERE recipient_email = $1 AND status != 'unsubscribed'`,
       [info.email]
-    ).catch(() => {});
+    ).catch((e) => { console.error('[Outreach] Failed to update outreach_emails on unsubscribe:', e.message); });
     return true;
   }
 
@@ -1462,7 +1462,7 @@ class OutreachEngine {
 
         await new Promise(r => setTimeout(r, 200));
       } catch (err) {
-        // Skip individual errors
+        console.error(`[Outreach] Reconciliation error for email ${email.id}:`, err.message);
       }
     }
 

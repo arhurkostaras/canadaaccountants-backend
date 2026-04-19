@@ -781,7 +781,7 @@ const crmIntelligence = new CRMIntelligence({
           AND status = 'failed'
       `);
       if (result.rowCount > 0) console.log(`[DB] Re-enabled ${result.rowCount} role-based emails in demand-side campaigns`);
-    } catch (e) { /* ignore */ }
+    } catch (e) { console.error('[DB] Role-based email re-enable error:', e.message); }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS search_events (
         id SERIAL PRIMARY KEY,
@@ -1454,13 +1454,13 @@ app.post('/api/match-cpas', async (req, res) => {
     pool.query(
       `INSERT INTO search_events (platform, city, province, specialty, session_id) VALUES ($1, $2, $3, $4, $5)`,
       ['accountants', searchCity || null, searchProvince || null, searchSpec || null, req.headers['x-session-id'] || null]
-    ).catch(() => {});
+    ).catch(() => {}); // non-critical, fire-and-forget
 
     // Run 6-factor matching algorithm
     const matches = await runCPAMatchingAlgorithm(clientResult.rows[0]);
 
     // Update matched count on client profile
-    pool.query(`UPDATE client_profiles SET total_matches = $1 WHERE id = $2`, [matches.length, clientResult.rows[0].id]).catch(() => {});
+    pool.query(`UPDATE client_profiles SET total_matches = $1 WHERE id = $2`, [matches.length, clientResult.rows[0].id]).catch(() => {}); // non-critical, fire-and-forget
 
     // Format response (preserve existing response shape for frontend compat)
     const scoredMatches = matches.map(m => ({
@@ -1609,7 +1609,7 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
     pool.query(
       `INSERT INTO search_events (platform, city, province, specialty, session_id) VALUES ($1, $2, $3, $4, $5)`,
       ['accountants', ci.city || null, ci.province || null, frictionRequest.painPoint || (frictionRequest.servicesNeeded || [])[0] || null, req.headers['x-session-id'] || null]
-    ).catch(() => {});
+    ).catch(() => {}); // non-critical, fire-and-forget
 
     // Generate CPA matches based on friction points
     const cpaMatches = await generateFrictionBasedMatches(frictionRequest, frictionScore);
@@ -2953,7 +2953,7 @@ app.post('/api/admin/tag-sme-prospects', async (req, res) => {
           [r.recipient_id, r.recipient_email]
         );
         tagged++;
-      } catch (e) { /* skip */ }
+      } catch (e) { console.error('[CRM] Failed to tag SME record:', e.message); }
     }
 
     res.json({ success: true, tagged, total_clicked: result.rows.length });
@@ -3003,7 +3003,7 @@ app.post('/api/admin/zerobounce-purge', async (req, res) => {
               triggeredBy: 'zerobounce_purge',
               metadata: { zb_status: result.status, zb_sub_status: result.sub_status }
             });
-          } catch (e) { /* transition may not be valid from current state */ }
+          } catch (e) { console.error(`[ZB-Purge] CRM transition to validated failed for ${row.email}:`, e.message); }
         } else if (!result.valid) {
           invalid++;
           try {
@@ -3011,7 +3011,7 @@ app.post('/api/admin/zerobounce-purge', async (req, res) => {
               triggeredBy: 'zerobounce_purge',
               metadata: { zb_status: result.status, zb_sub_status: result.sub_status }
             });
-          } catch (e) { /* transition may not be valid from current state */ }
+          } catch (e) { console.error(`[ZB-Purge] CRM transition to invalid failed for ${row.email}:`, e.message); }
         }
 
         await new Promise(r => setTimeout(r, 500));
@@ -4304,8 +4304,8 @@ app.post('/api/stripe/create-portal-session', authenticateToken, async (req, res
 // =====================================================
 
 // Add is_bot_click column if it doesn't exist
-pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS is_bot_click BOOLEAN DEFAULT false`).catch(() => {});
-pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS real_visit_at TIMESTAMPTZ`).catch(() => {});
+pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS is_bot_click BOOLEAN DEFAULT false`).catch(() => {}); // non-critical, fire-and-forget
+pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS real_visit_at TIMESTAMPTZ`).catch(() => {}); // non-critical, fire-and-forget
 
 // POST /api/claim/real-visit — called by claim page JS to record a real human visit
 app.post('/api/claim/real-visit', async (req, res) => {
@@ -4436,6 +4436,7 @@ app.post('/api/admin/direct-send', async (req, res) => {
         }
         await new Promise(r => setTimeout(r, 2000));
       } catch (e) {
+        console.error(`[DirectSend] Error sending email ${emailRow.id}:`, e.message);
         failed++;
         await pool.query(`UPDATE outreach_emails SET status = 'failed' WHERE id = $1`, [emailRow.id]).catch(() => {});
       }
@@ -4691,7 +4692,7 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
         claim_status: 'unclaimed',
         subscription_tier: null,
       });
-    } catch (e) { /* non-critical */ }
+    } catch (e) { console.error('[Claim] SEO score calculation error (non-critical):', e.message); }
 
     res.json({
       name: p.full_name || `${p.first_name || ''} ${p.last_name || ''}`.trim(),
@@ -5260,7 +5261,7 @@ app.get('/api/profiles/:id', async (req, res) => {
       try {
         bio = await generateBio({ ...p, first_name: firstName, last_name: lastName }, 'accountants');
         // Persist for future requests (fire and forget)
-        pool.query('UPDATE scraped_cpas SET generated_bio = $1 WHERE id = $2', [bio, p.id]).catch(() => {});
+        pool.query('UPDATE scraped_cpas SET generated_bio = $1 WHERE id = $2', [bio, p.id]).catch(() => {}); // non-critical, fire-and-forget
       } catch (bioErr) {
         console.error(`[Profile] Bio generation failed for id=${p.id}:`, bioErr.message);
         bio = null;
@@ -5342,7 +5343,7 @@ app.get('/api/profiles/:id', async (req, res) => {
     pool.query(
       'INSERT INTO profile_visits (profile_id, visitor_ip) VALUES ($1, $2)',
       [p.id, visitorIp]
-    ).catch(() => {});
+    ).catch(() => {}); // non-critical, fire-and-forget
   } catch (err) {
     console.error('[Profile] Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -6060,8 +6061,8 @@ app.post('/api/admin/purge-bounces', async (req, res) => {
           [email]
         );
         suppressed++;
-      } catch (e) {}
-      
+      } catch (e) { console.error('[BounceHandler] Failed to add to suppression list:', e.message); }
+
       // 3. Dequeue from active queues + decrement campaign counters
       const dq = await pool.query(
         `WITH dequeued AS (
@@ -6083,9 +6084,9 @@ app.post('/api/admin/purge-bounces', async (req, res) => {
           [email]
         );
         invalidated += dq.rowCount > 0 ? 1 : 0;
-      } catch (e) {}
+      } catch (e) { console.error('[BounceHandler] Failed to mark profile as invalid:', e.message); }
     }
-    
+
     res.json({ success: true, totalBounced: bounced.rows.length, suppressed, dequeued, invalidated });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -7348,7 +7349,7 @@ async function runPipelineMonitor(label) {
     } else if (digest?.lastRun) {
       digestInfo = `<div style="margin:12px 0;padding:12px 16px;background:#f0fdf4;border-radius:6px;font-size:13px;color:#166534;">Last digest: ${digest.sent}/${digest.total} sent (${new Date(digest.lastRun).toLocaleString('en-US', { timeZone: 'America/Toronto' })})</div>`;
     }
-  } catch { /* skip */ }
+  } catch (e) { console.error('[Monitor] Failed to fetch digest status:', e.message); }
 
   const alertsHtml = alerts.length > 0
     ? `<div style="margin:16px 0;padding:12px 16px;background:#fef2f2;border-left:4px solid #dc2626;border-radius:0 6px 6px 0;"><strong style="color:#991b1b;">Alerts:</strong><ul style="margin:8px 0 0;padding-left:20px;color:#991b1b;font-size:13px;">${alerts.map(a => `<li>${a}</li>`).join('')}</ul></div>`
