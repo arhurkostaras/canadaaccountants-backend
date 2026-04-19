@@ -1203,6 +1203,23 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
           },
           {
+            delay_days: 2,
+            subject_line: '{{first_name}}, checking in on your profile',
+            body_template: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#222;line-height:1.65;font-size:15px;">
+<p>Hi {{first_name}},</p>
+<p>Quick check-in. You claimed your CanadaAccountants profile a couple of days ago and I wanted to make sure everything looks right.</p>
+<p>One question: what would make upgrading to the Professional tier worth it for you? Is it more client visibility? Match notifications? Something else entirely?</p>
+<p>I ask because the platform is still early and the founding members' feedback directly shapes what we build next. Your answer matters more than you'd think.</p>
+<p>If you're ready to upgrade now, it takes 30 seconds:</p>
+<p style="margin:20px 0;text-align:center;">
+  <a href="{{checkout_professional_url}}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Upgrade to Professional — $299/mo</a>
+</p>
+<p>Either way, reply to this email. I read every one.</p>
+<p style="margin-top:24px;">Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
+</div>
+<p style="color:#999;font-size:11px;">{{platform_name}} | <a href="{{unsubscribe_url}}">Unsubscribe</a></p>`
+          },
+          {
             delay_days: 3,
             subject_line: 'Maximize your visibility on CanadaAccountants',
             body_template: `<p>Hi {{first_name}},</p>
