@@ -513,29 +513,13 @@ class OutreachEngine {
           );
         }
       }
-      // Auto-relaunch: check completed AND active campaigns for newly enriched CPAs
-      // Active campaigns may have hit the daily limit but still need new recipients queued
-      const relaunchCampaigns = await this.pool.query(
-        `SELECT * FROM outreach_campaigns WHERE status IN ('completed', 'active')`
-      );
-
-      for (const campaign of relaunchCampaigns.rows) {
-        const newEmails = await this._countNewRecipientsForCampaign(campaign);
-        if (newEmails > 0) {
-          const queued = await this._queueEmailsForCampaign(campaign);
-          if (queued > 0) {
-            await this.pool.query(
-              `UPDATE outreach_campaigns SET status = 'active', total_queued = total_queued + $2, completed_at = NULL, updated_at = NOW() WHERE id = $1`,
-              [campaign.id, queued]
-            );
-            console.log(`[Outreach] Auto-queued ${queued} new emails for campaign ${campaign.id} "${campaign.name}"`);
-          }
-        }
-      }
-      // Queue follow-up emails for drip sequences
-      await this._queueFollowUps();
-      // Poll Resend for delivery status of recently sent emails
-      await this._pollEmailStatuses();
+      // Auto-requeue and follow-up/polling disabled 2026-04-19 to fix processQueue hang.
+      // These heavy operations (_queueEmailsForCampaign does full-table scans,
+      // _pollEmailStatuses makes external API calls) were causing the queue to hang
+      // with processing=true for 5+ minutes, blocking all sends on ACC/LAW.
+      // TODO: re-enable after adding query optimizations and timeouts.
+      // await this._queueFollowUps();
+      // await this._pollEmailStatuses();
     } catch (error) {
       console.error('[Outreach] Queue processing error:', error.message);
     } finally {
