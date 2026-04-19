@@ -4377,6 +4377,73 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
 });
 
 // Reset stuck processing flag (if processQueue crashed without hitting finally block)
+// Direct batch send: bypasses processQueue, sends N emails from a specific campaign.
+// Used when processQueue is hanging. Respects province window + daily limits.
+app.post('/api/admin/direct-send', async (req, res) => {
+  try {
+    const campaignId = parseInt(req.query.campaign) || 9;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const dryRun = req.query.execute !== 'true';
+
+    // Get campaign
+    const campResult = await pool.query('SELECT * FROM outreach_campaigns WHERE id = $1', [campaignId]);
+    if (campResult.rows.length === 0) return res.status(404).json({ error: 'Campaign not found' });
+    const campaign = campResult.rows[0];
+    const template = campaign.body_template || campaign.template;
+    const subjectTemplate = campaign.subject_template || campaign.subject;
+    if (!template) return res.status(400).json({ error: 'Campaign has no template' });
+
+    // Province window
+    const nowUTC = new Date().getUTCHours();
+    const PROV = { NL:14,NS:14,NB:14,PE:14,ON:15,QC:15,MB:16,SK:16,AB:17,BC:18 };
+    const inWindow = Object.entries(PROV).filter(([,h]) => nowUTC >= h-2 && nowUTC <= h+7).map(([p]) => p);
+
+    // Get queued emails in window
+    const emails = await pool.query(`
+      SELECT oe.* FROM outreach_emails oe
+      LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
+      WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND oe.recipient_type = 'cpa'
+        AND (sc.province IS NULL OR sc.province = ANY($3::text[]))
+      ORDER BY oe.queued_at ASC LIMIT $2
+    `, [campaignId, limit, inWindow]);
+
+    if (dryRun) {
+      return res.json({ mode: 'DRY RUN', campaign: campaign.name, available: emails.rows.length, limit, inWindow, execute_with: '?execute=true&campaign=' + campaignId + '&limit=' + limit });
+    }
+
+    // Send
+    res.json({ mode: 'EXECUTING', campaign: campaign.name, batch_size: emails.rows.length, status: 'Sending in background' });
+
+    let sent = 0, failed = 0;
+    for (const emailRow of emails.rows) {
+      try {
+        const name = emailRow.recipient_name || 'there';
+        const firstName = name.split(/[\s,]+/)[0];
+        const subject = (subjectTemplate || '').replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
+
+        const unsubUrl = `${process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app'}/api/unsubscribe/${emailRow.unsubscribe_token}`;
+        let html = template.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl).replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
+
+        const result = await sendEmail({ to: emailRow.recipient_email, subject, html, from: process.env.FROM_EMAIL });
+        if (result && result.success) {
+          await pool.query(`UPDATE outreach_emails SET status = 'sent', sent_at = NOW(), resend_email_id = $2, send_day_type = 'weekend', rendered_subject = $3 WHERE id = $1`, [emailRow.id, result.id, subject]);
+          sent++;
+        } else {
+          await pool.query(`UPDATE outreach_emails SET status = 'failed' WHERE id = $1`, [emailRow.id]);
+          failed++;
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      } catch (e) {
+        failed++;
+        await pool.query(`UPDATE outreach_emails SET status = 'failed' WHERE id = $1`, [emailRow.id]).catch(() => {});
+      }
+    }
+    console.log(`[DirectSend] C${campaignId}: sent=${sent} failed=${failed}`);
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
+});
+
 // Force-send: bypass processQueue, directly send ONE queued email from C9
 app.post('/api/admin/force-send-one', async (req, res) => {
   try {
