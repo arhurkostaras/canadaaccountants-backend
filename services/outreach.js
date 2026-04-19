@@ -843,7 +843,7 @@ class OutreachEngine {
       });
 
       if (result.success) {
-        const dayType = isWeekend ? 'weekend' : 'weekday';
+        const dayType = (new Date().getDay() === 0 || new Date().getDay() === 6) ? 'weekend' : 'weekday';
         await this._setEmailStatus(emailRecord.id, 'sent', 'sent_at = NOW(), resend_email_id = $3, rendered_subject = $4, rendered_body = $5, send_day_type = $6', [result.id, subject, body, dayType]);
         await this.pool.query(
           `UPDATE outreach_campaigns SET total_sent = total_sent + 1, updated_at = NOW() WHERE id = $1`,
