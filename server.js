@@ -4921,6 +4921,17 @@ app.post('/api/claim/instant', async (req, res) => {
       console.error('[Claim] Profile creation error (non-fatal):', profileErr.message);
     }
 
+    // Auto-enroll in Post-Claim Welcome sequence
+    try {
+      const seqs = await pool.query(`SELECT id FROM crm_sequences WHERE name = 'Post-Claim Welcome' AND platform = $1 AND active = true`, ['accountants']);
+      if (seqs.rows.length > 0) {
+        await sequenceEngine.enroll(recipient_id, seqs.rows[0].id);
+        console.log(`[Claim] Auto-enrolled #${recipient_id} in Post-Claim Welcome`);
+      }
+    } catch (enrollErr) {
+      console.error('[Claim] Auto-enrollment error:', enrollErr.message);
+    }
+
     // Track conversion
     outreachEngine.trackConversion(email, userId, refToken).catch(err => {
       console.error('[Claim] trackConversion error:', err.message);
@@ -7582,6 +7593,42 @@ app.get('/api/admin/fresh-pool-estimate', async (req, res) => {
       needs_validation: validated.unvalidated,
       note: 'Read-only estimate. Use /api/admin/cac-pool-load to actually queue contacts.'
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual CRM enrollment for professionals who claimed before sequences were deployed
+app.post('/api/admin/crm-enroll', async (req, res) => {
+  try {
+    const { professionalId, sequenceId } = req.query;
+    if (!professionalId || !sequenceId) return res.status(400).json({ error: 'professionalId and sequenceId required' });
+    const startStep = parseInt(req.query.startStep) || 0;
+    await sequenceEngine.enroll(parseInt(professionalId), parseInt(sequenceId));
+    if (startStep > 0) {
+      const seq = await pool.query('SELECT steps FROM crm_sequences WHERE id = $1', [parseInt(sequenceId)]);
+      const steps = typeof seq.rows[0].steps === 'string' ? JSON.parse(seq.rows[0].steps) : seq.rows[0].steps;
+      const targetStep = steps[startStep];
+      const nextSend = new Date();
+      nextSend.setDate(nextSend.getDate() + (targetStep?.delay_days || 1));
+      await pool.query(
+        `UPDATE crm_sequence_enrollments SET current_step = $1, next_send_at = $2
+         WHERE professional_id = $3 AND sequence_id = $4 AND platform = 'accountants'`,
+        [startStep, nextSend, parseInt(professionalId), parseInt(sequenceId)]
+      );
+    }
+    const row = await pool.query(`SELECT * FROM crm_sequence_enrollments WHERE professional_id = $1 AND sequence_id = $2 AND platform = 'accountants'`, [parseInt(professionalId), parseInt(sequenceId)]);
+    res.json({ success: true, enrollment: row.rows[0] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// CRM sequence diagnostic — check enrollment + send status
+app.get('/api/admin/crm-diagnostic', async (req, res) => {
+  try {
+    const sequences = await pool.query(`SELECT id, name, trigger_status, active, (SELECT COUNT(*) FROM crm_sequence_enrollments e WHERE e.sequence_id = s.id AND e.completed_at IS NULL) AS active_enrollments, (SELECT COUNT(*) FROM crm_sequence_enrollments e WHERE e.sequence_id = s.id) AS total_enrollments FROM crm_sequences s WHERE platform = 'accountants' ORDER BY id`);
+    const recentSends = await pool.query(`SELECT se.sequence_id, s.name, se.step_index, se.sent_at, se.recipient_email FROM crm_sequence_sends se JOIN crm_sequences s ON s.id = se.sequence_id WHERE se.sent_at > NOW() - INTERVAL '48 hours' ORDER BY se.sent_at DESC LIMIT 20`).catch(() => ({ rows: [] }));
+    const enrollments = await pool.query(`SELECT e.id, e.professional_id, e.sequence_id, s.name, e.current_step, e.next_send_at, e.enrolled_at, e.completed_at FROM crm_sequence_enrollments e JOIN crm_sequences s ON s.id = e.sequence_id WHERE e.completed_at IS NULL ORDER BY e.enrolled_at DESC LIMIT 20`).catch(() => ({ rows: [] }));
+    res.json({ sequences: sequences.rows, recent_sends: recentSends.rows, active_enrollments: enrollments.rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
