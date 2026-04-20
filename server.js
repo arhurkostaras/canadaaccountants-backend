@@ -5524,6 +5524,39 @@ const PROVINCE_MAP = {
   NL: 'Newfoundland and Labrador', PE: 'Prince Edward Island'
 };
 
+app.get('/api/directory/city/:city', async (req, res) => {
+  try {
+    const city = req.params.city;
+    const limit = Math.min(parseInt(req.query.limit) || 10, 20);
+
+    const [professionalsResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
+                LEFT(generated_bio, 160) AS bio_snippet, claim_status
+         FROM scraped_cpas
+         WHERE city ILIKE $1
+         ORDER BY claim_status DESC NULLS LAST, full_name ASC
+         LIMIT $2`,
+        [`%${city}%`, limit]
+      ),
+      pool.query(
+        'SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1',
+        [`%${city}%`]
+      )
+    ]);
+
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({
+      city,
+      total: parseInt(countResult.rows[0].count),
+      professionals: professionalsResult.rows
+    });
+  } catch (err) {
+    console.error('Directory city error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.get('/api/directory/:province', async (req, res) => {
   try {
     const provinceCode = req.params.province.toUpperCase();
