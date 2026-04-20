@@ -520,13 +520,10 @@ class OutreachEngine {
           );
         }
       }
-      // Auto-requeue and follow-up/polling disabled 2026-04-19 to fix processQueue hang.
-      // These heavy operations (_queueEmailsForCampaign does full-table scans,
-      // _pollEmailStatuses makes external API calls) were causing the queue to hang
-      // with processing=true for 5+ minutes, blocking all sends on ACC/LAW.
-      // TODO: re-enable after adding query optimizations and timeouts.
-      // await this._queueFollowUps();
-      // await this._pollEmailStatuses();
+      // Re-enabled 2026-04-20. The processQueue hang was caused by
+      // the isWeekend ReferenceError in _sendOutreachEmail, not by these operations.
+      await this._queueFollowUps();
+      await this._pollEmailStatuses();
     } catch (error) {
       console.error('[Outreach] Queue processing error:', error.message);
     } finally {
