@@ -83,9 +83,12 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         const userId = session.metadata?.userId;
         const tier = session.metadata?.tier || planType;
         if (cpaProfileId && session.subscription) {
+          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(() => {});
           await pool.query(
-            `UPDATE cpa_subscriptions SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', current_period_start = NOW(), updated_at = NOW() WHERE cpa_profile_id = $3`,
-            [session.subscription, session.customer, cpaProfileId]
+            `INSERT INTO cpa_subscriptions (cpa_profile_id, plan_type, status, stripe_subscription_id, stripe_customer_id, current_period_start)
+             VALUES ($3, $4, 'active', $1, $2, NOW())
+             ON CONFLICT (cpa_profile_id) DO UPDATE SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', plan_type = $4, current_period_start = NOW(), updated_at = NOW()`,
+            [session.subscription, session.customer, cpaProfileId, tier || 'professional']
           );
         }
         // Update users table with subscription info for upgrade gate
