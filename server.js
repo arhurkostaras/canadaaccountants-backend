@@ -4260,6 +4260,7 @@ app.get('/api/outreach/health', async (req, res) => {
     `).catch(() => ({ rows: [{ count: 0 }] }));
     const outreachConv = await pool.query(`SELECT COALESCE(SUM(total_converted), 0) AS conv FROM outreach_campaigns`).catch(() => ({ rows: [{ conv: 0 }] }));
     const paidSubs = await pool.query(`SELECT COUNT(*) FROM cpa_subscriptions WHERE status = 'active'`).catch(() => ({ rows: [{ count: 0 }] }));
+    const revQuery = await pool.query(`SELECT COALESCE(SUM(CASE WHEN plan_type = 'enterprise' THEN 599 WHEN plan_type = 'professional' THEN 299 WHEN plan_type = 'associate' THEN 199 ELSE 0 END), 0) AS mrr FROM cpa_subscriptions WHERE status = 'active' AND plan_type != 'free'`).catch(() => ({ rows: [{ mrr: 0 }] }));
     const demandClients = await pool.query(`SELECT COUNT(*) FROM client_profiles`).catch(() => ({ rows: [{ count: 0 }] }));
     const demandContact = await pool.query(`SELECT COUNT(*) FROM contact_submissions`).catch(() => ({ rows: [{ count: 0 }] }));
     const matchedLeads = await pool.query(`SELECT COUNT(*) FROM friction_matches`).catch(() => ({ rows: [{ count: 0 }] }));
@@ -4273,6 +4274,7 @@ app.get('/api/outreach/health', async (req, res) => {
       total_claimed: parseInt(claims.rows[0].count),
       outreach_converted: parseInt(outreachConv.rows[0].conv),
       paid_subscribers: parseInt(paidSubs.rows[0].count),
+      monthly_revenue: parseInt(revQuery.rows[0].mrr),
       demand_submissions: parseInt(demandClients.rows[0].count) + parseInt(demandContact.rows[0].count),
       matched_leads: parseInt(matchedLeads.rows[0].count),
       contacts_7d: parseInt(contacts7d.rows[0].count),
@@ -7806,7 +7808,7 @@ async function runPipelineMonitor(label) {
   let totalSent = 0, totalQueued = 0, totalConv = 0;
   let claimsParts = [];
   let totalClaimed = 0, totalOutreachConv = 0;
-  let totalPaid = 0, totalDemand = 0, totalMatched = 0, totalContacts7d = 0;
+  let totalPaid = 0, totalMRR = 0, totalDemand = 0, totalMatched = 0, totalContacts7d = 0;
   const alerts = [];
 
   for (const backend of MONITOR_BACKENDS) {
@@ -7829,6 +7831,7 @@ async function runPipelineMonitor(label) {
       totalClaimed += claimed;
       claimsParts.push(`${backend.name} ${claimed}`);
       totalPaid += health?.paid_subscribers || 0;
+      totalMRR += health?.monthly_revenue || 0;
       totalDemand += health?.demand_submissions || 0;
       totalMatched += health?.matched_leads || 0;
       totalContacts7d += health?.contacts_7d || 0;
@@ -7894,7 +7897,7 @@ async function runPipelineMonitor(label) {
         <strong>Claims:</strong> ${claimsParts.join(' | ')} | Total ${totalClaimed} (${totalConv} outreach-attributed, ${Math.max(0, totalClaimed - totalConv)} direct)
       </div>
       <div style="margin:0 0 16px;padding:14px 16px;background:#eff6ff;border-left:4px solid #2563eb;border-radius:0 6px 6px 0;font-size:14px;color:#1e40af;">
-        <strong>Revenue:</strong> ${totalPaid} paid | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d) | $0 MTD
+        <strong>Revenue:</strong> ${totalPaid} paid | $${totalMRR} MRR | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d)
       </div>
       ${digestInfo}
       ${alertsHtml}
