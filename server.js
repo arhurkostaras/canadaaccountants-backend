@@ -7862,12 +7862,15 @@ cron.schedule('5 10 * * 1-5', () => runPipelineMonitor('10:05 AM').catch(e => co
 cron.schedule('5 11 * * 1-5', () => runPipelineMonitor('11:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 cron.schedule('5 14 * * 1-5', () => runPipelineMonitor('2:05 PM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 
+// 3 PM daily (every day including weekends)
+cron.schedule('0 15 * * *', () => runPipelineMonitor('3 PM ET').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+
 // Weekend monitors: 10am, 1pm, 4pm Sat+Sun
 cron.schedule('0 10 * * 0,6', () => runPipelineMonitor('10 AM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 cron.schedule('0 13 * * 0,6', () => runPipelineMonitor('1 PM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 cron.schedule('0 16 * * 0,6', () => runPipelineMonitor('4 PM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
 
-console.log('[Monitor] Pipeline monitor scheduled: 9:05/9:30/10:05/11:05/14:05 Mon-Fri + 15:00 daily');
+console.log('[Monitor] Pipeline monitor scheduled: 9:05/9:30/10:05/11:05/14:05 Mon-Fri + 15:00 daily + weekend 10/13/16');
 
 // CRM Intelligence — nightly at 3 AM ET (use setInterval every 24h with initial delay)
 setTimeout(() => {
