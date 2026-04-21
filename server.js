@@ -1732,6 +1732,40 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
       sendFrictionMatchNotification(requestId, frictionRequest, cpaMatches);
     }, 1000);
 
+    // Notify matched CPAs about the client inquiry
+    for (const match of cpaMatches) {
+      try {
+        const cpaRow = await pool.query(
+          `SELECT COALESCE(cp.email, sc.enriched_email, sc.email) AS email, COALESCE(cp.first_name, sc.first_name) AS first_name
+           FROM scraped_cpas sc LEFT JOIN cpa_profiles cp ON cp.user_id = sc.claimed_by
+           WHERE sc.id = $1 OR CAST(sc.id AS TEXT) = $1`, [match.id]);
+        const cpaEmail = cpaRow.rows[0]?.email;
+        if (cpaEmail) {
+          const ci = frictionRequest.contactInfo || {};
+          sendEmail({
+            to: cpaEmail,
+            subject: `New Client Match: ${ci.location || ci.province || 'A client'} needs ${frictionRequest.painPoint || 'accounting help'}`,
+            html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+              <div style="background:linear-gradient(135deg,#2563eb,#1e3a8a);padding:24px 32px;border-radius:8px 8px 0 0;">
+                <h2 style="margin:0;color:#fff;font-size:20px;">New Client Match</h2>
+                <p style="margin:4px 0 0;color:rgba(255,255,255,0.8);font-size:13px;">CanadaAccountants.app</p>
+              </div>
+              <div style="padding:28px 32px;background:#fff;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;">
+                <p style="color:#333;font-size:15px;">A potential client is looking for help with <strong>${frictionRequest.painPoint || 'accounting services'}</strong>.</p>
+                <p style="color:#333;font-size:14px;">Your profile matched at <strong>${match.matchScore}%</strong>.</p>
+                <div style="text-align:center;margin:24px 0;">
+                  <a href="https://canadaaccountants.app/cpa-dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
+                </div>
+              </div>
+            </div>`,
+          }).catch(err => console.error(`[Match] CPA notification error for ${cpaEmail}:`, err.message));
+          console.log(`[Match] Notified CPA ${cpaEmail} about client match (${match.matchScore}%)`);
+        }
+      } catch (notifyErr) {
+        console.error('[Match] CPA notification lookup error:', notifyErr.message);
+      }
+    }
+
     // Track outreach conversion (async, non-blocking)
     const smeEmail = frictionRequest.contactInfo?.email;
     if (smeEmail) {
