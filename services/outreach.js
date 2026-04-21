@@ -480,6 +480,7 @@ class OutreachEngine {
              LEFT JOIN scraped_cpas sc ON sc.id = oe.recipient_id
              WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND COALESCE(oe.retry_count, 0) < 5
                AND oe.recipient_type = 'cpa'
+               AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
                AND (sc.province IS NULL OR sc.province = ANY($3::text[]))
              ORDER BY oe.queued_at ASC LIMIT $2`,
             [campaign.id, remaining, inWindowProvinces]
@@ -490,6 +491,7 @@ class OutreachEngine {
              LEFT JOIN scraped_smes ss ON ss.id = oe.recipient_id
              WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND COALESCE(oe.retry_count, 0) < 5
                AND oe.recipient_type = 'sme'
+               AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
                AND (ss.province IS NULL OR ss.province = ANY($3::text[]))
              ORDER BY oe.queued_at ASC LIMIT $2`,
             [campaign.id, remaining, inWindowProvinces]
@@ -497,7 +499,7 @@ class OutreachEngine {
         } else {
           // Unknown campaign type — fall back to unfiltered query
           emails = await this.pool.query(
-            `SELECT * FROM outreach_emails WHERE campaign_id = $1 AND status = 'queued' AND COALESCE(retry_count, 0) < 5 ORDER BY queued_at ASC LIMIT $2`,
+            `SELECT * FROM outreach_emails WHERE campaign_id = $1 AND status = 'queued' AND COALESCE(retry_count, 0) < 5 AND recipient_email NOT IN (SELECT email FROM outreach_unsubscribes) ORDER BY queued_at ASC LIMIT $2`,
             [campaign.id, remaining]
           );
         }
