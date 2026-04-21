@@ -457,7 +457,7 @@ class OutreachEngine {
         this._step = `sending_C${campaign.id}_${campaign.name.substring(0,20)}`; this._stepTime = Date.now();
         // Count emails sent today for this campaign
         const todayCount = await this.pool.query(
-          `SELECT COUNT(*) FROM outreach_emails WHERE campaign_id = $1 AND sent_at >= CURRENT_DATE`,
+          `SELECT COUNT(*) FROM outreach_emails WHERE campaign_id = $1 AND sent_at >= (NOW() AT TIME ZONE 'America/Toronto')::date`,
           [campaign.id]
         );
         const sentToday = parseInt(todayCount.rows[0].count);

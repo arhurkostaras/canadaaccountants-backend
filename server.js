@@ -4218,7 +4218,7 @@ app.post('/api/admin/outreach/validate-queued', async (req, res) => {
 // Outreach pipeline health
 app.get('/api/outreach/health', async (req, res) => {
   try {
-    const today = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE sent_at >= CURRENT_DATE`);
+    const today = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE sent_at >= (NOW() AT TIME ZONE 'America/Toronto')::date`);
     const queued = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'queued'`);
     const bounced7d = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'bounced' AND sent_at > NOW() - INTERVAL '7 days'`);
     const unsub7d = await pool.query(`SELECT COUNT(*) FROM outreach_unsubscribes WHERE unsubscribed_at > NOW() - INTERVAL '7 days'`);
@@ -4512,7 +4512,7 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
     const campaignDiag = [];
     for (const c of campaigns.rows) {
       const effectiveLimit = isWeekend ? Math.ceil(c.daily_limit / 2) : c.daily_limit;
-      const todayCount = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE campaign_id = $1 AND sent_at >= CURRENT_DATE`, [c.id]);
+      const todayCount = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE campaign_id = $1 AND sent_at >= (NOW() AT TIME ZONE 'America/Toronto')::date`, [c.id]);
       const sentToday = parseInt(todayCount.rows[0].count);
 
       let queuedCount = 0;
