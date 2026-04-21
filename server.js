@@ -4108,6 +4108,25 @@ app.get('/api/admin/c2-demand-metrics', async (req, res) => {
   }
 });
 
+// Backfill diagnostic: friction matches where professional was NOT notified
+app.get('/api/admin/unnotified-matches', async (req, res) => {
+  try {
+    const rows = await pool.query(`
+      SELECT fm.match_id, fm.request_id, fm.cpa_id, fm.cpa_name, fm.match_score,
+             fm.professional_notified_at, fm.created_at,
+             COALESCE(cp.email, sc.enriched_email, sc.email) AS cpa_email,
+             COALESCE(cp.first_name, sc.first_name) AS first_name,
+             sc.city, sc.province
+      FROM friction_matches fm
+      LEFT JOIN scraped_cpas sc ON sc.id = CAST(fm.cpa_id AS INTEGER)
+      LEFT JOIN cpa_profiles cp ON cp.user_id = sc.claimed_by
+      WHERE fm.professional_notified_at IS NULL
+      ORDER BY fm.created_at DESC
+    `);
+    res.json({ total_unnotified: rows.rows.length, matches: rows.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Investigate ACC conversions
 app.get('/api/admin/conversions-debug', async (req, res) => {
   try {
