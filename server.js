@@ -4576,6 +4576,21 @@ app.get('/api/admin/queue-diagnostic', async (req, res) => {
 // Reset stuck processing flag (if processQueue crashed without hitting finally block)
 // Direct batch send: bypasses processQueue, sends N emails from a specific campaign.
 // Used when processQueue is hanging. Respects province window + daily limits.
+app.post('/api/admin/send-personal-email', async (req, res) => {
+  try {
+    const { to, subject, html, text } = req.body || {};
+    if (!to || !subject || !html) return res.status(400).json({ error: 'to, subject, html required' });
+    const result = await sendEmail({
+      to, subject, html,
+      text: text || html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+      from: req.body.from || 'CanadaAccountants <info@canadaaccountants.app>',
+      replyTo: req.body.replyTo || 'arthur@negotiateandwin.com'
+    });
+    if (!result || result.success === false) return res.status(500).json({ error: 'send failed', detail: result });
+    res.json({ success: true, id: result.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/admin/direct-send', async (req, res) => {
   try {
     const campaignId = parseInt(req.query.campaign) || 9;
