@@ -7761,6 +7761,7 @@ app.use((err, req, res, next) => {
 
 // Sequence scheduler — every 15 minutes
 setInterval(() => {
+  console.log(`[Sequences] Scheduler tick at ${new Date().toISOString()}`);
   sequenceEngine.processScheduledSends().catch(err =>
     console.error('[Sequences] Scheduled send error:', err.message)
   );
