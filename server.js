@@ -7803,11 +7803,13 @@ const HOLIDAYS = ['2026-04-03', '2026-04-04', '2026-04-06'];
 async function runPipelineMonitor(label) {
   const https = require('https');
   const fetchJSON = (url) => new Promise((resolve) => {
-    https.get(url, { timeout: 15000 }, (res) => {
+    const req = https.get(url, { timeout: 10000 }, (res) => {
       let body = '';
       res.on('data', chunk => body += chunk);
       res.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve(null); } });
-    }).on('error', () => resolve(null));
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
   });
 
   const now = new Date();
