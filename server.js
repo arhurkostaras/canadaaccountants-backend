@@ -7975,19 +7975,25 @@ async function runPipelineMonitor(label) {
 // 9:05 AM — post-cron check
 // Pipeline monitor — consistent schedule across all send days (Tue-Fri)
 // Updated 2026-04-10: Friday now includes cold sends, so Friday gets the same monitors.
-cron.schedule('5 9 * * 1-5', () => runPipelineMonitor('9:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
-cron.schedule('30 9 * * 1-5', () => runPipelineMonitor('9:30 AM Resend check').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
-cron.schedule('5 10 * * 1-5', () => runPipelineMonitor('10:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
-cron.schedule('5 11 * * 1-5', () => runPipelineMonitor('11:05 AM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
-cron.schedule('5 14 * * 1-5', () => runPipelineMonitor('2:05 PM').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+const monitorCronFire = (label) => {
+  console.log(`[Monitor] Cron firing: ${label} at ${new Date().toISOString()}`);
+  runPipelineMonitor(label).catch(e => console.error(`[Monitor] ${label} error:`, e.message));
+};
 
-// 3 PM daily (every day including weekends)
-cron.schedule('0 15 * * *', () => runPipelineMonitor('3 PM ET').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+cron.schedule('5 9 * * 1-5', () => monitorCronFire('9:05 AM'), { timezone: 'America/Toronto' });
+cron.schedule('30 9 * * 1-5', () => monitorCronFire('9:30 AM Resend check'), { timezone: 'America/Toronto' });
+cron.schedule('5 10 * * 1-5', () => monitorCronFire('10:05 AM'), { timezone: 'America/Toronto' });
+cron.schedule('5 11 * * 1-5', () => monitorCronFire('11:05 AM'), { timezone: 'America/Toronto' });
+cron.schedule('5 14 * * 1-5', () => monitorCronFire('2:05 PM'), { timezone: 'America/Toronto' });
+cron.schedule('0 15 * * *', () => monitorCronFire('3 PM ET'), { timezone: 'America/Toronto' });
+cron.schedule('0 10 * * 0,6', () => monitorCronFire('10 AM ET (weekend)'), { timezone: 'America/Toronto' });
+cron.schedule('0 13 * * 0,6', () => monitorCronFire('1 PM ET (weekend)'), { timezone: 'America/Toronto' });
+cron.schedule('0 16 * * 0,6', () => monitorCronFire('4 PM ET (weekend)'), { timezone: 'America/Toronto' });
 
-// Weekend monitors: 10am, 1pm, 4pm Sat+Sun
-cron.schedule('0 10 * * 0,6', () => runPipelineMonitor('10 AM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
-cron.schedule('0 13 * * 0,6', () => runPipelineMonitor('1 PM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
-cron.schedule('0 16 * * 0,6', () => runPipelineMonitor('4 PM ET (weekend)').catch(e => console.error('[Monitor]', e.message)), { timezone: 'America/Toronto' });
+// Heartbeat: log every hour to confirm process is alive and crons are registered
+setInterval(() => {
+  console.log(`[Heartbeat] ACC alive at ${new Date().toISOString()}, uptime=${process.uptime().toFixed(0)}s`);
+}, 60 * 60 * 1000);
 
 console.log('[Monitor] Pipeline monitor scheduled: 9:05/9:30/10:05/11:05/14:05 Mon-Fri + 15:00 daily + weekend 10/13/16');
 
