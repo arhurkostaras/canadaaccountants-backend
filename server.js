@@ -7874,29 +7874,35 @@ async function runPipelineMonitor(label) {
   let demandHtml = '';
   try {
     const lawDemand = await fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/demand-attribution');
+    const lawLeads = await fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/leads/funnel');
     if (lawDemand && lawDemand.requests) {
+      const now24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const now48h = new Date(Date.now() - 48 * 60 * 60 * 1000);
-      const recent = lawDemand.requests.filter(r => new Date(r.created_at) > now48h);
+      const yesterday = lawDemand.requests.filter(r => new Date(r.created_at) > now24h);
+      const dayBefore = lawDemand.requests.filter(r => new Date(r.created_at) > now48h && new Date(r.created_at) <= now24h);
+
       const bySource = {};
-      for (const r of recent) {
+      for (const r of yesterday) {
         const src = r.utm_source ? (r.utm_source === 'google' ? 'gads' : r.utm_source) : (r.referrer ? 'organic' : 'direct');
         bySource[src] = (bySource[src] || 0) + 1;
       }
       const sourceBreakdown = Object.entries(bySource).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none';
-      const totalRecent = recent.length;
-      const withUtm = recent.filter(r => r.utm_source).length;
+      const delta = yesterday.length - dayBefore.length;
+      const deltaStr = delta > 0 ? `+${delta}` : delta === 0 ? '0' : `${delta}`;
+      const withUtm = yesterday.filter(r => r.utm_source).length;
 
-      // Match rate: check friction_matches for recent submissions
-      const lawMatched = await fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/leads/funnel');
-      const matchedCount = lawMatched?.funnel?.reduce((sum, f) => sum + parseInt(f.count || 0), 0) || 0;
+      const matchedCount = lawLeads?.funnel?.reduce((sum, f) => sum + parseInt(f.count || 0), 0) || 0;
+      const thisWeekMatches = lawLeads?.weekly_breakdown?.filter(w => new Date(w.week) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)).reduce((s, w) => s + parseInt(w.count || 0), 0) || 0;
 
       // 48h zero-submissions alert
-      if (totalRecent === 0) {
+      if (yesterday.length === 0 && dayBefore.length === 0) {
         alerts.push('LAW DEMAND: zero submissions in last 48 hours');
       }
 
-      demandHtml = `<div style="margin:0 0 16px;padding:14px 16px;background:#fefce8;border-left:4px solid #ca8a04;border-radius:0 6px 6px 0;font-size:14px;color:#854d0e;">
-        <strong>Demand (LAW, 48h):</strong> ${totalRecent} submissions (${sourceBreakdown}) | ${withUtm} with UTM attribution | ${matchedCount} total matched leads
+      demandHtml = `<div style="margin:0 0 16px;padding:14px 16px;background:#fefce8;border-left:4px solid #ca8a04;border-radius:0 6px 6px 0;font-size:13px;color:#854d0e;">
+        <strong>Demand (LAW):</strong><br>
+        Yesterday: ${yesterday.length} submissions (${sourceBreakdown}) | ${withUtm} UTM-attributed | delta: ${deltaStr} vs prior day<br>
+        Matches: ${matchedCount} total | ${thisWeekMatches} this week | paid-pro alerts: ${yesterday.length > 0 ? 'active' : 'n/a'}
       </div>`;
     }
   } catch (e) { console.error('[Monitor] Demand metrics fetch error:', e.message); }
