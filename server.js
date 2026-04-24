@@ -5648,7 +5648,7 @@ app.get('/api/directory/:province', async (req, res) => {
 
     const [professionalsResult, countResult, designationCounts] = await Promise.all([
       pool.query(
-        `SELECT full_name, first_name, last_name, firm_name, city, province, designation,
+        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
                 LEFT(generated_bio, 160) AS bio_snippet
          FROM scraped_cpas WHERE UPPER(province) = $1
          ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
@@ -5696,7 +5696,7 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
 
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT full_name, first_name, last_name, firm_name, city, province, designation,
+        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
                 LEFT(generated_bio, 160) AS bio_snippet
          FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
          ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
