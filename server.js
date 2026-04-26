@@ -919,7 +919,29 @@ const crmIntelligence = new CRMIntelligence({
         sent_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    console.log('[Migration] Referral + claim + CASL + founding_member columns verified');
+    // CBE referrals audit trail — claimed CPAs refer their clients to canadabusinessexits.app
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cbe_referrals (
+        id BIGSERIAL PRIMARY KEY,
+        cpa_user_id INTEGER NOT NULL,
+        cpa_profile_id INTEGER,
+        client_email VARCHAR(255) NOT NULL,
+        client_first_name VARCHAR(100),
+        client_last_name VARCHAR(100),
+        client_company VARCHAR(255),
+        client_industry VARCHAR(100),
+        client_province VARCHAR(50),
+        revenue_range VARCHAR(50),
+        referring_note TEXT,
+        cbe_sme_id INTEGER,
+        was_new BOOLEAN,
+        cbe_response_status INTEGER,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cbe_referrals_cpa_user_id ON cbe_referrals(cpa_user_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cbe_referrals_client_email ON cbe_referrals(client_email)`);
+    console.log('[Migration] Referral + claim + CASL + founding_member + cbe_referrals columns verified');
 
   } catch (err) {
     console.error('[Migration] Referral/claim migration error (non-fatal):', err.message);
@@ -2600,6 +2622,116 @@ app.put('/api/cpa/bio', authenticateToken, requireCPA, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Failed to save bio' });
+  }
+});
+
+// =====================================================
+// CBE REFERRAL — claimed CPAs refer their clients to Canada Business Exits
+// =====================================================
+const CBE_BACKEND_URL = process.env.CBE_BACKEND_URL || 'https://canadabusinessexits-backend-production.up.railway.app';
+
+app.post('/api/cpa/refer-to-cbe', authenticateToken, requireCPA, async (req, res) => {
+  try {
+    if (!process.env.CBE_REFERRAL_API_KEY) {
+      console.error('[CBE referral] CBE_REFERRAL_API_KEY not configured');
+      return res.status(503).json({ error: 'Referral feature not configured. Please contact support.' });
+    }
+
+    // Find the CPA's profile (mirrors /api/cpa/my-profile pattern)
+    const profileResult = await pool.query(
+      'SELECT * FROM cpa_profiles WHERE user_id = $1 OR email = $2 LIMIT 1',
+      [req.user.userId, req.user.email]
+    );
+    if (profileResult.rows.length === 0) {
+      return res.status(403).json({ error: 'Only claimed CPAs can refer clients to Canada Business Exits.' });
+    }
+    const cpa = profileResult.rows[0];
+
+    // Validate inbound payload
+    const {
+      client_first_name, client_last_name, client_email, client_company,
+      client_industry, client_province, revenue_range, referring_note,
+    } = req.body || {};
+
+    if (!client_first_name || !client_email) {
+      return res.status(400).json({ error: 'Client first name and email are required.' });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(client_email)) {
+      return res.status(400).json({ error: 'Client email is not a valid email address.' });
+    }
+
+    // Build CBE payload
+    const cbePayload = {
+      client_first_name,
+      client_last_name: client_last_name || null,
+      client_email,
+      client_company: client_company || null,
+      client_industry: client_industry || null,
+      client_province: client_province || null,
+      revenue_range: revenue_range || null,
+      referring_platform: 'ACC',
+      referring_user_id: cpa.user_id,
+      referring_user_email: cpa.email || req.user.email,
+      referring_user_first_name: cpa.first_name || null,
+      referring_user_last_name: cpa.last_name || null,
+      referring_note: referring_note || null,
+    };
+
+    // POST to CBE
+    let cbeResp, cbeJson;
+    try {
+      cbeResp = await fetch(`${CBE_BACKEND_URL}/api/intake/referral`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Referral-Key': process.env.CBE_REFERRAL_API_KEY,
+        },
+        body: JSON.stringify(cbePayload),
+      });
+      cbeJson = await cbeResp.json();
+    } catch (fetchErr) {
+      console.error('[CBE referral] Fetch error:', fetchErr.message);
+      return res.status(502).json({ error: 'Could not reach the Canada Business Exits service. Please try again in a moment.' });
+    }
+
+    if (!cbeResp.ok) {
+      console.error('[CBE referral] CBE rejected:', cbeResp.status, cbeJson);
+      return res.status(cbeResp.status === 400 ? 400 : 502).json({
+        error: cbeJson?.error || 'Referral could not be processed.',
+      });
+    }
+
+    // Audit log (non-fatal — log even if it fails)
+    try {
+      await pool.query(
+        `INSERT INTO cbe_referrals
+         (cpa_user_id, cpa_profile_id, client_email, client_first_name, client_last_name,
+          client_company, client_industry, client_province, revenue_range, referring_note,
+          cbe_sme_id, was_new, cbe_response_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [
+          cpa.user_id, cpa.id, client_email, client_first_name, client_last_name || null,
+          client_company || null, client_industry || null, client_province || null,
+          revenue_range || null, referring_note || null,
+          cbeJson.sme_id || null, cbeJson.was_new || false, cbeResp.status,
+        ]
+      );
+    } catch (auditErr) {
+      console.error('[CBE referral] Audit log insert error:', auditErr.message);
+      // Continue — referral succeeded; only audit log failed
+    }
+
+    res.json({
+      success: true,
+      sme_id: cbeJson.sme_id,
+      was_new: cbeJson.was_new,
+      message: cbeJson.was_new
+        ? 'Referral sent. Your client will receive a welcome email shortly.'
+        : 'Your client is already in the Canada Business Exits pipeline from a previous referral.',
+    });
+  } catch (err) {
+    console.error('[CBE referral] Error:', err.message);
+    res.status(500).json({ error: 'Failed to send referral.' });
   }
 });
 
