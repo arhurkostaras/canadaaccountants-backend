@@ -941,7 +941,31 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cbe_referrals_cpa_user_id ON cbe_referrals(cpa_user_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cbe_referrals_client_email ON cbe_referrals(client_email)`);
-    console.log('[Migration] Referral + claim + CASL + founding_member + cbe_referrals columns verified');
+    // Lightweight CRM — unified Leads admin view (mirrors INV/CBE pattern)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS manual_leads (
+        id BIGSERIAL PRIMARY KEY,
+        name VARCHAR(255), email VARCHAR(255), phone VARCHAR(50),
+        source VARCHAR(100), subject VARCHAR(255), message TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS lead_status (
+        id BIGSERIAL PRIMARY KEY,
+        lead_type VARCHAR(50) NOT NULL,
+        lead_id BIGINT NOT NULL,
+        status VARCHAR(50) NOT NULL DEFAULT 'new',
+        notes TEXT,
+        last_action_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (lead_type, lead_id)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_status_status ON lead_status(status, last_action_at DESC NULLS LAST)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_status_last_action ON lead_status(last_action_at DESC NULLS LAST)`);
+    console.log('[Migration] Referral + claim + CASL + founding_member + cbe_referrals + lead_status columns verified');
 
   } catch (err) {
     console.error('[Migration] Referral/claim migration error (non-fatal):', err.message);
@@ -2629,6 +2653,149 @@ app.put('/api/cpa/bio', authenticateToken, requireCPA, async (req, res) => {
 // CBE REFERRAL — claimed CPAs refer their clients to Canada Business Exits
 // =====================================================
 const CBE_BACKEND_URL = process.env.CBE_BACKEND_URL || 'https://canadabusinessexits-backend-production.up.railway.app';
+
+// =====================================================
+// LIGHTWEIGHT CRM — unified Leads admin view (ACC)
+// UNIONs contact_submissions + sme_friction_requests + manual_leads.
+// LEFT JOINs lead_status overlay. Mirrors INV/CBE pattern.
+// =====================================================
+app.get('/api/admin/leads', async (req, res) => {
+  try {
+    const statusFilter = req.query.status || null;
+    const typeFilter = req.query.type || null;
+    const limit = Math.min(parseInt(req.query.limit) || 200, 500);
+
+    const params = [];
+    let whereExtra = '';
+    if (statusFilter) {
+      params.push(statusFilter);
+      whereExtra += ` AND COALESCE(ls.status, 'new') = $${params.length}`;
+    }
+    if (typeFilter) {
+      params.push(typeFilter);
+      whereExtra += ` AND al.lead_type = $${params.length}`;
+    }
+    params.push(limit);
+    const limitPh = `$${params.length}`;
+
+    const sql = `
+      WITH all_leads AS (
+        SELECT 'contact_submission' AS lead_type,
+               cs.id AS lead_id,
+               cs.name, cs.email, cs.phone,
+               cs.subject AS title, cs.message AS message,
+               cs.source_page AS extra,
+               cs.created_at AS submitted_at
+        FROM contact_submissions cs
+
+        UNION ALL
+
+        SELECT 'sme_friction_request' AS lead_type,
+               sfr.id AS lead_id,
+               COALESCE((sfr.contact_info->>'name'), 'SME') AS name,
+               (sfr.contact_info->>'email') AS email,
+               (sfr.contact_info->>'phone') AS phone,
+               COALESCE(sfr.pain_point, 'CPA matching request') AS title,
+               sfr.pain_point AS message,
+               COALESCE(sfr.business_type, '?') || ' / ' || COALESCE(sfr.business_size, '?') || ' / urgency: ' || COALESCE(sfr.urgency_level, '?') AS extra,
+               sfr.created_at AS submitted_at
+        FROM sme_friction_requests sfr
+
+        UNION ALL
+
+        SELECT 'manual_lead' AS lead_type,
+               ml.id AS lead_id,
+               ml.name, ml.email, ml.phone,
+               COALESCE(ml.subject, ml.source) AS title,
+               ml.message,
+               ml.source AS extra,
+               ml.created_at AS submitted_at
+        FROM manual_leads ml
+      )
+      SELECT al.*,
+             COALESCE(ls.status, 'new') AS status,
+             ls.notes,
+             ls.last_action_at,
+             COALESCE(ls.last_action_at, al.submitted_at) AS sort_ts
+      FROM all_leads al
+      LEFT JOIN lead_status ls ON ls.lead_type = al.lead_type AND ls.lead_id = al.lead_id
+      WHERE 1=1 ${whereExtra}
+      ORDER BY sort_ts DESC NULLS LAST
+      LIMIT ${limitPh}
+    `;
+    const r = await pool.query(sql, params);
+
+    const counts = await pool.query(`
+      WITH all_leads AS (
+        SELECT 'contact_submission' AS lt, id AS lid FROM contact_submissions
+        UNION ALL SELECT 'sme_friction_request', id FROM sme_friction_requests
+        UNION ALL SELECT 'manual_lead', id FROM manual_leads
+      )
+      SELECT COALESCE(ls.status, 'new') AS status, COUNT(*)::int AS n
+      FROM all_leads al LEFT JOIN lead_status ls ON ls.lead_type = al.lt AND ls.lead_id = al.lid
+      GROUP BY status
+    `);
+
+    res.json({
+      leads: r.rows,
+      counts: counts.rows.reduce((acc, x) => { acc[x.status] = x.n; return acc; }, {}),
+      total: r.rows.length,
+    });
+  } catch (error) {
+    console.error('[Leads] List error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/leads/:type/:id/status', async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const { status, note } = req.body || {};
+    if (!status && !note) return res.status(400).json({ error: 'status or note required' });
+    const validTypes = ['contact_submission', 'sme_friction_request', 'manual_lead'];
+    if (!validTypes.includes(type)) return res.status(400).json({ error: 'invalid lead_type' });
+    const validStatuses = ['new', 'contacted', 'replied', 'demo_scheduled', 'paid', 'lost', 'spam'];
+    if (status && !validStatuses.includes(status)) return res.status(400).json({ error: 'invalid status' });
+
+    let appendNote = null;
+    if (note) {
+      const ts = new Date().toISOString().slice(0, 16).replace('T', ' ');
+      appendNote = `${ts} • ${status ? `[${status}] ` : ''}${note}`;
+    }
+
+    const upsert = await pool.query(`
+      INSERT INTO lead_status (lead_type, lead_id, status, notes, last_action_at, updated_at)
+      VALUES ($1, $2, COALESCE($3, 'new'), $4, NOW(), NOW())
+      ON CONFLICT (lead_type, lead_id) DO UPDATE SET
+        status = COALESCE($3, lead_status.status),
+        notes = CASE WHEN $4::text IS NULL THEN lead_status.notes
+                     WHEN lead_status.notes IS NULL THEN $4::text
+                     ELSE lead_status.notes || E'\n' || $4::text END,
+        last_action_at = NOW(), updated_at = NOW()
+      RETURNING *
+    `, [type, id, status || null, appendNote]);
+    res.json({ success: true, lead_status: upsert.rows[0] });
+  } catch (error) {
+    console.error('[Leads] Status update error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/admin/leads/manual', async (req, res) => {
+  try {
+    const { name, email, phone, source, subject, message } = req.body || {};
+    if (!name && !email && !phone) return res.status(400).json({ error: 'at least one of name/email/phone required' });
+    const r = await pool.query(`
+      INSERT INTO manual_leads (name, email, phone, source, subject, message)
+      VALUES ($1, $2, $3, COALESCE($4, 'manual'), $5, $6)
+      RETURNING *
+    `, [name || null, email || null, phone || null, source || null, subject || null, message || null]);
+    res.json({ success: true, lead: r.rows[0] });
+  } catch (error) {
+    console.error('[Leads] Manual create error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 app.post('/api/cpa/refer-to-cbe', authenticateToken, requireCPA, async (req, res) => {
   try {
