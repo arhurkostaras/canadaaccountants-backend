@@ -6195,7 +6195,7 @@ app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
         return acc;
       }, { seen: new Set(), list: [] }).list
       .sort((a, b) => b.score - a.score)
-      .slice(0, 10);
+      .slice(0, 20);
 
     res.json({ candidates: scored });
   } catch (err) {
@@ -6264,9 +6264,9 @@ app.post('/api/admin/founder-outreach/send', async (req, res) => {
     }
 
     const platformMap = {
-      accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>' },
-      lawyers: { domain: 'canadalawyers.app', from: 'Arthur Kostaras <arthur@canadalawyers.app>' },
-      investing: { domain: 'canadainvesting.app', from: 'Arthur Kostaras <arthur@canadainvesting.app>' }
+      accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>', replyTo: 'arthur@canadaaccountants.app' },
+      lawyers: { domain: 'canadalawyers.app', from: 'Arthur Kostaras <arthur@canadalawyers.app>', replyTo: 'arthur@canadalawyers.app' },
+      investing: { domain: 'canadainvesting.app', from: 'Arthur Kostaras <arthur@canadainvesting.app>', replyTo: 'arthur@canadainvesting.app' }
     };
     const platformKey = platform || 'accountants';
     const pconf = platformMap[platformKey] || platformMap.accountants;
@@ -6278,7 +6278,7 @@ app.post('/api/admin/founder-outreach/send', async (req, res) => {
       html,
       text,
       from: pconf.from,
-      replyTo: 'arthur@negotiateandwin.com'
+      replyTo: pconf.replyTo
     });
 
     if (!result || result.success === false) {
@@ -6384,7 +6384,97 @@ app.post('/api/admin/founder-outreach/digest/send', async (req, res) => {
   }
 });
 
-// Cron: Monday 9 AM America/Toronto — send founder outreach digest to admin
+// POST /api/admin/founder-outreach/auto-send — send founder emails to all candidates across platforms
+app.post('/api/admin/founder-outreach/auto-send', async (req, res) => {
+  try {
+    const results = await runFounderAutoSend();
+    res.json({ success: true, ...results });
+  } catch (err) {
+    console.error('[FounderOutreach] auto-send error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function runFounderAutoSend() {
+  const fetchJSON = (url) => new Promise((resolve) => {
+    const mod = url.startsWith('https://') ? require('https') : require('http');
+    mod.get(url, (r) => {
+      let b = '';
+      r.on('data', c => b += c);
+      r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({ candidates: [] }); } });
+      r.on('error', () => resolve({ candidates: [] }));
+    }).on('error', () => resolve({ candidates: [] }));
+  });
+
+  const [accData, lawData, invData] = await Promise.all([
+    fetchJSON(`http://127.0.0.1:${PORT}/api/admin/founder-outreach-candidates`),
+    fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/founder-outreach-candidates'),
+    fetchJSON('https://canadainvesting-backend-production.up.railway.app/api/admin/founder-outreach-candidates')
+  ]);
+
+  const platformMap = {
+    accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>', replyTo: 'arthur@canadaaccountants.app' },
+    lawyers: { domain: 'canadalawyers.app', from: 'Arthur Kostaras <arthur@canadalawyers.app>', replyTo: 'arthur@canadalawyers.app' },
+    investing: { domain: 'canadainvesting.app', from: 'Arthur Kostaras <arthur@canadainvesting.app>', replyTo: 'arthur@canadainvesting.app' }
+  };
+
+  const batches = [
+    { key: 'accountants', candidates: accData.candidates || [] },
+    { key: 'lawyers', candidates: lawData.candidates || [] },
+    { key: 'investing', candidates: invData.candidates || [] }
+  ];
+
+  let sent = 0, skipped = 0, failed = 0;
+  const errors = [];
+
+  for (const batch of batches) {
+    const pconf = platformMap[batch.key];
+    for (const candidate of batch.candidates) {
+      // 90-day dedup
+      const recent = await pool.query(
+        `SELECT id FROM founder_outreach_log WHERE recipient_email = $1 AND sent_at > NOW() - INTERVAL '90 days' LIMIT 1`,
+        [candidate.email]
+      );
+      if (recent.rows.length > 0) { skipped++; continue; }
+
+      try {
+        const { subject, html, text } = buildFounderEmail({ firstName: candidate.first_name || candidate.name?.split(' ')[0], platformDomain: pconf.domain });
+        const result = await sendEmail({
+          to: candidate.email,
+          subject,
+          html,
+          text,
+          from: pconf.from,
+          replyTo: pconf.replyTo
+        });
+
+        if (result && result.id) {
+          await pool.query(
+            `INSERT INTO founder_outreach_log (recipient_email, recipient_name, platform, resend_id) VALUES ($1, $2, $3, $4)`,
+            [candidate.email, candidate.name || null, batch.key, result.id]
+          );
+          sent++;
+        } else {
+          failed++;
+          errors.push({ email: candidate.email, platform: batch.key, error: 'no resend id' });
+        }
+      } catch (err) {
+        failed++;
+        errors.push({ email: candidate.email, platform: batch.key, error: err.message });
+        console.error(`[FounderOutreach] send failed: ${candidate.email} (${batch.key}):`, err.message);
+      }
+
+      // 2-second delay between sends
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  console.log(`[FounderOutreach] Auto-send complete: ${sent} sent, ${skipped} deduped, ${failed} failed`);
+  return { sent, skipped, failed, errors: errors.length > 0 ? errors : undefined };
+}
+
+// Cron: Monday 9:00 AM America/Toronto — send digest to admin
+// Cron: Monday 9:05 AM America/Toronto — auto-send founder emails to all candidates
 cron.schedule('0 9 * * 1', async () => {
   try {
     const { html, total } = await buildFounderDigestHTML();
@@ -6396,11 +6486,27 @@ cron.schedule('0 9 * * 1', async () => {
     });
     console.log(`[FounderOutreach] Monday digest sent: ${total} candidates`);
   } catch (err) {
-    console.error('[FounderOutreach] cron error:', err.message);
+    console.error('[FounderOutreach] digest cron error:', err.message);
   }
 }, { timezone: 'America/Toronto' });
 
-console.log('[FounderOutreach] Monday 9 AM ET digest scheduled');
+cron.schedule('5 9 * * 1', async () => {
+  try {
+    const results = await runFounderAutoSend();
+    // Send summary to admin
+    await sendEmail({
+      to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+      subject: `Founder Auto-Send Complete: ${results.sent} sent, ${results.skipped} deduped, ${results.failed} failed`,
+      html: `<p>Auto-send results: ${results.sent} sent, ${results.skipped} skipped (90-day dedup), ${results.failed} failed.</p>${results.errors ? '<pre>' + JSON.stringify(results.errors, null, 2) + '</pre>' : ''}`,
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
+    });
+    console.log(`[FounderOutreach] Monday auto-send complete: ${results.sent} sent`);
+  } catch (err) {
+    console.error('[FounderOutreach] auto-send cron error:', err.message);
+  }
+}, { timezone: 'America/Toronto' });
+
+console.log('[FounderOutreach] Monday 9:00 AM digest + 9:05 AM auto-send scheduled');
 
 // ==================== PROFILE BACKFILL ====================
 app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin, async (req, res) => {
