@@ -8301,9 +8301,33 @@ async function runPipelineMonitor(label) {
       const matchedCount = lawLeads?.funnel?.reduce((sum, f) => sum + parseInt(f.count || 0), 0) || 0;
       const thisWeekMatches = lawLeads?.weekly_breakdown?.filter(w => new Date(w.week) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)).reduce((s, w) => s + parseInt(w.count || 0), 0) || 0;
 
-      // 48h zero-submissions alert
-      if (yesterday.length === 0 && dayBefore.length === 0) {
-        alerts.push('LAW DEMAND: zero submissions in last 48 hours');
+      // Weekday-aware zero-submissions alert.
+      // Why: 48h-rolling false-fires every Mon (Sat+Sun are low/zero by baseline).
+      // Fires only Tue-Fri, looking at the last 2 actual weekdays (skipping Sat/Sun).
+      const todayDow = new Date().getDay(); // 0=Sun..6=Sat (UTC ≈ Toronto for cron fire times)
+      if (todayDow >= 2 && todayDow <= 5) {
+        const dayBuckets = {};
+        for (const r of lawDemand.requests) {
+          const d = new Date(r.created_at);
+          const ageDays = Math.floor((Date.now() - d.getTime()) / 86400000);
+          if (ageDays > 10) continue;
+          const dow = d.getDay();
+          if (dow === 0 || dow === 6) continue;
+          const key = d.toISOString().slice(0, 10);
+          dayBuckets[key] = (dayBuckets[key] || 0) + 1;
+        }
+        const lastTwoWeekdays = [];
+        const cursor = new Date();
+        cursor.setUTCDate(cursor.getUTCDate() - 1);
+        while (lastTwoWeekdays.length < 2) {
+          const dow = cursor.getDay();
+          if (dow !== 0 && dow !== 6) lastTwoWeekdays.push(cursor.toISOString().slice(0, 10));
+          cursor.setUTCDate(cursor.getUTCDate() - 1);
+        }
+        const allZero = lastTwoWeekdays.every(k => !dayBuckets[k]);
+        if (allZero) {
+          alerts.push(`LAW DEMAND: zero submissions on last 2 weekdays (${lastTwoWeekdays.join(', ')})`);
+        }
       }
 
       demandHtml = `<div style="margin:0 0 16px;padding:14px 16px;background:#fefce8;border-left:4px solid #ca8a04;border-radius:0 6px 6px 0;font-size:13px;color:#854d0e;">
