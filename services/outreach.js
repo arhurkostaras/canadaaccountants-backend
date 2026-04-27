@@ -454,6 +454,10 @@ class OutreachEngine {
       );
 
       for (const campaign of campaigns.rows) {
+        if (!campaign.daily_limit || campaign.daily_limit <= 0) {
+          console.warn(`[Outreach] Skipping C${campaign.id} (${campaign.name}) — daily_limit is ${campaign.daily_limit}. Set a limit or mark completed.`);
+          continue;
+        }
         this._step = `sending_C${campaign.id}_${campaign.name.substring(0,20)}`; this._stepTime = Date.now();
         // Count emails sent today for this campaign
         const todayCount = await this.pool.query(
