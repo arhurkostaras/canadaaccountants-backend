@@ -8232,6 +8232,7 @@ async function runPipelineMonitor(label) {
   let claimsParts = [];
   let totalClaimed = 0, totalOutreachConv = 0;
   let totalPaid = 0, totalMRR = 0, totalDemand = 0, totalMatched = 0, totalContacts7d = 0;
+  const paidParts = [];
   const alerts = [];
 
   for (const backend of MONITOR_BACKENDS) {
@@ -8253,8 +8254,11 @@ async function runPipelineMonitor(label) {
       totalConv += conv;
       totalClaimed += claimed;
       claimsParts.push(`${backend.name} ${claimed}`);
-      totalPaid += health?.paid_subscribers || 0;
-      totalMRR += health?.monthly_revenue || 0;
+      const paid = health?.paid_subscribers || 0;
+      const mrr = health?.monthly_revenue || 0;
+      totalPaid += paid;
+      totalMRR += mrr;
+      paidParts.push(`${backend.name} ${paid}${paid > 0 ? ` ($${mrr})` : ''}`);
       totalDemand += health?.demand_submissions || 0;
       totalMatched += health?.matched_leads || 0;
       totalContacts7d += health?.contacts_7d || 0;
@@ -8381,7 +8385,7 @@ async function runPipelineMonitor(label) {
         <strong>Claims:</strong> ${claimsParts.join(' | ')} | Total ${totalClaimed} (${totalConv} outreach-attributed, ${Math.max(0, totalClaimed - totalConv)} direct)
       </div>
       <div style="margin:0 0 16px;padding:14px 16px;background:#eff6ff;border-left:4px solid #2563eb;border-radius:0 6px 6px 0;font-size:14px;color:#1e40af;">
-        <strong>Revenue:</strong> ${totalPaid} paid | $${totalMRR} MRR | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d)
+        <strong>Revenue:</strong> ${paidParts.join(' | ')} → ${totalPaid} paid | $${totalMRR} MRR | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d)
       </div>
       ${demandHtml}
       ${digestInfo}
