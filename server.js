@@ -317,6 +317,11 @@ const requireCPA = (req, res, next) => {
   next();
 };
 
+// Admin namespace umbrella — applies authenticateToken + requireAdmin to ALL /api/admin/* routes.
+// Defense-in-depth against the "developer forgot to add middleware on new admin route" failure mode.
+// Per-route middleware on individual admin routes is still load-bearing; the umbrella backstops it.
+app.use('/api/admin', authenticateToken, requireAdmin);
+
 // Login endpoint
 app.post('/api/auth/login', async (req, res) => {
   try {
