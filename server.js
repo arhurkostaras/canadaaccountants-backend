@@ -1414,6 +1414,27 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 CanadaAccountants.app &middot; <a href="{{unsubscribe_url}}" style="color:#888;">Unsubscribe</a>
 </td></tr>
 </table>`
+          },
+          {
+            delay_days: 14,
+            subject_line: '{{first_name}}, do any of your clients own a business worth selling?',
+            body_template: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;font-family:Arial,sans-serif;">
+<tr><td style="background:linear-gradient(135deg,#0F1629 0%,#1e3a8a 100%);padding:28px 32px;text-align:center;">
+<h1 style="margin:0;color:#fff;font-size:20px;font-weight:700;">Canada Business Exits</h1>
+<p style="margin:6px 0 0;color:rgba(255,255,255,0.7);font-size:12px;">AI-Matched Owner-Exit Advisory</p>
+</td></tr>
+<tr><td style="padding:28px 32px;color:#111;line-height:1.65;font-size:15px;">
+<p>Hi {{first_name}},</p>
+<p>As a CPA, you are often the first person a business owner talks to when they start thinking about selling. That conversation usually happens months — sometimes years — before any banker gets involved.</p>
+<p>We built <strong>Canada Business Exits</strong> to make that next step easy for your clients. When a business owner is ready to explore a sale, we match them with a vetted M&amp;A banker whose sector expertise and deal-size track record fit their business. No upfront fees, no obligation, complete confidentiality.</p>
+<p style="padding:14px 18px;background:#f5f5f5;border-left:3px solid #B8956A;margin:18px 0;"><strong>If you have a client who owns a business worth $2M+ and is thinking about their next chapter</strong> — retirement, partnership buyout, or a full sale — send them to <a href="https://canadabusinessexits.app" style="color:#1e3a8a;">canadabusinessexits.app</a>. We take it from there.</p>
+<p>The intake is private and takes 60 seconds. Your client gets matched with a banker, and you stay in the loop as their trusted advisor.</p>
+<p>Arthur Kostaras<br>Founder, Canada Business Exits<br><a href="mailto:arthur@canadabusinessexits.app">arthur@canadabusinessexits.app</a></p>
+</td></tr>
+<tr><td style="background:#f5f5f5;padding:14px 32px;color:#888;font-size:11px;text-align:center;">
+<a href="https://canadabusinessexits.app" style="color:#888;">canadabusinessexits.app</a> &middot; <a href="{{unsubscribe_url}}" style="color:#888;">Unsubscribe</a>
+</td></tr>
+</table>`
           }
     ];
     if (!seqMap['Post-Claim Welcome']) {
