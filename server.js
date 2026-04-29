@@ -8270,7 +8270,7 @@ async function runPipelineMonitor(label) {
       const queued = health?.queued || 0;
       const bnc7d = health?.bounced_7d || 0;
       const active = camps.length;
-      const conv = camps.reduce((sum, c) => sum + (c.total_converted || 0), 0);
+      const conv = health?.outreach_converted || 0;
 
       const claimed = health?.total_claimed || 0;
 
