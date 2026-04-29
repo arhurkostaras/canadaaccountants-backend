@@ -8451,6 +8451,68 @@ cron.schedule('0 10 * * 0,6', () => monitorCronFire('10 AM ET (weekend)'), { tim
 cron.schedule('0 13 * * 0,6', () => monitorCronFire('1 PM ET (weekend)'), { timezone: 'America/Toronto' });
 cron.schedule('0 16 * * 0,6', () => monitorCronFire('4 PM ET (weekend)'), { timezone: 'America/Toronto' });
 
+// Webhook endpoint health: hourly synthetic probe across all 4 backends.
+// Why: Resend doesn't replay events to endpoints that returned non-2xx, so a silent
+// webhook regression (route changed, handler crashed, deploy stripped middleware)
+// becomes permanent data loss for the gap window. Caught CBE missing-webhook gap on
+// 2026-04-29 — 22 sends shipped before anyone noticed delivered=0 wasn't a quiet day.
+const WEBHOOK_BACKENDS = [
+  { name: 'ACC', url: 'https://canadaaccountants-backend-production-1d8f.up.railway.app/api/webhooks/resend' },
+  { name: 'LAW', url: 'https://canadalawyers-backend-production.up.railway.app/api/webhooks/resend' },
+  { name: 'INV', url: 'https://canadainvesting-backend-production.up.railway.app/api/webhooks/resend' },
+  { name: 'CBE', url: 'https://canadabusinessexits-backend-production.up.railway.app/api/webhooks/resend' },
+];
+
+async function runWebhookHealthCheck() {
+  const https = require('https');
+  const probe = (urlStr) => new Promise((resolve) => {
+    const u = new URL(urlStr);
+    const req = https.request({
+      method: 'POST',
+      hostname: u.hostname,
+      path: u.pathname,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': 2 },
+      timeout: 10000,
+    }, (res) => {
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', (e) => resolve({ status: 0, body: e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
+    req.end('{}');
+  });
+
+  const failures = [];
+  for (const backend of WEBHOOK_BACKENDS) {
+    const r = await probe(backend.url);
+    const ok = r.status === 200 && r.body.includes('"received":true');
+    if (!ok) failures.push(`${backend.name}: status=${r.status} body=${(r.body || '').slice(0, 120)}`);
+  }
+  if (failures.length === 0) {
+    console.log(`[WebhookHealth] all 4 backends healthy at ${new Date().toISOString()}`);
+    return;
+  }
+  console.error(`[WebhookHealth] ${failures.length} failure(s): ${failures.join(' | ')}`);
+  try {
+    await sendEmail({
+      to: 'arthur@negotiateandwin.com',
+      subject: `WEBHOOK HEALTH: ${failures.length} backend(s) failing — Resend events at risk`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:560px;">
+        <h3 style="color:#991b1b;">Resend webhook endpoint probe failed</h3>
+        <p>Synthetic POST <code>{}</code> to <code>/api/webhooks/resend</code> on each backend. Expected: HTTP 200 + body <code>{"received":true}</code>.</p>
+        <ul>${failures.map(f => `<li><code>${f}</code></li>`).join('')}</ul>
+        <p style="font-size:12px;color:#64748b;">Time: ${new Date().toISOString()} ET. Resend will not replay missed events — fix before the next send batch.</p>
+      </div>`,
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
+    });
+  } catch (e) { console.error('[WebhookHealth] alert send failed:', e.message); }
+}
+
+cron.schedule('15 * * * *', () => {
+  runWebhookHealthCheck().catch(e => console.error('[WebhookHealth] cron error:', e.message));
+}, { timezone: 'America/Toronto' });
+
 // Heartbeat: log every hour to confirm process is alive and crons are registered
 setInterval(() => {
   console.log(`[Heartbeat] ACC alive at ${new Date().toISOString()}, uptime=${process.uptime().toFixed(0)}s`);
