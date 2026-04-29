@@ -8264,13 +8264,12 @@ async function runPipelineMonitor(label) {
   for (const backend of MONITOR_BACKENDS) {
     try {
       const health = await fetchJSON(`${backend.url}/api/outreach/health`);
-      const campaigns = await fetchJSON(`${backend.url}/api/admin/outreach/campaigns`);
-      const camps = campaigns?.campaigns || campaigns || [];
+      const camps = Array.isArray(health?.active_campaigns) ? health.active_campaigns : [];
 
       const sent = health?.sent_today || 0;
       const queued = health?.queued || 0;
       const bnc7d = health?.bounced_7d || 0;
-      const active = health?.active_campaigns?.length || 0;
+      const active = camps.length;
       const conv = camps.reduce((sum, c) => sum + (c.total_converted || 0), 0);
 
       const claimed = health?.total_claimed || 0;
