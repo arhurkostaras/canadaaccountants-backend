@@ -3496,9 +3496,40 @@ app.post('/api/admin/zerobounce-purge', async (req, res) => {
 // PUBLIC OUTREACH ENDPOINTS
 // =====================================================
 
-// Resend webhook handler
-app.post('/api/webhooks/resend', express.json(), async (req, res) => {
+// Resend webhook signature verification (svix-format).
+// Returns true if secret unset (back-compat during rollout).
+function verifyResendSignature(req, signingSecret) {
+  if (!signingSecret) {
+    console.warn('[Webhook] RESEND_WEBHOOK_SIGNING_SECRET not set — skipping verification');
+    return true;
+  }
+  const svixId = req.headers['svix-id'];
+  const svixTimestamp = req.headers['svix-timestamp'];
+  const svixSignature = req.headers['svix-signature'];
+  if (!svixId || !svixTimestamp || !svixSignature) { console.error('[Webhook] missing svix headers'); return false; }
+  const tsAge = Math.abs(Math.floor(Date.now() / 1000) - parseInt(svixTimestamp, 10));
+  if (tsAge > 300) { console.error(`[Webhook] timestamp out of window (${tsAge}s)`); return false; }
+  const body = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+  const signedContent = `${svixId}.${svixTimestamp}.${body}`;
+  const secretBytes = Buffer.from(signingSecret.replace(/^whsec_/, ''), 'base64');
+  const expected = crypto.createHmac('sha256', secretBytes).update(signedContent).digest('base64');
+  for (const entry of svixSignature.split(' ')) {
+    const [version, sig] = entry.split(',');
+    if (version === 'v1' && sig === expected) return true;
+  }
+  console.error('[Webhook] signature mismatch');
+  return false;
+}
+
+// Resend webhook handler. Uses express.raw so signature verification can run on the
+// untouched body bytes; we JSON.parse manually after verification passes.
+app.post('/api/webhooks/resend', express.raw({ type: 'application/json' }), async (req, res) => {
   try {
+    if (!verifyResendSignature(req, process.env.RESEND_WEBHOOK_SIGNING_SECRET)) {
+      return res.status(401).json({ error: 'invalid signature' });
+    }
+    const parsed = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString('utf8')) : req.body;
+    req.body = parsed; // downstream code reads req.body
     await outreachEngine.handleResendWebhook(req.body);
 
     // Wire Resend events into CRM pipeline transitions
