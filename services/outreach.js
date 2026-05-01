@@ -257,7 +257,7 @@ class OutreachEngine {
       let query = `
         SELECT DISTINCT ON (ss.contact_email)
                ss.id, ss.business_name, ss.province, ss.city, ss.industry,
-               COALESCE(ss.contact_email) AS email, ss.contact_name
+               COALESCE(ss.contact_email) AS email, ss.contact_name, ss.enrichment_source
         FROM scraped_smes ss
         WHERE ss.contact_email IS NOT NULL
           AND ss.status != 'invalid'
@@ -291,7 +291,7 @@ class OutreachEngine {
 
       for (const sme of smes.rows) {
         // ZeroBounce pre-validation: hard block only on abuse, soft flag on everything else
-        const validation = await this._validateEmailForQueue(sme.email, { skipRoleBased: true });
+        const validation = await this._validateEmailForQueue(sme.email, { enrichmentSource: sme.enrichment_source || null });
         if (this._isHardBlocked(validation)) {
           console.log(`[Outreach] Pre-queue HARD BLOCK (abuse): ${sme.email} (${validation.status}/${validation.sub_status})`);
           skippedByValidation++;
@@ -1032,6 +1032,19 @@ class OutreachEngine {
   async _validateEmailForQueue(email, options = {}) {
     const apiKey = process.env.ZEROBOUNCE_API_KEY;
     if (!apiKey) return { valid: true, status: 'skipped', sub_status: '' };
+
+    // Smart role-based email handling:
+    // - Self-reported sources (chamber directories, contact forms, Apollo verified): allow but always ZB validate
+    // - Pattern-guessed sources (firm_website, email_pattern, corporate registry): hard block
+    if (isRoleBasedEmail(email)) {
+      const selfReportedSources = ['chamber:', 'apollo', 'contact_form', 'self_reported', 'manual'];
+      const isSelfReported = options.enrichmentSource && selfReportedSources.some(s => (options.enrichmentSource || '').startsWith(s));
+      if (!isSelfReported) {
+        console.log(`[Outreach] Role-based BLOCKED (non-self-reported): ${email} source=${options.enrichmentSource || 'unknown'}`);
+        return { valid: false, status: 'do_not_mail', sub_status: 'role_based_guessed_source' };
+      }
+      console.log(`[Outreach] Role-based from self-reported source — ZB validating: ${email}`);
+    }
 
     // Check credits first
     const creditCheck = await this._checkZeroBounceCredits();
