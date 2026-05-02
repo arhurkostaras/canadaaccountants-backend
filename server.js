@@ -8543,6 +8543,105 @@ cron.schedule('15 * * * *', () => {
   runWebhookHealthCheck().catch(e => console.error('[WebhookHealth] cron error:', e.message));
 }, { timezone: 'America/Toronto' });
 
+// One-time Monday May 4, 2026 7:00 AM ET reminder cron — fires the v2 identity audit
+// spec to Arthur's inbox so he can paste it into a fresh Claude session. Set up
+// 2026-05-02 evening. Expires after one fire by date-guarding on '2026-05-04'; subsequent
+// Mondays no-op.
+cron.schedule('0 7 * * 1', async () => {
+  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
+  if (todayET !== '2026-05-04') return;
+  console.log('[IdentityAuditReminder] firing at', new Date().toISOString());
+
+  const promptBody = `SCHEDULED CRON — Monday May 4, 2026, 7:00 AM ET — Identity reconciliation + parallel-session audit (read-only Tasks 1+2; Task 3 conditional on Arthur go/no-go).
+
+Read /Users/arthurkostaras/.claude/projects/-Users-arthurkostaras/96af4ae8-e1fb-43ff-a73b-2ce224173217.jsonl for the May 1-2 prior session — full v2 spec captured in the exchange between Arthur's spec and my 6-point pre-flight review. Below is the compiled v2.
+
+CRITICAL CONSTRAINTS
+1. Tasks 1+2 READ-ONLY. No code/schema/env-var/cron changes until both audits report and Arthur reviews.
+2. Task 2 MUST finish before 9:30 AM ET — that's the CBE banker-send cron. If you can't finish in time, STOP and email Arthur to manually pause the cron.
+3. Task 3 (UNION view migration) only runs if Task 1 returns "structurally invisible." Wait for explicit go-ahead.
+4. No "while I'm in the code" fixes. Note them, ask separately.
+5. Don't generalize Path 3 beyond the referral widget.
+
+TASK 1 — Widget render-condition audit (~15 min, read-only)
+- grep -rn "ReferralWidget|referral_code|referralCode|/api/referrals" /Users/arthurkostaras/projects/canada{accountants,lawyers,investing}-backend/public/
+- Trace gating logic. Are there gates beyond users.referral_code? (subscription tier, claim_status, profile_complete, etc.)
+- For ACC's 2 users with codes (Arthur id=2, David Mark id=4), trace whether each gate is satisfied. Query DB if needed.
+- Email arthur@negotiateandwin.com: subject "Identity audit Task 1 — widget render diagnosis", body with copy-pasted render conditions, whether ACC's 2 users see widget, explicit "structurally invisible" or "renders fine, adoption gap" call.
+- Wait for Arthur's go/no-go before Task 3.
+
+TASK 2 — Parallel-session reconciliation (~30 min, read-only)
+Repos: /Users/arthurkostaras/projects/canada{accountants,lawyers,investing,businessexits}-backend, /Users/arthurkostaras/projects/{lawyer,sme}-intelligence-backend.
+Steps:
+- For each repo: git -C <path> log --since="2026-04-28" --pretty=format:"%H|%an|%s|%b" main
+- Read EVERY commit since 2026-04-28. Do not filter by Author — all show as arhurkostaras. Differentiator is Co-Authored-By line: Claude Opus 4.7 = this session's prior work, Claude Opus 4.6 = parallel session, audit carefully.
+- For each commit: git -C <path> show <hash>, read full diff.
+- Classify: Safe (comments/docs/tests, no behavior change) / Needs review (app logic but not cron/auth/deliverability) / Blocking (cron schedules, send limits, daily_limit env vars, auth/session, webhook handlers, DB migrations, suppression).
+- Email arthur@: subject "Identity audit Task 2 — parallel-session reconciliation", body with table (hash|repo|co-author|files|classification|one-liner) and explicit "safe to fire 9:30 cron" or "blocking issues found, recommend pausing cron."
+- Blocking commit found → STOP, do NOT revert unilaterally.
+
+TASK 3 — UNION view migration (CONDITIONAL, half-day)
+ONLY IF Task 1 returns "structurally invisible" AND Arthur explicitly says go.
+
+a) PRE-DDL CODE MIGRATION (FIRST): grep all backends for INSERT/UPDATE/DELETE against \`users\`, migrate every callsite to write \`users_session\` directly. UNION views aren't updatable in Postgres without INSTEAD OF triggers — without this step, the rename breaks every existing write.
+
+b) Generate per-platform REFERRAL_SECRET (32-byte random hex, distinct per platform). Set on each Railway backend via mcp__railway-mcp-server__set-variables with skipDeploys=true. Do this BEFORE the view definition references the env var.
+
+c) Rename users → users_session.
+
+d) Create view \`users\` as UNION ALL over (SELECT * FROM users_session) and (SELECT <derived> FROM scraped_<platform> WHERE claim_status='claimed' AND email NOT IN (SELECT email FROM users_session)).
+   - Compute referral_code in app code (not Postgres GUC) via crypto.createHmac('sha256', process.env.REFERRAL_SECRET).update(email).digest('hex'). Full 32 hex chars. Existing format example: ea5dd43de1958c4bbc920f9699b998cb. Do NOT truncate to 8 chars.
+   - Per-platform view definition with column-mapping comment header. ACC=scraped_cpas, LAW=scraped_lawyers, INV=scraped_advisors. Schema asymmetry means per-platform, not template.
+
+e) CBE EXCLUDED. CBE has bankers/intakes/smes — no scraped_* with claim_status. Different problem, separate ticket.
+
+Migration order with explicit gate per platform:
+1. ACC first. EXPLAIN ANALYZE on SELECT referral_code FROM users WHERE email = $1. >50ms = STOP, may need materialized view. Capture EXPLAIN in commit message.
+2. Verify: existing 2 ACC users (Arthur, David Mark) resolve to existing codes (regression baseline). New claimer not in users_session resolves to deterministic code. Same email twice → same code.
+3. Replace 24h soak with 5 confirmed widget renders against new view.
+4. Email Arthur, wait for go-ahead.
+5. LAW second (~127K scraped_lawyers — real perf test). Re-run EXPLAIN ANALYZE.
+6. INV third.
+
+Rollback: DROP VIEW users; ALTER TABLE users_session RENAME TO users;
+
+STOP CONDITIONS
+- Task 2 Blocking commit → STOP, flag, do not revert.
+- View 50-200ms on LAW → STOP, flag with EXPLAIN, don't ship.
+- Task 1 ambiguous → STOP, do not proceed to Task 3.
+- Tempted to fix [X] in passing → NO. Note + ask separately.
+- Generalize UNION view → NO. Widget is the test case.
+
+REPORTING
+After Task 1: email + await go/no-go on Task 3.
+After Task 2: email summary + explicit safe/blocking call.
+After EACH platform in Task 3: separate email with EXPLAIN ANALYZE + verification + go-ahead before next.
+
+Begin Task 1 immediately. Begin Task 2 in parallel.`;
+
+  const escaped = promptBody.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  try {
+    await sendEmail({
+      to: 'arthur@negotiateandwin.com',
+      subject: 'Identity audit — paste into Claude now (Mon May 4, 9:30 cron deadline)',
+      html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:900px;color:#0F1629;">
+        <p style="font-size:15px;">Good morning. The identity reconciliation + parallel-session audit is queued.</p>
+        <p style="font-size:15px;">Open a fresh Claude session and paste the entire block below. The audit runs Tasks 1 and 2 in parallel; you'll get two emails roughly 15 and 30 minutes after start.</p>
+        <p style="font-size:15px;"><strong style="color:#8C3A2C;">Hard deadline: Task 2 must complete before 9:30 AM ET</strong> when the CBE banker-send cron fires. That gives ~2.5h of margin from 7 AM start.</p>
+        <hr style="border:none;border-top:1px solid #C9BFA8;margin:20px 0;">
+        <p style="font-size:13px;color:#5A6478;">Copy everything between the lines:</p>
+        <pre style="background:#0F1629;color:#F5F1E8;padding:24px;border-radius:6px;white-space:pre-wrap;font-size:12px;line-height:1.55;font-family:Consolas,Monaco,monospace;">${escaped}</pre>
+        <p style="font-size:12px;color:#5A6478;margin-top:24px;">Auto-generated by ACC reminder cron at 7:00 AM ET, May 4. One-shot — won't fire again.</p>
+      </div>`,
+      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
+    });
+    console.log('[IdentityAuditReminder] email sent successfully');
+  } catch (e) {
+    console.error('[IdentityAuditReminder] send failed:', e.message);
+  }
+}, { timezone: 'America/Toronto' });
+console.log('[IdentityAuditReminder] one-time reminder cron scheduled for Mon May 4 7:00 AM ET');
+
 // Heartbeat: log every hour to confirm process is alive and crons are registered
 setInterval(() => {
   console.log(`[Heartbeat] ACC alive at ${new Date().toISOString()}, uptime=${process.uptime().toFixed(0)}s`);
