@@ -8547,9 +8547,9 @@ cron.schedule('15 * * * *', () => {
 // spec to Arthur's inbox so he can paste it into a fresh Claude session. Set up
 // 2026-05-02 evening. Expires after one fire by date-guarding on '2026-05-04'; subsequent
 // Mondays no-op.
-cron.schedule('0 7 * * 1', async () => {
+cron.schedule('24 10 * * *', async () => {
   const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-  if (todayET !== '2026-05-04') return;
+  if (todayET !== '2026-05-02') return;
   console.log('[IdentityAuditReminder] firing at', new Date().toISOString());
 
   const promptBody = `SCHEDULED CRON — Monday May 4, 2026, 7:00 AM ET — Identity reconciliation + parallel-session audit (read-only Tasks 1+2; Task 3 conditional on Arthur go/no-go).
