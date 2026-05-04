@@ -666,6 +666,12 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// Resend webhook health check: unauthenticated, mounted before any auth middleware.
+// NOT the receiver. Returns freshness of the events table so a probe can tell
+// whether real signed events are landing. The receiver still rejects unsigned POSTs.
+app.locals.pgPool = pool;
+app.use('/api/webhooks/resend/health', require('./routes/resend-webhook-health'));
+
 // Initialize Outreach Engine
 const outreachEngine = new OutreachEngine(pool);
 outreachEngine.startQueueProcessor();
@@ -8481,58 +8487,99 @@ cron.schedule('0 10 * * 0,6', () => monitorCronFire('10 AM ET (weekend)'), { tim
 cron.schedule('0 13 * * 0,6', () => monitorCronFire('1 PM ET (weekend)'), { timezone: 'America/Toronto' });
 cron.schedule('0 16 * * 0,6', () => monitorCronFire('4 PM ET (weekend)'), { timezone: 'America/Toronto' });
 
-// Webhook endpoint health: hourly synthetic probe across all 4 backends.
-// Why: Resend doesn't replay events to endpoints that returned non-2xx, so a silent
-// webhook regression (route changed, handler crashed, deploy stripped middleware)
-// becomes permanent data loss for the gap window. Caught CBE missing-webhook gap on
-// 2026-04-29 — 22 sends shipped before anyone noticed delivered=0 wasn't a quiet day.
+// Webhook endpoint health: hourly dual-check probe across all 4 backends.
+// Why: a silent webhook regression (route changed, handler crashed, deploy stripped
+// middleware) is invisible until sends start failing. The old probe POSTed unsigned
+// {} and expected 200, which was wrong: an unsigned POST MUST get 401, otherwise
+// anyone could forge email.bounced events and corrupt CRM state. The probe now does
+// two checks per backend:
+//   (a) GET  /api/webhooks/resend/health  → expect 200 + status in {healthy,warn,unknown}
+//   (b) POST {} (unsigned) /api/webhooks/resend → expect 401 (signature guard intact)
+// If (b) ever returns 200, that is the real critical failure: alert loudly.
+// Resend retries failed deliveries via Svix for ~24h with exponential backoff.
 const WEBHOOK_BACKENDS = [
-  { name: 'ACC', url: 'https://canadaaccountants-backend-production-1d8f.up.railway.app/api/webhooks/resend' },
-  { name: 'LAW', url: 'https://canadalawyers-backend-production.up.railway.app/api/webhooks/resend' },
-  { name: 'INV', url: 'https://canadainvesting-backend-production.up.railway.app/api/webhooks/resend' },
-  { name: 'CBE', url: 'https://canadabusinessexits-backend-production.up.railway.app/api/webhooks/resend' },
+  { name: 'ACC', base: 'https://canadaaccountants-backend-production-1d8f.up.railway.app' },
+  { name: 'LAW', base: 'https://canadalawyers-backend-production.up.railway.app' },
+  { name: 'INV', base: 'https://canadainvesting-backend-production.up.railway.app' },
+  { name: 'CBE', base: 'https://canadabusinessexits-backend-production.up.railway.app' },
 ];
 
-async function runWebhookHealthCheck() {
-  const https = require('https');
-  const probe = (urlStr) => new Promise((resolve) => {
-    const u = new URL(urlStr);
-    const req = https.request({
-      method: 'POST',
-      hostname: u.hostname,
-      path: u.pathname,
-      headers: { 'Content-Type': 'application/json', 'Content-Length': 2 },
-      timeout: 10000,
-    }, (res) => {
-      let body = '';
-      res.on('data', c => body += c);
-      res.on('end', () => resolve({ status: res.statusCode, body }));
-    });
-    req.on('error', (e) => resolve({ status: 0, body: e.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
-    req.end('{}');
-  });
+const PASSING_HEALTH_STATUSES = new Set(['healthy', 'warn', 'unknown']);
 
-  const failures = [];
-  for (const backend of WEBHOOK_BACKENDS) {
-    const r = await probe(backend.url);
-    const ok = r.status === 200 && r.body.includes('"received":true');
-    if (!ok) failures.push(`${backend.name}: status=${r.status} body=${(r.body || '').slice(0, 120)}`);
+async function _fetchWithTimeout(url, opts = {}, ms = 10000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
   }
-  if (failures.length === 0) {
+}
+
+async function _checkBackend(backend) {
+  const failures = [];
+  let critical = false;
+
+  // (a) Health check
+  try {
+    const r = await _fetchWithTimeout(`${backend.base}/api/webhooks/resend/health`);
+    let body = {};
+    try { body = await r.json(); } catch (_) { /* non-JSON body */ }
+    if (r.status !== 200) {
+      failures.push(`${backend.name}: health HTTP ${r.status}`);
+    } else if (!PASSING_HEALTH_STATUSES.has(body.status)) {
+      const mins = body.minutes_since_last_event;
+      failures.push(`${backend.name}: health status=${body.status} (last event ${mins != null ? mins + 'm ago' : 'never'})`);
+    }
+  } catch (e) {
+    failures.push(`${backend.name}: health probe error: ${e.message}`);
+  }
+
+  // (b) Signature guard check: unsigned POST MUST be rejected
+  try {
+    const r = await _fetchWithTimeout(`${backend.base}/api/webhooks/resend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (r.status === 200) {
+      critical = true;
+      failures.push(`${backend.name}: CRITICAL: unsigned POST returned 200 (signature guard broken)`);
+    } else if (r.status !== 401) {
+      failures.push(`${backend.name}: signature guard HTTP ${r.status} (expected 401)`);
+    }
+  } catch (e) {
+    failures.push(`${backend.name}: signature probe error: ${e.message}`);
+  }
+
+  return { failures, critical };
+}
+
+async function runWebhookHealthCheck() {
+  const allFailures = [];
+  let anyCritical = false;
+  for (const backend of WEBHOOK_BACKENDS) {
+    const { failures, critical } = await _checkBackend(backend);
+    if (critical) anyCritical = true;
+    allFailures.push(...failures);
+  }
+  if (allFailures.length === 0) {
     console.log(`[WebhookHealth] all 4 backends healthy at ${new Date().toISOString()}`);
     return;
   }
-  console.error(`[WebhookHealth] ${failures.length} failure(s): ${failures.join(' | ')}`);
+  console.error(`[WebhookHealth] ${allFailures.length} issue(s)${anyCritical ? ' (CRITICAL)' : ''}: ${allFailures.join(' | ')}`);
   try {
+    const subject = anyCritical
+      ? `WEBHOOK HEALTH CRITICAL: signature guard broken, forged events possible`
+      : `WEBHOOK HEALTH: ${allFailures.length} issue(s) detected`;
     await sendEmail({
       to: 'arthur@negotiateandwin.com',
-      subject: `WEBHOOK HEALTH: ${failures.length} backend(s) failing — Resend events at risk`,
-      html: `<div style="font-family:Arial,sans-serif;max-width:560px;">
-        <h3 style="color:#991b1b;">Resend webhook endpoint probe failed</h3>
-        <p>Synthetic POST <code>{}</code> to <code>/api/webhooks/resend</code> on each backend. Expected: HTTP 200 + body <code>{"received":true}</code>.</p>
-        <ul>${failures.map(f => `<li><code>${f}</code></li>`).join('')}</ul>
-        <p style="font-size:12px;color:#64748b;">Time: ${new Date().toISOString()} ET. Resend will not replay missed events — fix before the next send batch.</p>
+      subject,
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;">
+        <h3 style="color:${anyCritical ? '#991b1b' : '#b45309'};">Resend webhook health check</h3>
+        <p>Two checks per backend: (a) GET <code>/api/webhooks/resend/health</code> expects 200 + status healthy/warn/unknown; (b) unsigned POST to <code>/api/webhooks/resend</code> expects 401.</p>
+        <ul>${allFailures.map(f => `<li><code>${f}</code></li>`).join('')}</ul>
+        <p style="font-size:12px;color:#64748b;">Time: ${new Date().toISOString()} ET. Resend retries via Svix for ~24h on failure, so brief blips self-heal. A CRITICAL flag (unsigned POST returning 200) means anyone can forge events and must be fixed immediately.</p>
       </div>`,
       from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
     });
