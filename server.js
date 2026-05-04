@@ -5527,27 +5527,60 @@ app.post('/api/admin/reset-password', async (req, res) => {
   }
 })();
 
-// GET /api/referral/:userId — generate or return existing referral link
-app.get('/api/referral/:userId', async (req, res) => {
+// One-time backfill on boot: populate referral_code for any user that doesn't
+// have one. Idempotent (UPDATE ... WHERE IS NULL); after first successful run,
+// subsequent boots find 0 rows and no-op. Runs because the route below now
+// returns 404 on null instead of lazy-generating, so existing null users would
+// otherwise lose a previously-working response.
+(async () => {
   try {
-    const userId = parseInt(req.params.userId);
+    const nulls = await pool.query(`SELECT id FROM users WHERE referral_code IS NULL`);
+    if (nulls.rows.length === 0) {
+      console.log('[Referral backfill] no null referral_codes');
+      return;
+    }
+    console.log(`[Referral backfill] backfilling ${nulls.rows.length} users`);
+    let updated = 0;
+    for (const row of nulls.rows) {
+      const code = crypto.randomBytes(16).toString('hex');
+      const result = await pool.query(
+        `UPDATE users SET referral_code = $1 WHERE id = $2 AND referral_code IS NULL`,
+        [code, row.id]
+      );
+      updated += result.rowCount;
+    }
+    console.log(`[Referral backfill] updated ${updated} users`);
+  } catch (err) {
+    console.error('[Referral backfill] error:', err.message);
+  }
+})();
+
+// GET /api/referral/:userId — read-only fetch of caller's own referral link.
+// Auth required; user can only fetch their own code (req.user.userId match).
+// No lazy generation — claim flow populates the column, boot backfill catches
+// pre-existing nulls. Removed unauth-GET write side effect (security fix 2026-05-04).
+app.get('/api/referral/:userId', authenticateToken, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.userId, 10);
     if (!userId) return res.status(400).json({ error: 'Invalid userId' });
 
-    // Check if user already has a referral code
+    if (req.user.userId !== userId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const user = await pool.query(`SELECT id, referral_code FROM users WHERE id = $1`, [userId]);
     if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
 
-    let code = user.rows[0].referral_code;
+    const code = user.rows[0].referral_code;
     if (!code) {
-      code = crypto.randomBytes(16).toString('hex');
-      await pool.query(`UPDATE users SET referral_code = $1 WHERE id = $2`, [code, userId]);
+      return res.status(404).json({ error: 'Referral code not provisioned' });
     }
 
     const referralLink = `${FRONTEND_URL}/join-as-cpa?ref=${code}`;
     res.json({ referralLink, code });
   } catch (err) {
     console.error('[Referral] Error:', err.message);
-    res.status(500).json({ error: 'Failed to generate referral link' });
+    res.status(500).json({ error: 'Failed to fetch referral link' });
   }
 });
 
