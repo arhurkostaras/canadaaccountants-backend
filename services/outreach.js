@@ -485,7 +485,7 @@ class OutreachEngine {
              WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND COALESCE(oe.retry_count, 0) < 5
                AND oe.recipient_type = 'cpa'
                AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
-               AND (sc.province IS NULL OR sc.province = ANY($3::text[]))
+               AND (sc.province IS NULL OR sc.province = '' OR sc.province NOT IN ('ON','QC','MB','SK','AB','BC','NL','NS','NB','PE') OR sc.province = ANY($3::text[]))
              ORDER BY oe.queued_at ASC LIMIT $2`,
             [campaign.id, remaining, inWindowProvinces]
           );
@@ -496,7 +496,7 @@ class OutreachEngine {
              WHERE oe.campaign_id = $1 AND oe.status = 'queued' AND COALESCE(oe.retry_count, 0) < 5
                AND oe.recipient_type = 'sme'
                AND oe.recipient_email NOT IN (SELECT email FROM outreach_unsubscribes)
-               AND (ss.province IS NULL OR ss.province = ANY($3::text[]))
+               AND (ss.province IS NULL OR ss.province = '' OR ss.province NOT IN ('ON','QC','MB','SK','AB','BC','NL','NS','NB','PE') OR ss.province = ANY($3::text[]))
              ORDER BY oe.queued_at ASC LIMIT $2`,
             [campaign.id, remaining, inWindowProvinces]
           );
