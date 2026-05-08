@@ -1092,7 +1092,45 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_founder_outreach_log_email ON founder_outreach_log (recipient_email, sent_at)`);
 
-    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table + founder_outreach_log table verified');
+    // Inbound mail ingestion (Section 4.0 of campaign brief v1.7)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS inbound_messages (
+        id SERIAL PRIMARY KEY,
+        platform VARCHAR(10) NOT NULL,
+        from_email TEXT NOT NULL,
+        to_email TEXT NOT NULL,
+        subject TEXT,
+        body_text TEXT NOT NULL DEFAULT '',
+        body_html TEXT,
+        message_id TEXT NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL,
+        ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        classification_status VARCHAR(20) NOT NULL DEFAULT 'pending'
+          CHECK (classification_status IN ('pending','classified','manual_review','suppressed')),
+        classification_decision VARCHAR(20)
+          CHECK (classification_decision IS NULL OR classification_decision IN ('breakdown','unsubscribe','touch7_in','touch7_out','manual')),
+        processed_at TIMESTAMPTZ
+      )
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_messages_message_id ON inbound_messages(message_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_inbound_messages_pending ON inbound_messages(received_at) WHERE classification_status = 'pending'`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_inbound_messages_received_at ON inbound_messages(received_at)`);
+
+    // Polling cron status (single-row, ACC-only)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS inbound_poll_status (
+        id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        last_poll_at TIMESTAMPTZ,
+        last_poll_status VARCHAR(20),
+        last_poll_message_count INTEGER DEFAULT 0,
+        last_poll_error TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`INSERT INTO inbound_poll_status (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
+
+    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table + founder_outreach_log table + inbound_messages + inbound_poll_status verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
   }
@@ -3569,6 +3607,149 @@ app.post('/api/webhooks/resend', express.raw({ type: 'application/json' }), asyn
   } catch (error) {
     console.error('Resend webhook error:', error);
     res.status(500).json({ error: 'Webhook processing failed' });
+  }
+});
+
+// Inbound mail ingestion endpoint (Section 4.0 of campaign brief v1.7).
+// Receives parsed mail from the ACC IMAP polling cron via HMAC-signed POST.
+// Writes one row to inbound_messages; classifier (Section 4.10) processes asynchronously.
+//
+// HMAC contract (shared by /api/inbound POST and /api/admin/inbound-summary GET):
+//   canonical = `${timestamp}.${payload}`
+//   - For POST, payload = raw request body
+//   - For GET, payload = `${method} ${path}?${query}` (e.g., `GET /api/admin/inbound-summary?since=2026-05-07T00:00:00Z`)
+//   signature = hex(HMAC-SHA256(secret, canonical))
+//   Headers: X-Inbound-Signature: <hex>, X-Inbound-Timestamp: <unix-seconds>
+function _verifyInboundSignature(secret, ts, sig, canonicalPayload) {
+  if (!secret) return { ok: false, reason: 'INBOUND_WEBHOOK_SECRET not configured' };
+  if (!sig || !ts) return { ok: false, reason: 'missing signature headers' };
+  const tsAge = Math.abs(Math.floor(Date.now() / 1000) - parseInt(ts, 10));
+  if (!Number.isFinite(tsAge) || tsAge > 300) return { ok: false, reason: 'stale or invalid timestamp' };
+  const expected = crypto.createHmac('sha256', secret).update(`${ts}.${canonicalPayload}`).digest('hex');
+  let sigBuf, expectedBuf;
+  try {
+    sigBuf = Buffer.from(sig, 'hex');
+    expectedBuf = Buffer.from(expected, 'hex');
+  } catch (e) {
+    return { ok: false, reason: 'malformed signature' };
+  }
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return { ok: false, reason: 'signature mismatch' };
+  }
+  return { ok: true };
+}
+
+app.post('/api/inbound', express.raw({ type: 'application/json', limit: '10mb' }), async (req, res) => {
+  try {
+    const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : (typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+    const verify = _verifyInboundSignature(
+      process.env.INBOUND_WEBHOOK_SECRET,
+      req.headers['x-inbound-timestamp'],
+      req.headers['x-inbound-signature'],
+      rawBody
+    );
+    if (!verify.ok) {
+      console.error('[Inbound] auth failure:', verify.reason);
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    let payload;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch (e) {
+      console.error('[Inbound] JSON parse error:', e.message);
+      return res.status(400).json({ error: 'malformed JSON' });
+    }
+    const { from_email, to_email, subject, body_text, body_html, message_id, received_at } = payload;
+    if (!from_email || !to_email || !message_id || !received_at) {
+      return res.status(400).json({ error: 'missing required fields (from_email, to_email, message_id, received_at)' });
+    }
+    const result = await pool.query(
+      `INSERT INTO inbound_messages
+         (platform, from_email, to_email, subject, body_text, body_html, message_id, received_at)
+       VALUES ('acc', $1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (message_id) DO NOTHING
+       RETURNING id`,
+      [from_email, to_email, subject || null, body_text || '', body_html || null, message_id, received_at]
+    );
+    if (result.rowCount === 0) {
+      return res.json({ received: true, duplicate: true });
+    }
+    res.json({ received: true, id: result.rows[0].id });
+  } catch (error) {
+    console.error('[Inbound] processing error:', error);
+    res.status(500).json({ error: 'inbound processing failed' });
+  }
+});
+
+// Inbound summary stats endpoint — read by the ACC twice-daily summary cron.
+// HMAC contract: canonical payload is `GET ${path}?${query}` (no body).
+app.get('/api/admin/inbound-summary', async (req, res) => {
+  try {
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?') + 1) : '';
+    const canonical = `GET ${req.path}?${queryString}`;
+    const verify = _verifyInboundSignature(
+      process.env.INBOUND_WEBHOOK_SECRET,
+      req.headers['x-inbound-timestamp'],
+      req.headers['x-inbound-signature'],
+      canonical
+    );
+    if (!verify.ok) {
+      console.error('[InboundSummary] auth failure:', verify.reason);
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const since = req.query.since;
+    if (!since || isNaN(Date.parse(since))) {
+      return res.status(400).json({ error: 'missing or invalid `since` parameter (ISO 8601)' });
+    }
+    const totals = await pool.query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE classification_status = 'pending')::int AS pending,
+         COUNT(*) FILTER (WHERE classification_status = 'pending' AND received_at < NOW() - INTERVAL '4 hours')::int AS pending_sla_breach,
+         COUNT(*) FILTER (WHERE classification_decision = 'breakdown')::int AS breakdown,
+         COUNT(*) FILTER (WHERE classification_decision = 'unsubscribe')::int AS unsubscribe,
+         COUNT(*) FILTER (WHERE classification_decision = 'touch7_in')::int AS touch7_in,
+         COUNT(*) FILTER (WHERE classification_decision = 'touch7_out')::int AS touch7_out,
+         COUNT(*) FILTER (WHERE classification_decision = 'manual')::int AS manual,
+         COUNT(*) FILTER (WHERE classification_status = 'manual_review')::int AS manual_review,
+         COUNT(*) FILTER (WHERE classification_status = 'suppressed')::int AS suppressed
+       FROM inbound_messages
+       WHERE received_at >= $1`,
+      [since]
+    );
+    res.json({ platform: 'acc', since, ...totals.rows[0] });
+  } catch (error) {
+    console.error('[InboundSummary] error:', error);
+    res.status(500).json({ error: 'summary failed' });
+  }
+});
+
+// Inbound poller health (ACC-only). Reads the single-row inbound_poll_status table.
+// HMAC contract: canonical payload is `GET ${path}?${query}` (no body, no required query).
+app.get('/api/admin/inbound-health', async (req, res) => {
+  try {
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?') + 1) : '';
+    const canonical = `GET ${req.path}?${queryString}`;
+    const verify = _verifyInboundSignature(
+      process.env.INBOUND_WEBHOOK_SECRET,
+      req.headers['x-inbound-timestamp'],
+      req.headers['x-inbound-signature'],
+      canonical
+    );
+    if (!verify.ok) {
+      console.error('[InboundHealth] auth failure:', verify.reason);
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const status = await pool.query(`SELECT * FROM inbound_poll_status WHERE id = 1`);
+    const inbox = await pool.query(`SELECT COUNT(*)::int AS pending_count FROM inbound_messages WHERE classification_status = 'pending'`);
+    res.json({
+      ...(status.rows[0] || {}),
+      pending_inbound_messages: inbox.rows[0]?.pending_count || 0,
+      now: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('[InboundHealth] error:', error);
+    res.status(500).json({ error: 'health check failed' });
   }
 });
 
@@ -8519,6 +8700,26 @@ cron.schedule('0 15 * * *', () => monitorCronFire('3 PM ET'), { timezone: 'Ameri
 cron.schedule('0 10 * * 0,6', () => monitorCronFire('10 AM ET (weekend)'), { timezone: 'America/Toronto' });
 cron.schedule('0 13 * * 0,6', () => monitorCronFire('1 PM ET (weekend)'), { timezone: 'America/Toronto' });
 cron.schedule('0 16 * * 0,6', () => monitorCronFire('4 PM ET (weekend)'), { timezone: 'America/Toronto' });
+
+// Inbound mail polling cron (Section 4.0 of campaign brief v1.7). Polls
+// arthur@negotiateandwin.com via IMAP every 5 minutes, dispatches platform-routed
+// replies to /api/inbound on each backend. ACC hosts this single polling cron;
+// LAW/INV/CBE only expose the /api/inbound receiver.
+const inboundPoller = require('./services/inbound-poller');
+cron.schedule('*/5 * * * *', () => {
+  inboundPoller.pollOnce(pool).catch(e => console.error('[InboundPoller] uncaught:', e.message));
+}, { timezone: 'America/Toronto' });
+
+// Twice-daily inbound activity summary (Section 4.0 of campaign brief v1.7).
+// 10:00 ET and 15:00 ET, every day. Aggregates across all four backends and emails
+// arthur@negotiateandwin.com.
+const inboundSummary = require('./services/inbound-summary');
+cron.schedule('0 10 * * *', () => {
+  inboundSummary.sendSummary({ pool, slot: '10am' }).catch(e => console.error('[InboundSummary] uncaught:', e.message));
+}, { timezone: 'America/New_York' });
+cron.schedule('0 15 * * *', () => {
+  inboundSummary.sendSummary({ pool, slot: '3pm' }).catch(e => console.error('[InboundSummary] uncaught:', e.message));
+}, { timezone: 'America/New_York' });
 
 // Webhook endpoint health: hourly dual-check probe across all 4 backends.
 // Why: a silent webhook regression (route changed, handler crashed, deploy stripped
