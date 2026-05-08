@@ -36,7 +36,7 @@ async function _fetchPeerSummary(peer, sinceISO) {
   const secret = process.env.INBOUND_WEBHOOK_SECRET;
   if (!secret) return { platform: peer.platform, error: 'INBOUND_WEBHOOK_SECRET not set' };
   const ts = Math.floor(Date.now() / 1000).toString();
-  const path = '/api/admin/inbound-summary';
+  const path = '/api/inbound-summary';
   const query = `since=${encodeURIComponent(sinceISO)}`;
   const canonical = `GET ${path}?${query}`;
   const sig = _hmacSign(secret, ts, canonical);

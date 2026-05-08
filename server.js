@@ -3614,10 +3614,10 @@ app.post('/api/webhooks/resend', express.raw({ type: 'application/json' }), asyn
 // Receives parsed mail from the ACC IMAP polling cron via HMAC-signed POST.
 // Writes one row to inbound_messages; classifier (Section 4.10) processes asynchronously.
 //
-// HMAC contract (shared by /api/inbound POST and /api/admin/inbound-summary GET):
+// HMAC contract (shared by /api/inbound POST and /api/inbound-summary GET):
 //   canonical = `${timestamp}.${payload}`
 //   - For POST, payload = raw request body
-//   - For GET, payload = `${method} ${path}?${query}` (e.g., `GET /api/admin/inbound-summary?since=2026-05-07T00:00:00Z`)
+//   - For GET, payload = `${method} ${path}?${query}` (e.g., `GET /api/inbound-summary?since=2026-05-07T00:00:00Z`)
 //   signature = hex(HMAC-SHA256(secret, canonical))
 //   Headers: X-Inbound-Signature: <hex>, X-Inbound-Timestamp: <unix-seconds>
 function _verifyInboundSignature(secret, ts, sig, canonicalPayload) {
@@ -3683,7 +3683,7 @@ app.post('/api/inbound', express.raw({ type: 'application/json', limit: '10mb' }
 
 // Inbound summary stats endpoint — read by the ACC twice-daily summary cron.
 // HMAC contract: canonical payload is `GET ${path}?${query}` (no body).
-app.get('/api/admin/inbound-summary', async (req, res) => {
+app.get('/api/inbound-summary', async (req, res) => {
   try {
     const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?') + 1) : '';
     const canonical = `GET ${req.path}?${queryString}`;
@@ -3726,7 +3726,7 @@ app.get('/api/admin/inbound-summary', async (req, res) => {
 
 // Inbound poller health (ACC-only). Reads the single-row inbound_poll_status table.
 // HMAC contract: canonical payload is `GET ${path}?${query}` (no body, no required query).
-app.get('/api/admin/inbound-health', async (req, res) => {
+app.get('/api/inbound-health', async (req, res) => {
   try {
     const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?') + 1) : '';
     const canonical = `GET ${req.path}?${queryString}`;
