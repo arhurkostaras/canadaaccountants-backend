@@ -15,9 +15,15 @@ const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
 
-// Map original recipient address → platform key + backend URL env var name
+// Map original recipient address → platform key + backend URL env var name.
+// ACC self-dispatch: prefer ACC_BACKEND_URL if set, else derive from Railway's
+// auto-injected RAILWAY_PUBLIC_DOMAIN, else localhost on the server's PORT.
+const _selfUrl = process.env.ACC_BACKEND_URL
+  || (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null)
+  || `http://localhost:${process.env.PORT || 8080}`;
+
 const PLATFORM_ROUTING = {
-  'arthur@canadaaccountants.app': { platform: 'acc', backendUrl: process.env.ACC_BACKEND_URL || 'http://localhost:3000' },
+  'arthur@canadaaccountants.app': { platform: 'acc', backendUrl: _selfUrl },
   'arthur@canadalawyers.app':     { platform: 'law', backendUrl: process.env.LAW_BACKEND_URL },
   'arthur@canadainvesting.app':   { platform: 'inv', backendUrl: process.env.INV_BACKEND_URL },
   'arthur@canadabusinessexits.app': { platform: 'cbe', backendUrl: process.env.CBE_BACKEND_URL }
@@ -71,18 +77,24 @@ async function _dispatchToBackend(route, messagePayload) {
   const ts = Math.floor(Date.now() / 1000).toString();
   const sig = _hmacSign(secret, ts, body);
   const url = `${route.backendUrl.replace(/\/$/, '')}/api/inbound`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Inbound-Timestamp': ts,
-      'X-Inbound-Signature': sig
-    },
-    body
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Inbound-Timestamp': ts,
+        'X-Inbound-Signature': sig
+      },
+      body
+    });
+  } catch (fetchErr) {
+    const cause = fetchErr.cause ? ` (cause: ${fetchErr.cause.message || fetchErr.cause})` : '';
+    throw new Error(`fetch to ${url} failed: ${fetchErr.message}${cause}`);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`backend ${route.platform} returned ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`backend ${route.platform} at ${url} returned ${res.status}: ${text.slice(0, 200)}`);
   }
   return res.json().catch(() => ({}));
 }
