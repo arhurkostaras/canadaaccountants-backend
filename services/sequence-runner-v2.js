@@ -274,6 +274,18 @@ async function processOne(pool, enrollment) {
 
 async function runOnce(pool) {
   const startedAt = new Date();
+  // Honor deliverability-gate auto-pause: if the gate has paused this platform's
+  // sequence (Section 4.5 — complaint > 0.3% or bounce > 2% over 24h window),
+  // skip this run entirely. Manual unpause is required.
+  try {
+    const deliverabilityGate = require('./deliverability-gate');
+    if (await deliverabilityGate.isPlatformPaused(pool)) {
+      console.log(`[SequenceRunnerV2] ${startedAt.toISOString()}: skipped — platform paused by deliverability gate`);
+      return { due: 0, sent: 0, gated: 0, stopped: 0, failed: 0, paused: true };
+    }
+  } catch (err) {
+    console.error('[SequenceRunnerV2] gate check failed (proceeding):', err.message);
+  }
   const r = await pool.query(
     `SELECT * FROM v2_supply_enrollments
      WHERE platform = $1 AND completed_at IS NULL
