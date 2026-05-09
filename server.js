@@ -1153,7 +1153,97 @@ const crmIntelligence = new CRMIntelligence({
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_breakdown_replies_status ON breakdown_replies(status, created_at)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_breakdown_replies_pending_old ON breakdown_replies(replied_at) WHERE status = 'pending' AND breakdown_sent_at IS NULL`);
 
-    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table + founder_outreach_log table + inbound_messages + inbound_poll_status + breakdown_replies verified');
+    // Section 4.7 of campaign brief v1.7 — DB schema additions for the multi-touch
+    // outreach campaign. Founding-cohort config, email-template store, sequence
+    // pause/close ledgers, and founding-joiners log. Per-platform initial rows
+    // inserted with ON CONFLICT DO NOTHING so re-deploy is idempotent.
+
+    // founding_cohort_config — one row per platform. Source of truth for caps,
+    // current count, pricing-lock months, and CBE success-fee rate (v1.4 amend).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS founding_cohort_config (
+        platform VARCHAR(10) PRIMARY KEY CHECK (platform IN ('acc','law','inv','cbe')),
+        cap INTEGER NOT NULL,
+        current_count INTEGER NOT NULL DEFAULT 0,
+        pricing_lock_months INTEGER NOT NULL DEFAULT 24,
+        success_fee_pct NUMERIC(5,2),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`
+      INSERT INTO founding_cohort_config (platform, cap, success_fee_pct)
+      VALUES ('acc', 50, NULL)
+      ON CONFLICT (platform) DO NOTHING
+    `);
+
+    // email_template — keyed by (platform, sequence, touch_number, variant).
+    // Lets copy be revised without code deploys (v1.7 Section 4.7).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS email_template (
+        id SERIAL PRIMARY KEY,
+        platform VARCHAR(10) NOT NULL CHECK (platform IN ('acc','law','inv','cbe')),
+        sequence VARCHAR(50) NOT NULL,
+        touch_number INTEGER NOT NULL,
+        variant VARCHAR(20) NOT NULL DEFAULT 'default',
+        subject_a TEXT,
+        subject_b TEXT,
+        body_text TEXT,
+        body_html TEXT,
+        is_lite BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_template_key ON email_template(platform, sequence, touch_number, variant)`);
+
+    // sequence_pause — deliverability-gate kill switch (v1.7 Section 4.5).
+    // Manual unpause required by Arthur — no auto-resume.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sequence_pause (
+        id SERIAL PRIMARY KEY,
+        platform VARCHAR(10) NOT NULL CHECK (platform IN ('acc','law','inv','cbe')),
+        sequence VARCHAR(50),
+        paused_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        pause_reason TEXT,
+        paused_by VARCHAR(50) NOT NULL DEFAULT 'manual',
+        unpaused_at TIMESTAMPTZ,
+        unpaused_by VARCHAR(50)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_sequence_pause_active ON sequence_pause(platform, sequence) WHERE unpaused_at IS NULL`);
+
+    // sequence_closure_log — Touch 7 auto-close audit trail (v1.7 Section 4.2).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sequence_closure_log (
+        id SERIAL PRIMARY KEY,
+        platform VARCHAR(10) NOT NULL CHECK (platform IN ('acc','law','inv','cbe')),
+        recipient_email TEXT NOT NULL,
+        sequence VARCHAR(50),
+        closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        closure_reason VARCHAR(50) NOT NULL,
+        last_touch_number INTEGER,
+        last_touch_sent_at TIMESTAMPTZ
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_sequence_closure_log_recipient ON sequence_closure_log(recipient_email, platform)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_sequence_closure_log_closed_at ON sequence_closure_log(closed_at)`);
+
+    // founding_cohort_joiners — Touch 5 conditional ship (v1.7 Section 4.4).
+    // Logs each founding-cohort activation. Used by sequence runner to gate Touch 5
+    // on "≥3 joiners in past 7 days AND ≥1 verifiable routing".
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS founding_cohort_joiners (
+        id SERIAL PRIMARY KEY,
+        platform VARCHAR(10) NOT NULL CHECK (platform IN ('acc','law','inv','cbe')),
+        recipient_email TEXT NOT NULL,
+        joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        province VARCHAR(50),
+        UNIQUE(platform, recipient_email)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_founding_cohort_joiners_recent ON founding_cohort_joiners(platform, joined_at)`);
+
+    console.log('[Migration] generated_bio + profile_visits + ab_test_results + founder_outreach_log + inbound_messages + inbound_poll_status + breakdown_replies + founding_cohort_config + email_template + sequence_pause + sequence_closure_log + founding_cohort_joiners verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
   }
