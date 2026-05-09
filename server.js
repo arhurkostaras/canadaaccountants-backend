@@ -1243,7 +1243,30 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_founding_cohort_joiners_recent ON founding_cohort_joiners(platform, joined_at)`);
 
-    console.log('[Migration] generated_bio + profile_visits + ab_test_results + founder_outreach_log + inbound_messages + inbound_poll_status + breakdown_replies + founding_cohort_config + email_template + sequence_pause + sequence_closure_log + founding_cohort_joiners verified');
+    // v2 supply-side sequence enrollments (Section 4.4 of campaign brief v1.7).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS v2_supply_enrollments (
+        id SERIAL PRIMARY KEY,
+        recipient_id INTEGER NOT NULL,
+        recipient_email TEXT NOT NULL,
+        platform VARCHAR(10) NOT NULL CHECK (platform IN ('acc','law','inv','cbe')),
+        sequence_name VARCHAR(50) NOT NULL,
+        current_step INTEGER NOT NULL DEFAULT 0,
+        next_send_at TIMESTAMPTZ,
+        ab_cohort VARCHAR(2),
+        enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        exit_reason VARCHAR(50),
+        last_touch_sent_at TIMESTAMPTZ,
+        last_touch_resend_id TEXT,
+        metadata JSONB,
+        UNIQUE(recipient_id, platform, sequence_name)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_v2_supply_due ON v2_supply_enrollments(next_send_at) WHERE completed_at IS NULL AND next_send_at IS NOT NULL`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_v2_supply_email ON v2_supply_enrollments(recipient_email, platform)`);
+
+    console.log('[Migration] generated_bio + profile_visits + ab_test_results + founder_outreach_log + inbound_messages + inbound_poll_status + breakdown_replies + founding_cohort_config + email_template + sequence_pause + sequence_closure_log + founding_cohort_joiners + v2_supply_enrollments verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
   }
