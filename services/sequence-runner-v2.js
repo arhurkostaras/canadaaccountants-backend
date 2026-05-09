@@ -306,7 +306,7 @@ async function runOnce(pool) {
 async function enrollOne(pool, recipientId) {
   const emailExpr = _coalesceEmailExpr('p');
   const r = await pool.query(
-    `SELECT id, ${emailExpr} AS email FROM ${RECIPIENT_TABLE} WHERE id = $1 LIMIT 1`,
+    `SELECT id, ${emailExpr} AS email FROM ${RECIPIENT_TABLE} p WHERE p.id = $1 LIMIT 1`,
     [recipientId]
   );
   if (r.rows.length === 0 || !r.rows[0].email) {
