@@ -266,4 +266,51 @@ You are receiving this because your business contact information is publicly lis
 </table>`;
 }
 
-module.exports = { PLATFORM, DIMENSIONS, score, compose };
+// Graceful fallback when populated_count < 4. Returns ok=true with an honest
+// acknowledgment + path-forward message, so every breakdown reply gets an
+// immediate auto-reply instead of being queued for manual triage.
+function composeFallback(scoreResult, recipient) {
+  const firstName = recipient.first_name || (recipient.full_name || '').split(' ')[0] || 'there';
+  const populated = (scoreResult.dimensions || []).filter(d => d.score != null && !d.insufficient_data);
+  const populatedLabels = populated.map(d => DIMENSION_LABELS[d.key] || d.key);
+  const missingLabels = (scoreResult.dimensions || [])
+    .filter(d => d.score == null || d.insufficient_data)
+    .map(d => DIMENSION_LABELS[d.key] || d.key);
+
+  const lines = [];
+  lines.push(`Hi ${firstName},`, '');
+  lines.push(`Thanks for asking for the breakdown. Honest read: your public profile data in the provincial CPA directories is sparser than our 5-dimension scorer needs for a confident scorecard. Here is what we have and what we do not have.`, '');
+  if (populatedLabels.length > 0) {
+    lines.push(`What we can score (${populatedLabels.length} of 5 dimensions):`);
+    for (const d of populated) lines.push(`  • ${DIMENSION_LABELS[d.key] || d.key} — ${d.score}/100. ${d.reason}.`);
+    lines.push('');
+  }
+  if (missingLabels.length > 0) {
+    lines.push(`What we cannot score from public data (${missingLabels.length} dimension${missingLabels.length === 1 ? '' : 's'}):`);
+    for (const label of missingLabels) lines.push(`  • ${label}`);
+    lines.push('');
+  }
+  lines.push(`The full 5-dimension scorecard becomes producible after standard tier opens, when public profile coverage on Canadian CPAs gets enriched on a different cadence. For founding cohort, the routing engine still runs on the data we have — your queue position is set by founding-cohort entry, not by the scorecard.`, '');
+  lines.push(`If you want a founding seat anyway, reply with the word "in" and I will personally enroll you at $299/mo, locked for 24 months from your activation. Otherwise, no problem — you will continue to receive the standard sequence emails and can reply at any later touch.`, '');
+  lines.push(`— Arthur Kostaras`, `Founder, CanadaAccountants`, '', `---`);
+  lines.push(`You are receiving this because you replied "breakdown" to my outreach. To unsubscribe from all future emails: reply with the word "unsubscribe" and I will remove you within 10 business days. Sender: Arthur Kostaras, 1012-728 Yates Street, Victoria, BC V8W 1L4, Canada.`);
+  const text = lines.join('\n');
+  const html = `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#fff;font-family:Arial,sans-serif;color:#111;">
+<tr><td style="padding:24px 24px 0;">
+<p style="margin:0 0 12px;font-size:15px;">Hi ${firstName},</p>
+<p style="margin:0 0 12px;font-size:14px;line-height:1.55;">Thanks for asking for the breakdown. Honest read: your public profile data in the provincial CPA directories is sparser than our 5-dimension scorer needs for a confident scorecard.</p>
+${populatedLabels.length > 0 ? `<p style="margin:14px 0 6px;font-size:14px;color:#111;font-weight:600;">What we can score (${populatedLabels.length} of 5):</p><ul style="margin:0 0 12px;padding-left:20px;font-size:14px;color:#333;">${populated.map(d => `<li>${DIMENSION_LABELS[d.key] || d.key} — ${d.score}/100. ${d.reason}.</li>`).join('')}</ul>` : ''}
+${missingLabels.length > 0 ? `<p style="margin:14px 0 6px;font-size:14px;color:#111;font-weight:600;">What we cannot score from public data:</p><ul style="margin:0 0 12px;padding-left:20px;font-size:14px;color:#666;">${missingLabels.map(l => `<li>${l}</li>`).join('')}</ul>` : ''}
+<p style="margin:14px 0 12px;font-size:14px;line-height:1.55;color:#333;">The full 5-dimension scorecard becomes producible after standard tier opens, when public profile coverage on Canadian CPAs gets enriched on a different cadence. For founding cohort, the routing engine still runs on the data we have — your queue position is set by founding-cohort entry, not by the scorecard.</p>
+<p style="margin:14px 0 12px;font-size:14px;line-height:1.55;color:#333;">If you want a founding seat anyway, reply with the word <strong>in</strong> and I will personally enroll you at $299/mo, locked for 24 months. Otherwise, no problem — you will continue to receive the standard sequence emails.</p>
+<p style="margin:0 0 12px;font-size:15px;">— Arthur Kostaras<br><span style="color:#666;">Founder, CanadaAccountants</span></p>
+</td></tr>
+<tr><td style="padding:18px 24px;background:#f5f5f5;color:#777;font-size:11px;line-height:1.5;">
+You are receiving this because you replied "breakdown" to my outreach. To unsubscribe from all future emails: reply with the word "unsubscribe" and I will remove you within 10 business days. Sender: Arthur Kostaras, 1012-728 Yates Street, Victoria, BC V8W 1L4, Canada.
+</td></tr>
+</table>`;
+  const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ fallback: true, populated_count: populated.length, firstName })).digest('hex');
+  return { ok: true, text, html, payload_hash: payloadHash, is_fallback: true };
+}
+
+module.exports = { PLATFORM, DIMENSIONS, score, compose, composeFallback };

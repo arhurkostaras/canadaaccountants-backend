@@ -279,17 +279,25 @@ async function processOne(pool, inboundRow) {
     return { decision: 'recipient_not_found' };
   }
 
-  // 7. Score + compose
+  // 7. Score + compose. If compose fails (insufficient data for full scorecard),
+  // fall back to graceful auto-reply that acknowledges the data gap and offers
+  // a path forward — never queue for manual triage.
   const scoreResult = breakdown.score(recipient);
-  const composed = breakdown.compose(scoreResult, recipient);
+  let composed = breakdown.compose(scoreResult, recipient);
+  let usedFallback = false;
   if (!composed.ok) {
-    await _updateBreakdownReply(pool, slot.id, {
-      status: 'manual_review',
-      failure_reason: composed.reason,
-      breakdown_payload: JSON.stringify({ score: scoreResult, populated_count: scoreResult.populated_count })
-    });
-    await _markInbound(pool, inboundId, 'manual_review', 'breakdown');
-    return { decision: 'compose_insufficient_data' };
+    if (typeof breakdown.composeFallback === 'function') {
+      composed = breakdown.composeFallback(scoreResult, recipient);
+      usedFallback = true;
+    } else {
+      await _updateBreakdownReply(pool, slot.id, {
+        status: 'manual_review',
+        failure_reason: composed.reason,
+        breakdown_payload: JSON.stringify({ score: scoreResult, populated_count: scoreResult.populated_count })
+      });
+      await _markInbound(pool, inboundId, 'manual_review', 'breakdown');
+      return { decision: 'compose_insufficient_data' };
+    }
   }
 
   // 8. Auto-send gate
