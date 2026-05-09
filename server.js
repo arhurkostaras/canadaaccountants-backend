@@ -8902,6 +8902,13 @@ cron.schedule('*/2 * * * *', () => {
   inboundClassifier.runOnce(pool).catch(e => console.error('[InboundClassifier] uncaught:', e.message));
 }, { timezone: 'America/Toronto' });
 
+// Deliverability gate (Section 4.5 of campaign brief v1.7). Every 30 min.
+// Pauses platform if spam-complaint > 0.3% or hard-bounce > 2.0% over last 24h.
+const deliverabilityGate = require('./services/deliverability-gate');
+cron.schedule('*/30 * * * *', () => {
+  deliverabilityGate.runOnce(pool).catch(e => console.error('[DeliverabilityGate] uncaught:', e.message));
+}, { timezone: 'America/Toronto' });
+
 // Twice-daily inbound activity summary (Section 4.0 of campaign brief v1.7).
 // 10:00 ET and 15:00 ET, every day. Aggregates across all four backends and emails
 // arthur@negotiateandwin.com.
