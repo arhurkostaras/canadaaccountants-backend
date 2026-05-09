@@ -16,6 +16,7 @@
 
 const { Resend } = require('resend');
 const foundingCohort = require('./founding-cohort');
+const unsubscribeToken = require('./unsubscribe-token');
 
 const PLATFORM = 'acc';
 const SEQUENCE_NAME = 'supply_v2_7touch';
@@ -181,6 +182,9 @@ async function renderTouch(pool, enrollment, stepNumber) {
   bodyHtml = bodyHtml
     .replace(/\{\{first_name\}\}/g, firstName)
     .replace(/\{\{province\}\}/g, province);
+  const unsubUrl = unsubscribeToken.makeUrl(recipient.resolved_email);
+  bodyText = bodyText.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl);
+  bodyHtml = bodyHtml.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl);
 
   const footed = _appendCASLFooter(bodyText, bodyHtml);
 

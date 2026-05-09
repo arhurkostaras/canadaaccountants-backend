@@ -4073,6 +4073,61 @@ app.post('/api/unsubscribe/:token', express.urlencoded({ extended: true }), asyn
   }
 });
 
+// v2 supply-side stateless HMAC unsubscribe (Section 4.9, RFC-8058-compatible).
+// GET shows confirmation page with one-click form to avoid Microsoft Defender
+// pre-fetch unsubscribing the recipient. POST writes to outreach_unsubscribes.
+const unsubscribeTokenV2 = require('./services/unsubscribe-token');
+app.get('/api/u/:e/:s', (req, res) => {
+  const email = unsubscribeTokenV2.verify(req.params.e, req.params.s);
+  if (!email) return res.status(400).send('Invalid or expired unsubscribe link.');
+  res.send(`
+    <!DOCTYPE html>
+    <html><head><title>Unsubscribe - CanadaAccountants</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>body{font-family:Arial,sans-serif;max-width:500px;margin:60px auto;padding:20px;text-align:center;color:#333;}
+    h2{color:#1e293b;}
+    button{background:#dc2626;color:#fff;border:none;padding:12px 24px;border-radius:8px;font-size:16px;cursor:pointer;margin-top:16px;}
+    button:hover{background:#b91c1c;}
+    .muted{color:#999;font-size:13px;margin-top:20px;}
+    </style></head>
+    <body>
+      <h2>Unsubscribe</h2>
+      <p>Click below to unsubscribe <strong>${email}</strong> from future CanadaAccountants outreach emails.</p>
+      <form method="POST" action="/api/u/${req.params.e}/${req.params.s}">
+        <button type="submit">Unsubscribe Me</button>
+      </form>
+      <p class="muted">You will no longer receive marketing emails from CanadaAccountants.</p>
+    </body></html>
+  `);
+});
+app.post('/api/u/:e/:s', express.urlencoded({ extended: true }), async (req, res) => {
+  const email = unsubscribeTokenV2.verify(req.params.e, req.params.s);
+  if (!email) return res.status(400).send('Invalid or expired unsubscribe link.');
+  try {
+    await pool.query(
+      `INSERT INTO outreach_unsubscribes (email, unsubscribed_at)
+       VALUES ($1, NOW())
+       ON CONFLICT (email) DO NOTHING`,
+      [email]
+    );
+  } catch (err) {
+    console.error('[v2-unsub] insert failed:', err.message);
+    return res.status(500).send('An error occurred. Please try again later.');
+  }
+  res.send(`
+    <!DOCTYPE html>
+    <html><head><title>Unsubscribed - CanadaAccountants</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>body{font-family:Arial,sans-serif;max-width:500px;margin:60px auto;padding:20px;text-align:center;color:#333;}
+    h2{color:#16a34a;}</style></head>
+    <body>
+      <h2>You've been unsubscribed</h2>
+      <p>You won't receive any more marketing emails from CanadaAccountants.</p>
+      <p>If this was a mistake, contact <strong>arthur@negotiateandwin.com</strong>.</p>
+    </body></html>
+  `);
+});
+
 // =====================================================
 // CONTACT FORM ENDPOINT
 // =====================================================
