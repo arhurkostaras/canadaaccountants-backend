@@ -1130,7 +1130,30 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`INSERT INTO inbound_poll_status (id) VALUES (1) ON CONFLICT (id) DO NOTHING`);
 
-    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table + founder_outreach_log table + inbound_messages + inbound_poll_status verified');
+    // Breakdown auto-reply queue (Section 4.1 of campaign brief v1.7)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS breakdown_replies (
+        id SERIAL PRIMARY KEY,
+        recipient_email TEXT NOT NULL,
+        platform VARCHAR(10) NOT NULL,
+        inbound_message_id INTEGER,
+        replied_at TIMESTAMPTZ NOT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending','sent','manual_review','suppressed','failed','pending_arthur_approval','rate_limited')),
+        breakdown_sent_at TIMESTAMPTZ,
+        breakdown_payload_hash TEXT,
+        breakdown_payload JSONB,
+        failure_reason TEXT,
+        sent_resend_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_breakdown_replies_recipient_platform ON breakdown_replies(recipient_email, platform)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_breakdown_replies_status ON breakdown_replies(status, created_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_breakdown_replies_pending_old ON breakdown_replies(replied_at) WHERE status = 'pending' AND breakdown_sent_at IS NULL`);
+
+    console.log('[Migration] generated_bio column + profile_visits table + ab_test_results table + founder_outreach_log table + inbound_messages + inbound_poll_status + breakdown_replies verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
   }
@@ -3721,6 +3744,54 @@ app.get('/api/inbound-summary', async (req, res) => {
   } catch (error) {
     console.error('[InboundSummary] error:', error);
     res.status(500).json({ error: 'summary failed' });
+  }
+});
+
+// Breakdown test endpoint (Section 4.1 of campaign brief v1.7).
+// HMAC-protected. Given a recipient_id, returns the would-be breakdown payload
+// WITHOUT sending. Used to populate the 20-profile rubric review file before
+// flipping BREAKDOWN_AUTO_REPLY_ENABLED in production.
+app.get('/api/breakdown-test', async (req, res) => {
+  try {
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?') + 1) : '';
+    const canonical = `GET ${req.path}?${queryString}`;
+    const verify = _verifyInboundSignature(
+      process.env.INBOUND_WEBHOOK_SECRET,
+      req.headers['x-inbound-timestamp'],
+      req.headers['x-inbound-signature'],
+      canonical
+    );
+    if (!verify.ok) {
+      console.error('[BreakdownTest] auth failure:', verify.reason);
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const recipientId = parseInt(req.query.recipient_id, 10);
+    if (!Number.isInteger(recipientId) || recipientId <= 0) {
+      return res.status(400).json({ error: 'recipient_id must be a positive integer' });
+    }
+    const r = await pool.query(`SELECT * FROM scraped_cpas WHERE id = $1 LIMIT 1`, [recipientId]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'recipient not found' });
+    const recipient = r.rows[0];
+    const breakdown = require('./services/breakdown');
+    const scoreResult = breakdown.score(recipient);
+    const composed = breakdown.compose(scoreResult, recipient);
+    res.json({
+      platform: scoreResult.platform,
+      recipient: {
+        id: recipient.id,
+        full_name: recipient.full_name,
+        email: recipient.enriched_email || recipient.email,
+        designation: recipient.designation,
+        firm_name: recipient.firm_name,
+        city: recipient.city,
+        province: recipient.province
+      },
+      score: scoreResult,
+      compose: composed
+    });
+  } catch (error) {
+    console.error('[BreakdownTest] error:', error);
+    res.status(500).json({ error: 'breakdown test failed' });
   }
 });
 
@@ -8708,6 +8779,14 @@ cron.schedule('0 16 * * 0,6', () => monitorCronFire('4 PM ET (weekend)'), { time
 const inboundPoller = require('./services/inbound-poller');
 cron.schedule('*/5 * * * *', () => {
   inboundPoller.pollOnce(pool).catch(e => console.error('[InboundPoller] uncaught:', e.message));
+}, { timezone: 'America/Toronto' });
+
+// Inbound classifier worker (Section 4.1 of campaign brief v1.7). Polls
+// inbound_messages every 2 minutes and routes breakdown triggers to the auto-reply
+// path. Auto-send gated by BREAKDOWN_AUTO_REPLY_ENABLED env var.
+const inboundClassifier = require('./services/inbound-classifier');
+cron.schedule('*/2 * * * *', () => {
+  inboundClassifier.runOnce(pool).catch(e => console.error('[InboundClassifier] uncaught:', e.message));
 }, { timezone: 'America/Toronto' });
 
 // Twice-daily inbound activity summary (Section 4.0 of campaign brief v1.7).
