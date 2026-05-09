@@ -3908,6 +3908,39 @@ app.get('/api/breakdown-test', async (req, res) => {
   }
 });
 
+// Public founding-cohort state for the /founding frontend page (Section 4.8).
+// No auth — public-facing data only (cap, filled, remaining, success_fee_pct).
+// Same single-source-of-truth as the email merge tags so /founding and email
+// can never drift.
+app.get('/api/public/founding', async (req, res) => {
+  try {
+    res.set('Cache-Control', 'no-store');
+    res.set('Access-Control-Allow-Origin', '*');
+    const r = await pool.query(
+      `SELECT cap, current_count, pricing_lock_months, success_fee_pct
+       FROM founding_cohort_config WHERE platform = $1`,
+      ['acc']
+    );
+    if (r.rows.length === 0) {
+      return res.json({ platform: 'acc', cap: 50, filled: 0, remaining: 50, pricing_lock_months: 24, success_fee_pct: null });
+    }
+    const row = r.rows[0];
+    const filled = row.current_count || 0;
+    const cap = row.cap || 0;
+    res.json({
+      platform: 'acc',
+      cap,
+      filled,
+      remaining: Math.max(0, cap - filled),
+      pricing_lock_months: row.pricing_lock_months || 24,
+      success_fee_pct: row.success_fee_pct == null ? null : Number(row.success_fee_pct)
+    });
+  } catch (error) {
+    console.error('[FoundingPublic] error:', error);
+    res.status(500).json({ error: 'failed to read founding state' });
+  }
+});
+
 // Inbound poller health (ACC-only). Reads the single-row inbound_poll_status table.
 // HMAC contract: canonical payload is `GET ${path}?${query}` (no body, no required query).
 app.get('/api/inbound-health', async (req, res) => {
