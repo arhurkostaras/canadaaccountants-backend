@@ -63,7 +63,6 @@ async function main() {
       FROM ${RECIPIENT_TABLE} p
       WHERE p.enriched_email IS NOT NULL
         AND p.status IN ('enriched', 'contacted')
-        AND COALESCE(p.is_diagnostic, FALSE) = FALSE
         AND (p.claim_status IS NULL OR p.claim_status != 'claimed')
         AND LOWER(p.enriched_email) NOT IN (SELECT LOWER(email) FROM outreach_unsubscribes)
         AND p.id NOT IN (
