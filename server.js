@@ -9005,6 +9005,13 @@ cron.schedule('*/30 * * * *', () => {
   deliverabilityGate.runOnce(pool).catch(e => console.error('[DeliverabilityGate] uncaught:', e.message));
 }, { timezone: 'America/Toronto' });
 
+// v2 supply sequence runner (Section 4.4). Every 5 min. Self-gates on
+// V2_RUNNER_LAUNCH_READY=true so safe to wire before flag is flipped.
+const sequenceRunnerV2 = require('./services/sequence-runner-v2');
+cron.schedule('*/5 * * * *', () => {
+  sequenceRunnerV2.runOnce(pool).catch(e => console.error('[SequenceRunnerV2] uncaught:', e.message));
+}, { timezone: 'America/Toronto' });
+
 // Twice-daily inbound activity summary (Section 4.0 of campaign brief v1.7).
 // 10:00 ET and 15:00 ET, every day. Aggregates across all four backends and emails
 // arthur@negotiateandwin.com.
