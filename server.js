@@ -3853,7 +3853,15 @@ app.get('/api/inbound-summary', async (req, res) => {
        WHERE received_at >= $1`,
       [since]
     );
-    res.json({ platform: 'acc', since, ...totals.rows[0] });
+    const pendingBreakdowns = await pool.query(
+      `SELECT recipient_email, replied_at,
+              SUBSTRING(breakdown_payload FROM 1 FOR 300) AS payload_preview
+       FROM breakdown_replies
+       WHERE status = 'pending_arthur_approval'
+       ORDER BY replied_at ASC
+       LIMIT 5`
+    ).then(r => r.rows).catch(() => []);
+    res.json({ platform: 'acc', since, ...totals.rows[0], pending_breakdowns: pendingBreakdowns });
   } catch (error) {
     console.error('[InboundSummary] error:', error);
     res.status(500).json({ error: 'summary failed' });

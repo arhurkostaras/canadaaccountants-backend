@@ -111,6 +111,25 @@ function _formatPlainText({ slot, dateISO, sinceISO, perPlatform, pollHealth }) 
     lines.push(`  ${p.platform.toUpperCase()}: total=${p.total} pending=${p.pending} sla_breach=${p.pending_sla_breach} | breakdown=${p.breakdown} unsub=${p.unsubscribe} t7_in=${p.touch7_in} t7_out=${p.touch7_out} manual=${p.manual} review=${p.manual_review} suppress=${p.suppressed}`);
   }
   lines.push('');
+
+  // Pending breakdowns awaiting manual response (LAW + CBE under Path 1; ACC + INV
+  // auto-reply, but still listed here if any happened to queue).
+  const allPending = [];
+  for (const p of perPlatform) {
+    if (p.error || !Array.isArray(p.pending_breakdowns)) continue;
+    for (const row of p.pending_breakdowns) {
+      allPending.push({ platform: p.platform, ...row });
+    }
+  }
+  if (allPending.length > 0) {
+    lines.push(`Pending breakdown replies needing manual response (${allPending.length}):`);
+    for (const r of allPending) {
+      lines.push(`  [${r.platform.toUpperCase()}] ${r.recipient_email}  replied=${r.replied_at}`);
+      const preview = (r.payload_preview || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      lines.push(`    payload: ${preview}${preview.length >= 240 ? '...' : ''}`);
+    }
+    lines.push('');
+  }
   lines.push('Polling cron health (ACC-hosted):');
   if (pollHealth) {
     lines.push(`  last_poll_at: ${pollHealth.last_poll_at || 'never'}`);
