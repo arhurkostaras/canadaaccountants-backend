@@ -58,12 +58,16 @@ async function main() {
   try {
     const provinceFilter = args.province ? `AND p.province = $${2}` : '';
     const params = args.province ? [args.limit, args.province] : [args.limit];
+    // ZB filter: exclude known-bad statuses. 'valid' + 'unknown' + unvalidated
+    // are sendable; 'invalid', 'do_not_mail', 'catch-all' are excluded.
     const sql = `
       SELECT p.id, p.first_name, p.province, p.enriched_email, p.email
       FROM ${RECIPIENT_TABLE} p
+      LEFT JOIN email_validations v ON LOWER(v.email) = LOWER(p.enriched_email)
       WHERE p.enriched_email IS NOT NULL
         AND p.status IN ('enriched', 'contacted')
         AND (p.claim_status IS NULL OR p.claim_status != 'claimed')
+        AND (v.status IS NULL OR v.status IN ('valid', 'unknown'))
         AND LOWER(p.enriched_email) NOT IN (SELECT LOWER(email) FROM outreach_unsubscribes)
         AND p.id NOT IN (
           SELECT recipient_id FROM v2_supply_enrollments
