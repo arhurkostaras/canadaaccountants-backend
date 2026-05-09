@@ -30,6 +30,31 @@ function _isLongBreakdownAmbiguous(bodyText) {
   return bodyText.length > 300 && /\bbreakdown\b/i.test(bodyText);
 }
 
+// Section 4.10 unsubscribe rule: ≤50 chars + any of the listed phrases.
+// Whole-word match avoids false positives like "Don't unsubscribe me, I'm interested".
+const UNSUB_REGEX = /\b(unsubscribe|unsub|opt[\s-]?out|stop|remove[\s_-]?me)\b/i;
+function _isUnsubscribeTrigger(bodyText) {
+  if (!bodyText) return false;
+  if (bodyText.length > 50) return false;
+  return UNSUB_REGEX.test(bodyText);
+}
+function _isLongUnsubscribeAmbiguous(bodyText) {
+  if (!bodyText) return false;
+  return bodyText.length > 50 && UNSUB_REGEX.test(bodyText);
+}
+
+// Section 4.10 Touch 7 acceptance/decline. Only meaningful if recipient is at Touch 7.
+const TOUCH7_IN_REGEX = /^\s*(in|i'?m\s+in|i\s+am\s+in|yes\s+i'?m\s+in|count\s+me\s+in)\s*[!.]?\s*$/i;
+const TOUCH7_OUT_REGEX = /^\s*(out|i'?m\s+out|i\s+am\s+out|no\s+thanks?|pass)\s*[!.]?\s*$/i;
+function _isTouch7Acceptance(bodyText) {
+  if (!bodyText || bodyText.length > 30) return false;
+  return TOUCH7_IN_REGEX.test(bodyText.trim());
+}
+function _isTouch7Decline(bodyText) {
+  if (!bodyText || bodyText.length > 30) return false;
+  return TOUCH7_OUT_REGEX.test(bodyText.trim());
+}
+
 async function _findRecipient(pool, fromEmail) {
   const e = (fromEmail || '').toLowerCase().trim();
   if (!e) return null;
@@ -109,6 +134,95 @@ async function _sendBreakdownEmail(recipientEmail, composed) {
   return result?.data?.id || null;
 }
 
+// Section 4.10 unsubscribe handler: write to outreach_unsubscribes (idempotent),
+// send brief confirmation reply, mark inbound classified.
+async function _handleUnsubscribe(pool, inboundId, fromEmail) {
+  const lower = (fromEmail || '').toLowerCase().trim();
+  if (!lower) {
+    await _markInbound(pool, inboundId, 'manual_review', 'unsubscribe');
+    return { decision: 'unsubscribe_no_email' };
+  }
+  await pool.query(
+    `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at)
+     VALUES ($1, 'reply_unsubscribe', NOW())
+     ON CONFLICT (email) DO NOTHING`,
+    [lower]
+  );
+  // Send confirmation
+  if (process.env.RESEND_API_KEY) {
+    try {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      await resend.emails.send({
+        from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
+        to: lower,
+        replyTo: 'arthur@canadaaccountants.app',
+        subject: 'Unsubscribed',
+        text: `Unsubscribed. You won't hear from me again.\n\n— Arthur Kostaras`
+      });
+    } catch (e) { console.error('[InboundClassifier] unsubscribe confirmation failed:', e.message); }
+  }
+  await _markInbound(pool, inboundId, 'classified', 'unsubscribe');
+  return { decision: 'unsubscribed' };
+}
+
+// Section 4.10 catch-all: auto-acknowledge so the recipient knows we received it,
+// then route to Arthur for manual review.
+async function _handleCatchAll(pool, inboundId, fromEmail) {
+  const lower = (fromEmail || '').toLowerCase().trim();
+  if (lower && process.env.RESEND_API_KEY) {
+    try {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      await resend.emails.send({
+        from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
+        to: lower,
+        replyTo: 'arthur@canadaaccountants.app',
+        subject: 'Got it',
+        text: `Got it — Arthur will read this directly and reply within two business days.\n\n— Arthur Kostaras`
+      });
+    } catch (e) { console.error('[InboundClassifier] catch-all ack failed:', e.message); }
+  }
+  await _markInbound(pool, inboundId, 'manual_review', 'manual');
+  return { decision: 'catch_all_routed_to_arthur' };
+}
+
+// Section 4.10 Touch 7 acceptance/decline. Looks up the recipient's v2 enrollment
+// to confirm they are at Touch 7 (current_step >= 7). If yes, dispatches accordingly.
+// Returns null if recipient is not at Touch 7 (caller falls through to other rules).
+async function _maybeHandleTouch7Reply(pool, inboundId, fromEmail, bodyText) {
+  if (!_isTouch7Acceptance(bodyText) && !_isTouch7Decline(bodyText)) return null;
+  const lower = (fromEmail || '').toLowerCase().trim();
+  if (!lower) return null;
+  let enrollment;
+  try {
+    const r = await pool.query(
+      `SELECT id, current_step, sequence_name FROM v2_supply_enrollments
+       WHERE LOWER(recipient_email) = $1 AND platform = $2 AND completed_at IS NULL
+       LIMIT 1`,
+      [lower, PLATFORM]
+    );
+    enrollment = r.rows[0];
+  } catch (_) { /* table may not exist yet on some backends; non-fatal */ }
+  if (!enrollment || enrollment.current_step < 7) return null;
+  if (_isTouch7Acceptance(bodyText)) {
+    // Flag for Arthur manual enrollment — do not auto-enroll
+    await _markInbound(pool, inboundId, 'classified', 'touch7_in');
+    return { decision: 'touch7_acceptance_flagged' };
+  }
+  // Touch 7 decline → close enrollment + add to suppression
+  await pool.query(
+    `UPDATE v2_supply_enrollments SET completed_at = NOW(), exit_reason = 'touch7_out' WHERE id = $1`,
+    [enrollment.id]
+  );
+  await pool.query(
+    `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at)
+     VALUES ($1, 'touch7_out', NOW())
+     ON CONFLICT (email) DO NOTHING`,
+    [lower]
+  );
+  await _markInbound(pool, inboundId, 'classified', 'touch7_out');
+  return { decision: 'touch7_decline_closed' };
+}
+
 async function processOne(pool, inboundRow) {
   const { id: inboundId, from_email, body_text, received_at } = inboundRow;
 
@@ -118,12 +232,25 @@ async function processOne(pool, inboundRow) {
     return { decision: 'manual_review_long_body' };
   }
 
-  // 2. Not a breakdown trigger → leave pending; a later 4.10 build will classify other patterns
-  if (!_isBreakdownTrigger(body_text)) {
-    return { decision: 'not_breakdown_skip' };
+  // 2. Section 4.10 unsubscribe: short body + unsub phrase → auto-suppress + confirm
+  if (_isUnsubscribeTrigger(body_text)) {
+    return await _handleUnsubscribe(pool, inboundId, from_email);
+  }
+  if (_isLongUnsubscribeAmbiguous(body_text)) {
+    await _markInbound(pool, inboundId, 'manual_review', 'manual');
+    return { decision: 'manual_review_long_unsub' };
   }
 
-  // 3. Breakdown trigger matched. Claim the slot in breakdown_replies (idempotent).
+  // 3. Section 4.10 Touch 7 in/out (only if recipient is at Touch 7)
+  const t7 = await _maybeHandleTouch7Reply(pool, inboundId, from_email, body_text);
+  if (t7) return t7;
+
+  // 4. Not a breakdown trigger → catch-all auto-acknowledge per Section 4.10
+  if (!_isBreakdownTrigger(body_text)) {
+    return await _handleCatchAll(pool, inboundId, from_email);
+  }
+
+  // 5. Breakdown trigger matched. Claim the slot in breakdown_replies (idempotent).
   const slot = await _claimBreakdownSlot(pool, from_email, inboundId, received_at);
   if (!slot.isNew && slot.existingStatus === 'sent') {
     await _markInbound(pool, inboundId, 'classified', 'breakdown');
