@@ -23,6 +23,12 @@
 //   5-min cycle, so sends ramp at ~600/hour. For larger cohorts (>1000), this
 //   spreads sends across the day naturally.
 
+// Guard: refuse to run if cwd does not look like this backend's repo (catches cd-missing footgun).
+if (!process.cwd().includes('canadaaccountants-backend')) {
+  console.error('refusing to run: cwd does not include \"canadaaccountants-backend\" — got ' + process.cwd());
+  process.exit(2);
+}
+
 const { Pool } = require('pg');
 const path = require('path');
 
@@ -60,22 +66,28 @@ async function main() {
     const params = args.province ? [args.limit, args.province] : [args.limit];
     // ZB filter: exclude known-bad statuses. 'valid' + 'unknown' + unvalidated
     // are sendable; 'invalid', 'do_not_mail', 'catch-all' are excluded.
+    // DISTINCT ON deduplicates by lowercased email so the same inbox is never
+    // enrolled twice (CPAs often appear in multiple provincial CPA directories
+    // with the same enriched email — 32% duplication rate observed pre-launch).
     const sql = `
-      SELECT p.id, p.first_name, p.province, p.enriched_email, p.email
-      FROM ${RECIPIENT_TABLE} p
-      LEFT JOIN email_validations v ON LOWER(v.email) = LOWER(p.enriched_email)
-      WHERE p.enriched_email IS NOT NULL
-        AND p.status IN ('enriched', 'contacted')
-        AND (p.claim_status IS NULL OR p.claim_status != 'claimed')
-        AND (v.status IS NULL OR v.status IN ('valid', 'unknown'))
-        AND LOWER(p.enriched_email) NOT IN (SELECT LOWER(email) FROM outreach_unsubscribes)
-        AND p.id NOT IN (
-          SELECT recipient_id FROM v2_supply_enrollments
-          WHERE platform = '${PLATFORM}' AND sequence_name = '${SEQUENCE_NAME}'
-        )
-        ${provinceFilter}
-      ORDER BY p.id ASC
-      LIMIT $1`;
+      WITH ranked AS (
+        SELECT DISTINCT ON (LOWER(p.enriched_email))
+          p.id, p.first_name, p.province, p.enriched_email, p.email
+        FROM ${RECIPIENT_TABLE} p
+        LEFT JOIN email_validations v ON LOWER(v.email) = LOWER(p.enriched_email)
+        WHERE p.enriched_email IS NOT NULL
+          AND p.status IN ('enriched', 'contacted')
+          AND (p.claim_status IS NULL OR p.claim_status != 'claimed')
+          AND (v.status IS NULL OR v.status IN ('valid', 'unknown'))
+          AND LOWER(p.enriched_email) NOT IN (SELECT LOWER(email) FROM outreach_unsubscribes)
+          AND LOWER(p.enriched_email) NOT IN (
+            SELECT LOWER(recipient_email) FROM v2_supply_enrollments
+            WHERE platform = '${PLATFORM}' AND sequence_name = '${SEQUENCE_NAME}'
+          )
+          ${provinceFilter}
+        ORDER BY LOWER(p.enriched_email), p.id ASC
+      )
+      SELECT * FROM ranked ORDER BY id ASC LIMIT $1`;
     const candidates = await pool.query(sql, params);
     console.log(`Selected ${candidates.rows.length} candidate recipients (limit=${args.limit}${args.province ? `, province=${args.province}` : ''})`);
     if (candidates.rows.length === 0) {

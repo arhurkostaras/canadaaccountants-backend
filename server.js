@@ -1265,6 +1265,9 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_v2_supply_due ON v2_supply_enrollments(next_send_at) WHERE completed_at IS NULL AND next_send_at IS NOT NULL`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_v2_supply_email ON v2_supply_enrollments(recipient_email, platform)`);
+    // Defense in depth: prevent duplicate-email enrollments at the DB level.
+    // Same inbox should never receive the same sequence twice on the same platform.
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_v2_supply_email_platform_seq ON v2_supply_enrollments (LOWER(recipient_email), platform, sequence_name)`);
 
     console.log('[Migration] generated_bio + profile_visits + ab_test_results + founder_outreach_log + inbound_messages + inbound_poll_status + breakdown_replies + founding_cohort_config + email_template + sequence_pause + sequence_closure_log + founding_cohort_joiners + v2_supply_enrollments verified');
   } catch (err) {
