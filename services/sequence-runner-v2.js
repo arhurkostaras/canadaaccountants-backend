@@ -268,6 +268,20 @@ async function processOne(pool, enrollment) {
     console.error(`[SequenceRunnerV2] send failed for enrollment ${enrollment.id}:`, sendErr.message);
     return { decision: 'send_failed', reason: sendErr.message };
   }
+  // Log the send to outreach_emails so the existing Resend webhook handler
+  // (lookup by resend_email_id) can update delivered_at/bounced_at/etc as
+  // events arrive. Without this row, all webhook events for v2 sends would
+  // be silently dropped and the deliverability gate would be blind.
+  try {
+    await pool.query(
+      `INSERT INTO outreach_emails
+         (campaign_id, recipient_type, recipient_id, recipient_email, resend_email_id, status, sent_at, queued_at, sequence_number)
+       VALUES (NULL, 'cpa', $1, $2, $3, 'sent', NOW(), NOW(), $4)`,
+      [enrollment.recipient_id, rendered.recipient_email, resendId, stepNumber]
+    );
+  } catch (logErr) {
+    console.error(`[SequenceRunnerV2] outreach_emails INSERT failed for enrollment ${enrollment.id}:`, logErr.message);
+  }
   await _advanceState(pool, enrollment, resendId);
   return { decision: 'sent', resend_id: resendId, step: stepNumber };
 }
