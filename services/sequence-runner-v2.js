@@ -18,6 +18,7 @@ const { Resend } = require('resend');
 const foundingCohort = require('./founding-cohort');
 const unsubscribeToken = require('./unsubscribe-token');
 const profileTags = require('./profile-tags');
+const renderEngine = require('./render-engine');
 
 const PLATFORM = 'acc';
 const SEQUENCE_NAME = 'supply_v2_7touch';
@@ -164,40 +165,42 @@ async function renderTouch(pool, enrollment, stepNumber) {
     return { ok: false, reason: `no template for step ${stepNumber} variant ${variant}` };
   }
 
-  // Apply founding-cohort merge tags + Subject A/B selection
+  // Build render context for unified renderer (services/render-engine.js).
+  // All substitution flows through renderMergeTags so subject and body share
+  // identical handler chains. Strict mode throws RenderOrphanError if any
+  // {{...}} tag remains after substitution.
   const state = await foundingCohort.getState(pool);
-  const firstName = recipient.first_name || (recipient.full_name || '').split(' ')[0] || 'there';
-  const province = recipient.province || '';
-  const _substFn = (s) => (s || '')
-    .replace(/\{\{first_name\}\}/g, firstName)
-    .replace(/\{\{province\}\}/g, province);
+  const ctx = {
+    state,
+    recipient,
+    unsubscribeEmail: recipient.resolved_email
+  };
+
   const subjChoice = foundingCohort.chooseSubject({
-    subject_a: _substFn(foundingCohort.resolveMergeTags(template.subject_a, state)),
-    subject_b: _substFn(foundingCohort.resolveMergeTags(template.subject_b, state)),
+    subject_a: template.subject_a,
+    subject_b: template.subject_b,
     state
   });
 
-  // Substitute additional merge tags
-  let bodyText = foundingCohort.resolveMergeTags(template.body_text || '', state);
-  let bodyHtml = foundingCohort.resolveMergeTags(template.body_html || '', state);
-  bodyText = bodyText
-    .replace(/\{\{first_name\}\}/g, firstName)
-    .replace(/\{\{province\}\}/g, province);
-  bodyHtml = bodyHtml
-    .replace(/\{\{first_name\}\}/g, firstName)
-    .replace(/\{\{province\}\}/g, province);
-  bodyText = profileTags.apply(bodyText, recipient);
-  bodyHtml = profileTags.apply(bodyHtml, recipient);
-  const unsubUrl = unsubscribeToken.makeUrl(recipient.resolved_email);
-  bodyText = bodyText.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl);
-  bodyHtml = bodyHtml.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl);
+  let subject, bodyText, bodyHtml;
+  try {
+    const label = (field) => `${field} T${stepNumber}/${variant} enr=${enrollment.id}`;
+    subject  = await renderEngine.renderMergeTags(subjChoice.subject, ctx, { contextLabel: label('subject') });
+    bodyText = await renderEngine.renderMergeTags(template.body_text, ctx, { contextLabel: label('body_text') });
+    bodyHtml = await renderEngine.renderMergeTags(template.body_html, ctx, { contextLabel: label('body_html') });
+  } catch (err) {
+    if (err && err.name === 'RenderOrphanError') {
+      return { ok: false, reason: `render_orphan_tag: ${err.orphans.join(',')}`, orphans: err.orphans };
+    }
+    throw err;
+  }
 
   const footed = _appendCASLFooter(bodyText, bodyHtml);
 
   return {
     ok: true,
     recipient_email: recipient.resolved_email,
-    subject: subjChoice.subject,
+    subject,
     ab_variant: subjChoice.variant,
     text: footed.text,
     html: footed.html,
@@ -206,6 +209,16 @@ async function renderTouch(pool, enrollment, stepNumber) {
 }
 
 async function _send(rendered) {
+  // Defense-in-depth: scan for any unresolved {{...}} before hitting Resend.
+  // The renderer should already have thrown on orphans (strict mode), but
+  // this catches the case where strict mode was disabled upstream by mistake.
+  const orphans = renderEngine.scanForOrphans(rendered);
+  if (orphans.length > 0) {
+    const err = new Error(`render_orphan_at_send: ${orphans.join(', ')}`);
+    err.code = 'RENDER_ORPHAN_AT_SEND';
+    err.orphans = orphans;
+    throw err;
+  }
   const resend = new Resend(process.env.RESEND_API_KEY);
   const fromEmail = process.env.FROM_EMAIL || 'noreply@canadaaccountants.app';
   const result = await resend.emails.send({
@@ -258,6 +271,12 @@ async function processOne(pool, enrollment) {
   const stepNumber = enrollment.current_step + 1;
   const rendered = await renderTouch(pool, enrollment, stepNumber);
   if (!rendered.ok) {
+    // Orphan-tag render failures halt the enrollment to prevent infinite
+    // retry loops. Template fix + manual re-open required.
+    if (rendered.reason && rendered.reason.startsWith('render_orphan_tag')) {
+      await _completeWithReason(pool, enrollment, rendered.reason);
+      return { decision: 'render_orphan_halted', reason: rendered.reason };
+    }
     return { decision: 'render_failed', reason: rendered.reason };
   }
   if (!_isReadyToLaunch()) {
@@ -268,6 +287,11 @@ async function processOne(pool, enrollment) {
   try {
     resendId = await _send(rendered);
   } catch (sendErr) {
+    if (sendErr && sendErr.code === 'RENDER_ORPHAN_AT_SEND') {
+      console.error(`[SequenceRunnerV2] BLOCKED orphan-tag send for enrollment ${enrollment.id}: ${sendErr.message}`);
+      await _completeWithReason(pool, enrollment, `render_orphan_at_send: ${sendErr.orphans?.join(',') || ''}`);
+      return { decision: 'render_orphan_halted', reason: sendErr.message };
+    }
     console.error(`[SequenceRunnerV2] send failed for enrollment ${enrollment.id}:`, sendErr.message);
     return { decision: 'send_failed', reason: sendErr.message };
   }
