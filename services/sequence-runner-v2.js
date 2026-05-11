@@ -166,15 +166,18 @@ async function renderTouch(pool, enrollment, stepNumber) {
 
   // Apply founding-cohort merge tags + Subject A/B selection
   const state = await foundingCohort.getState(pool);
+  const firstName = recipient.first_name || (recipient.full_name || '').split(' ')[0] || 'there';
+  const province = recipient.province || '';
+  const _substFn = (s) => (s || '')
+    .replace(/\{\{first_name\}\}/g, firstName)
+    .replace(/\{\{province\}\}/g, province);
   const subjChoice = foundingCohort.chooseSubject({
-    subject_a: foundingCohort.resolveMergeTags(template.subject_a, state),
-    subject_b: foundingCohort.resolveMergeTags(template.subject_b, state),
+    subject_a: _substFn(foundingCohort.resolveMergeTags(template.subject_a, state)),
+    subject_b: _substFn(foundingCohort.resolveMergeTags(template.subject_b, state)),
     state
   });
 
   // Substitute additional merge tags
-  const firstName = recipient.first_name || (recipient.full_name || '').split(' ')[0] || 'there';
-  const province = recipient.province || '';
   let bodyText = foundingCohort.resolveMergeTags(template.body_text || '', state);
   let bodyHtml = foundingCohort.resolveMergeTags(template.body_html || '', state);
   bodyText = bodyText
