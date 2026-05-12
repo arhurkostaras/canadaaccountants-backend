@@ -77,6 +77,7 @@ async function main() {
         LEFT JOIN email_validations v ON LOWER(v.email) = LOWER(p.enriched_email)
         WHERE p.enriched_email IS NOT NULL
           AND p.status IN ('enriched', 'contacted')
+          AND COALESCE(p.is_misclassified, FALSE) = FALSE
           AND (p.claim_status IS NULL OR p.claim_status != 'claimed')
           AND (v.status IS NULL OR v.status IN ('valid', 'unknown'))
           AND LOWER(p.enriched_email) NOT IN (SELECT LOWER(email) FROM outreach_unsubscribes)

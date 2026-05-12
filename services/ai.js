@@ -24,8 +24,21 @@ async function callWithRetry(fn) {
 
 /**
  * Generate a professional bio using Claude Haiku
+ *
+ * Gating: refuses to generate when the input profile is flagged
+ * is_misclassified=true. Pool contamination audit (2026-05-11) found ~31.8% of
+ * platform-wide records misclassified across professions. Returns null so
+ * callers' existing null/falsy handling paths take over without throwing.
+ *
+ * Callers must SELECT is_misclassified into the profile object for the gate
+ * to fire. ACC's pool came back clean in the audit but the gate is shipped
+ * for symmetry + defense against future contamination.
  */
 async function generateBio(profile, platform = 'investing') {
+  if (profile && profile.is_misclassified === true) {
+    console.warn(`[generateBio] REFUSED: id=${profile.id} reason=${profile.misclassified_reason || 'unspecified'} platform=${platform}`);
+    return null;
+  }
   const professionMap = {
     investing: { title: 'financial advisor', field: 'financial services', body: 'CIRO' },
     lawyers: { title: 'lawyer', field: 'legal services', body: 'Law Society' },

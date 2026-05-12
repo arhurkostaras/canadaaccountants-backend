@@ -5693,12 +5693,21 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
 
     // Fetch scraped CPA profile
     const profile = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email FROM scraped_cpas WHERE id = $1`,
+      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason FROM scraped_cpas WHERE id = $1`,
       [recipient_id]
     );
     if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
 
     const p = profile.rows[0];
+
+    // Pool-contamination gate: ACC pool came back clean in the 2026-05-11
+    // audit (0 records flagged) but the gate is shipped for symmetry +
+    // defense against future contamination.
+    if (p.is_misclassified === true) {
+      console.warn(`[Claim Profile] REFUSED 410: id=${p.id} reason=${p.misclassified_reason || 'unspecified'}`);
+      return res.status(410).json({ error: 'Profile no longer available pending review' });
+    }
+
     const rawEmail = p.enriched_email || p.email || recipient_email || '';
 
     // Generate AI bio + SEO score on the fly — show value BEFORE claiming
@@ -6341,11 +6350,17 @@ app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, first_name, last_name, firm_name, city, province, designation,
-              phone, generated_bio, claim_status, founding_member
+              phone, generated_bio, claim_status, founding_member, is_misclassified, misclassified_reason
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    // Pool-contamination gate (see /api/claim/profile/:refToken for context).
+    if (rows[0].is_misclassified === true) {
+      console.warn(`[Public Profile] REFUSED 410: id=${rows[0].id} reason=${rows[0].misclassified_reason || 'unspecified'}`);
+      return res.status(410).json({ error: 'Profile no longer available pending review' });
+    }
 
     const p = rows[0];
 
