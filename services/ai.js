@@ -1,8 +1,30 @@
 const Anthropic = require('@anthropic-ai/sdk');
+const { Pool } = require('pg');
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 60s, 120s
+
+// Lazy-initialized dedicated pool for the is_misclassified DB-level gate.
+// Belt-and-suspenders: independent of caller-passed flags. See generateBio.
+// TODO(v1.3): consolidate this into a shared services/db.js module.
+let _aiPool = null;
+function _getAiPool() {
+  if (!_aiPool) {
+    _aiPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 3,
+      ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined
+    });
+  }
+  return _aiPool;
+}
+
+const PLATFORM_TO_TABLE = {
+  lawyers: 'scraped_lawyers',
+  accountants: 'scraped_cpas',
+  investing: 'scraped_advisors'
+};
 
 async function callWithRetry(fn) {
   for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
@@ -25,19 +47,43 @@ async function callWithRetry(fn) {
 /**
  * Generate a professional bio using Claude Haiku
  *
- * Gating: refuses to generate when the input profile is flagged
- * is_misclassified=true. Pool contamination audit (2026-05-11) found ~31.8% of
- * platform-wide records misclassified across professions. Returns null so
- * callers' existing null/falsy handling paths take over without throwing.
+ * Two-layer gating to refuse generation for misclassified records:
  *
- * Callers must SELECT is_misclassified into the profile object for the gate
- * to fire. ACC's pool came back clean in the audit but the gate is shipped
- * for symmetry + defense against future contamination.
+ * Layer 1 (caller-passed): if profile.is_misclassified === true, refuse.
+ *
+ * Layer 2 (DB-level, belt-and-suspenders): if profile.id is provided and
+ * platform maps to a known table, fetch is_misclassified from the DB
+ * regardless of what the caller passed. Catches admin endpoints whose
+ * SELECT statements don't include the flag column. Fails CLOSED on DB
+ * error (returns null) rather than risking generation during a DB outage.
+ *
+ * ACC's pool came back clean in the 2026-05-11 audit (0 flagged records)
+ * but the gate is shipped for symmetry + defense against future
+ * contamination.
  */
 async function generateBio(profile, platform = 'investing') {
+  // Layer 1: caller-passed flag check
   if (profile && profile.is_misclassified === true) {
-    console.warn(`[generateBio] REFUSED: id=${profile.id} reason=${profile.misclassified_reason || 'unspecified'} platform=${platform}`);
+    console.warn(`[generateBio] REFUSED (caller-flag): id=${profile.id} reason=${profile.misclassified_reason || 'unspecified'} platform=${platform}`);
     return null;
+  }
+
+  // Layer 2: independent DB lookup
+  const table = PLATFORM_TO_TABLE[platform];
+  if (profile && profile.id != null && table) {
+    try {
+      const r = await _getAiPool().query(
+        `SELECT is_misclassified, misclassified_reason FROM ${table} WHERE id = $1`,
+        [profile.id]
+      );
+      if (r.rows[0] && r.rows[0].is_misclassified === true) {
+        console.warn(`[generateBio] REFUSED (db-lookup): id=${profile.id} reason=${r.rows[0].misclassified_reason || 'unspecified'} platform=${platform}`);
+        return null;
+      }
+    } catch (err) {
+      console.error(`[generateBio] DB-level gate lookup FAILED for id=${profile.id} platform=${platform}: ${err.message} — failing closed`);
+      return null;
+    }
   }
   const professionMap = {
     investing: { title: 'financial advisor', field: 'financial services', body: 'CIRO' },
