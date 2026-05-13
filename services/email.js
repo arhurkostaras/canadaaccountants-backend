@@ -89,6 +89,17 @@ async function sendEmail({ to, subject, html, text, headers, from, replyTo }) {
       return { success: false, reason: 'api_error', error };
     }
 
+    // Defense against unexpected SDK response shapes: success status without an
+    // email ID. This is what caused the 2026-05-11 orphan-send incident — Resend
+    // returned {data:null, error:X} via the SDK's non-throwing error path, but
+    // the v2 runner only read result.data.id (got null) and recorded status=sent
+    // with NULL resend_email_id. Hard-fail here so any caller cannot accept a
+    // success that lacks an ID.
+    if (!data || !data.id) {
+      console.error('[Email] Resend returned success without email ID — unexpected response shape:', data);
+      return { success: false, reason: 'no_id', error: 'success response without id' };
+    }
+
     console.log(`[Email] Sent to ${to}: "${subject}" (id: ${data.id})`);
     return { success: true, id: data.id };
   } catch (err) {

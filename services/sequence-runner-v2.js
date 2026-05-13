@@ -14,7 +14,7 @@
 //   - source verification (Section 4.6) sign-off
 // Once those land, wire `runOnce` on a 5-min cron.
 
-const { Resend } = require('resend');
+const { sendEmail } = require('./email');
 const foundingCohort = require('./founding-cohort');
 const unsubscribeToken = require('./unsubscribe-token');
 const profileTags = require('./profile-tags');
@@ -219,17 +219,27 @@ async function _send(rendered) {
     err.orphans = orphans;
     throw err;
   }
-  const resend = new Resend(process.env.RESEND_API_KEY);
-  const fromEmail = process.env.FROM_EMAIL || 'noreply@canadaaccountants.app';
-  const result = await resend.emails.send({
-    from: fromEmail,
+  // Route through V1's shared sendEmail writer (services/email.js). Single
+  // writer for all Resend send operations; sendEmail correctly handles both
+  // {data,error} branches and hard-fails on success-without-id (2026-05-13
+  // orphan-send fix). Throwing here causes the caller's existing catch in
+  // processOne to return {decision: 'send_failed'} WITHOUT inserting an
+  // outreach_emails row — preventing future orphans.
+  const result = await sendEmail({
+    from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
     to: rendered.recipient_email,
     replyTo: 'arthur@canadaaccountants.app',
     subject: rendered.subject,
     text: rendered.text,
     html: rendered.html
   });
-  return result?.data?.id || null;
+  if (!result.success) {
+    const err = new Error(`Resend send failed: ${result.reason}${result.error ? ' :: ' + (typeof result.error === 'string' ? result.error : JSON.stringify(result.error)).slice(0,200) : ''}`);
+    err.code = 'RESEND_SEND_ERROR';
+    err.sendResult = result;
+    throw err;
+  }
+  return result.id;
 }
 
 async function _advanceState(pool, enrollment, sentResendId) {
