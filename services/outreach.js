@@ -22,6 +22,22 @@ function isRoleBasedEmail(email) {
   return ROLE_BASED_PREFIXES.has(localPart);
 }
 
+// Status-to-timestamp-column map. _setStatusAndTimestamp throws if asked for a
+// status not in this map, so future code that adds a new event type cannot
+// silently regress to the "status without timestamp" failure mode that caused
+// the 2026-05-13 incident. Keep in sync with the webhook handler's statusMap
+// and the poller's eventToStatus — both must map to keys in this object.
+const STATUS_TO_TIMESTAMP_COL = Object.freeze({
+  delivered:  'delivered_at',
+  opened:     'opened_at',
+  clicked:    'clicked_at',
+  bounced:    'bounced_at',
+  complained: 'complained_at',
+});
+
+// Lifecycle order for forward-progression checks.
+const STATUS_ORDER = Object.freeze(['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained']);
+
 // Province-to-timezone mapping for time-zone-aware sending (~10 AM local)
 const PROVINCE_TIMEZONE_UTC_HOUR = {
   // Atlantic (UTC-4): 10 AM AT = 14:00 UTC
@@ -650,16 +666,12 @@ class OutreachEngine {
           const newStatus = eventToStatus[event];
           if (!newStatus) continue;
 
-          const statusOrder = ['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'];
-          const currentIdx = statusOrder.indexOf(email.status);
-          const newIdx = statusOrder.indexOf(newStatus);
+          // Unified write path. Helper handles forward-progression check, status
+          // column, and the matching event timestamp. Race-safe vs. the webhook
+          // handler running concurrently.
+          const result = await this._setStatusAndTimestamp(email.id, newStatus);
 
-          if (newStatus === 'bounced' || newStatus === 'complained' || newIdx > currentIdx) {
-            await this.pool.query(
-              `UPDATE outreach_emails SET status = $2, updated_at = NOW() WHERE id = $1`,
-              [email.id, newStatus]
-            );
-
+          if (result.reason === 'progressed') {
             const counterMap = { delivered: 'total_delivered', opened: 'total_opened', clicked: 'total_clicked', bounced: 'total_bounced', complained: 'total_complained' };
             if (counterMap[newStatus]) {
               await this.pool.query(
@@ -733,6 +745,75 @@ class OutreachEngine {
       return parseInt(result.rows[0].count);
     }
     return 0;
+  }
+
+  // Unified writer for outreach_emails.status + matching event timestamp.
+  // Called from both the webhook handler and the status poller so the two
+  // paths cannot diverge. Throws on any status not in STATUS_TO_TIMESTAMP_COL.
+  //
+  // opts.markBotClick                  — set is_bot_click=true on the UPDATE
+  // opts.bumpTimestampEvenAtSameState  — for opens/clicks, bump the timestamp
+  //                                       to NOW() even when status is unchanged
+  //                                       (analytics: latest activity wins)
+  //
+  // Returns { updated, reason, previousStatus } where reason is one of:
+  //   'progressed'  — status advanced; timestamp set with COALESCE
+  //   'bumped'      — same-state same-status timestamp overwrite
+  //   'no_change'   — neither progression nor bump applies
+  //   'not_found'   — no row matched emailId
+  async _setStatusAndTimestamp(emailId, newStatus, opts = {}) {
+    const timestampCol = STATUS_TO_TIMESTAMP_COL[newStatus];
+    if (!timestampCol) {
+      throw new Error(
+        `[Outreach] _setStatusAndTimestamp: no timestamp column mapped for status '${newStatus}'. ` +
+        `Valid statuses: ${Object.keys(STATUS_TO_TIMESTAMP_COL).join(', ')}. ` +
+        `Add to STATUS_TO_TIMESTAMP_COL in services/outreach.js if this is a new event type.`
+      );
+    }
+
+    const cur = await this.pool.query(
+      `SELECT status FROM outreach_emails WHERE id = $1`,
+      [emailId]
+    );
+    if (cur.rows.length === 0) {
+      return { updated: false, reason: 'not_found', previousStatus: null };
+    }
+    const previousStatus = cur.rows[0].status;
+    const currentIdx = STATUS_ORDER.indexOf(previousStatus);
+    const newIdx = STATUS_ORDER.indexOf(newStatus);
+
+    const canProgress = newStatus === 'bounced' || newStatus === 'complained' || newIdx > currentIdx;
+    const canBump = opts.bumpTimestampEvenAtSameState
+                    && newIdx === currentIdx
+                    && (newStatus === 'opened' || newStatus === 'clicked');
+    const botFlagSet = opts.markBotClick ? ', is_bot_click = true' : '';
+
+    if (canProgress) {
+      // COALESCE preserves any earlier timestamp set by the other writer.
+      // Race-safe: if the webhook wrote delivered_at=T1 and the poller arrives
+      // at T2, the poller's UPDATE keeps T1 (because COALESCE on non-NULL is no-op).
+      await this.pool.query(
+        `UPDATE outreach_emails
+         SET status = $2,
+             updated_at = NOW(),
+             ${timestampCol} = COALESCE(${timestampCol}, NOW())${botFlagSet}
+         WHERE id = $1`,
+        [emailId, newStatus]
+      );
+      return { updated: true, reason: 'progressed', previousStatus };
+    }
+    if (canBump) {
+      // Same-state bump: overwrite (not COALESCE) — analytics intent is "latest activity time".
+      await this.pool.query(
+        `UPDATE outreach_emails
+         SET updated_at = NOW(),
+             ${timestampCol} = NOW()${botFlagSet}
+         WHERE id = $1`,
+        [emailId]
+      );
+      return { updated: true, reason: 'bumped', previousStatus };
+    }
+    return { updated: false, reason: 'no_change', previousStatus };
   }
 
   // Atomically update an email's status AND decrement campaign.total_queued
@@ -1261,40 +1342,26 @@ class OutreachEngine {
     const newStatus = statusMap[type];
     if (!newStatus) return;
 
-    const timestampCol = `${newStatus}_at`;
-
     // Bot click detection: clicks within 60s of delivery are almost certainly email security scanners
     let isBotClick = false;
     if (newStatus === 'clicked' && outreachEmail.delivered_at) {
       const deliveredAt = new Date(outreachEmail.delivered_at).getTime();
-      const now = Date.now();
-      const secondsSinceDelivery = (now - deliveredAt) / 1000;
+      const secondsSinceDelivery = (Date.now() - deliveredAt) / 1000;
       if (secondsSinceDelivery < 60) {
         isBotClick = true;
         console.log(`[Outreach] Bot click detected: ${outreachEmail.recipient_email} clicked ${secondsSinceDelivery.toFixed(0)}s after delivery — flagging`);
       }
     }
 
-    // Only update if the new status is "later" in the lifecycle
-    const statusOrder = ['queued', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained'];
-    const currentIdx = statusOrder.indexOf(outreachEmail.status);
-    const newIdx = statusOrder.indexOf(newStatus);
+    // Unified write path. Same helper as the poller — eliminates the race that
+    // let status advance without the matching timestamp before 2026-05-13.
+    const result = await this._setStatusAndTimestamp(outreachEmail.id, newStatus, {
+      markBotClick: isBotClick,
+      bumpTimestampEvenAtSameState: true,
+    });
 
-    // Allow update for bounced/complained from any state, or for "forward" progression
-    if (newStatus === 'bounced' || newStatus === 'complained' || newIdx > currentIdx) {
-      await this.pool.query(
-        `UPDATE outreach_emails SET status = $2, ${timestampCol} = NOW()${isBotClick ? ', is_bot_click = true' : ''} WHERE id = $1`,
-        [outreachEmail.id, newStatus]
-      );
-    } else if (newStatus === 'opened' || newStatus === 'clicked') {
-      // For opens/clicks, update the timestamp even if already in that status
-      await this.pool.query(
-        `UPDATE outreach_emails SET ${timestampCol} = NOW()${isBotClick ? ', is_bot_click = true' : ''} WHERE id = $1`,
-        [outreachEmail.id]
-      );
-    }
-
-    // Update campaign counters
+    // Update campaign counters. Increment only on actual forward progression
+    // (not same-state bump) and not for bot clicks.
     const counterMap = {
       'delivered': 'total_delivered',
       'opened': 'total_opened',
@@ -1303,8 +1370,7 @@ class OutreachEngine {
       'complained': 'total_complained',
     };
     const counterCol = counterMap[newStatus];
-    // Don't increment click counter for bot clicks
-    if (counterCol && newIdx > currentIdx && !(isBotClick && newStatus === 'clicked')) {
+    if (counterCol && result.reason === 'progressed' && !(isBotClick && newStatus === 'clicked')) {
       await this.pool.query(
         `UPDATE outreach_campaigns SET ${counterCol} = ${counterCol} + 1, updated_at = NOW() WHERE id = $1`,
         [campaignId]
