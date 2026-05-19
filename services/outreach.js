@@ -210,6 +210,24 @@ class OutreachEngine {
     const variantCount = (campaign.subject_variants && Array.isArray(campaign.subject_variants)) ? campaign.subject_variants.length + 1 : 1;
 
     if (campaign.type === 'cpa') {
+      // GATE-COMPLETENESS PATCH (2026-05-19): Six universal regulatory/operational gates
+      // plus ACC-specific WS-B columns. Prevents the misclassified-row contamination
+      // class discovered on INV c10 (3-month regulatory exposure). See v1.3 Item D for
+      // architectural rule: every INSERT into outreach_emails must apply the full
+      // gate-set. This inline SQL is a stopgap; Tier 2 work will replace this writer
+      // and launchCampaign on every platform with a single enrollRecipient() function
+      // enforcing gates centrally. When that lands, this gate-block is deleted.
+      //
+      // Gate 3 (shared-inbox) overflags by design: accepts collateral exclusion of
+      // legitimate same-person duplicates. Recovery path is human review, not
+      // circular-dependency refinement.
+      //
+      // ACC NOTE: scraped_cpas already carries Phase A flags (is_misclassified,
+      // is_generic_inbox, has_enrichment_collision). Both the column gates AND the
+      // shared-inbox/regex gates are applied (defense-in-depth): column flags catch
+      // rows analysed by the Phase A job, structural gates catch rows that arrived
+      // after the last Phase A run or were missed by it.
+      //
       // Find scraped CPAs with email (direct or enriched) not already contacted
       // Use DISTINCT ON + cross-campaign email dedup to prevent duplicate sends
       let query = `
@@ -219,6 +237,28 @@ class OutreachEngine {
         FROM scraped_cpas sc
         WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
           AND sc.status != 'invalid'
+          -- Gate 1: misclassification (regulatory)
+          AND sc.is_misclassified IS DISTINCT FROM true
+          -- Gate 2: claim status
+          AND sc.claim_status IS DISTINCT FROM 'claimed'
+          -- Gate 3: shared-inbox hijack (overflag-and-recover)
+          AND LOWER(COALESCE(NULLIF(sc.enriched_email,''), sc.email)) NOT IN (
+            SELECT LOWER(COALESCE(NULLIF(enriched_email,''), email))
+            FROM scraped_cpas
+            WHERE claim_status IS DISTINCT FROM 'claimed'
+              AND COALESCE(NULLIF(enriched_email,''), email) IS NOT NULL
+            GROUP BY 1 HAVING COUNT(*) > 1
+          )
+          -- Gate 4: generic local-part regex (base set, no insurance extensions)
+          AND LOWER(SPLIT_PART(COALESCE(NULLIF(sc.enriched_email,''), sc.email), '@', 1)) !~ '^[0-9]'
+          AND LOWER(SPLIT_PART(COALESCE(NULLIF(sc.enriched_email,''), sc.email), '@', 1)) !~ '^(info|contact|admin|sales|office|hello|inquir(y|ies)|enquir(y|ies)|reception|noreply|no-?reply|donotreply|support|customer(service|care)?|cs|hr|web|main|general|mail|services?|marketing|accounting|billing|accounts?|ap|ar|finance|ops|operations|team)([-_.]|$)'
+          -- Gate 5: first_name not null
+          AND sc.first_name IS NOT NULL
+          AND TRIM(sc.first_name) != ''
+          -- ACC WS-B columns (Phase A flags — column-based, complementary to structural gates above)
+          AND sc.is_generic_inbox IS DISTINCT FROM true
+          AND sc.has_enrichment_collision IS DISTINCT FROM true
+          -- Existing dedup gates (preserved verbatim)
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
           AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE recipient_type = 'cpa')
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT DISTINCT recipient_email FROM outreach_emails)
