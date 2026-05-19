@@ -483,7 +483,18 @@ class OutreachEngine {
         const sentToday = parseInt(todayCount.rows[0].count);
 
         // Weekend: 50% daily limit to preserve pool while testing engagement
-        const effectiveLimit = isWeekend ? Math.ceil(campaign.daily_limit / 2) : campaign.daily_limit;
+        let effectiveLimit = isWeekend ? Math.ceil(campaign.daily_limit / 2) : campaign.daily_limit;
+        // 2026-05-19: 3-window phased pacing for warm sends (9am / 12pm / 3pm ET).
+        // Cold sends keep legacy single-batch behavior.
+        if (campaign.send_type === 'warm') {
+          const etHourStr = new Date().toLocaleString('en-US', {
+            timeZone: 'America/Toronto', hour: 'numeric', hour12: false
+          });
+          const etHour = parseInt(etHourStr.match(/\d+/)[0], 10);
+          const windowsElapsed = etHour < 9 ? 0 : etHour < 12 ? 1 : etHour < 15 ? 2 : 3;
+          const perWindow = Math.ceil(effectiveLimit / 3);
+          effectiveLimit = Math.min(effectiveLimit, perWindow * windowsElapsed);
+        }
         if (sentToday >= effectiveLimit) continue;
 
         const remaining = effectiveLimit - sentToday;
@@ -1185,6 +1196,27 @@ class OutreachEngine {
     let body = campaign.body_template;
 
     const vars = {};
+
+    // 2026-05-18 (item 1 fix): always populate first_name from the recipient row
+    // regardless of campaign.type. Pre-existing silent bug — V1 _renderTemplate
+    // only populated first_name inside type-specific branches below, so
+    // campaigns without a matching branch (e.g. 'warm_reengagement') had
+    // {{first_name}} stripped to empty by the safety net at the end of this
+    // function.
+    if (emailRecord.recipient_id) {
+      try {
+        const tbl = emailRecord.recipient_type === 'sme' ? 'scraped_smes' : 'scraped_cpas';
+        const r = await this.pool.query(
+          `SELECT first_name, last_name FROM ${tbl} WHERE id = $1`,
+          [emailRecord.recipient_id]
+        );
+        if (r.rows[0]) {
+          vars.first_name = r.rows[0].first_name || 'there';
+          vars.last_name = r.rows[0].last_name || '';
+        }
+      } catch (e) { console.error('[Outreach] first_name personalization lookup failed:', e.message); }
+    }
+    if (!vars.first_name) vars.first_name = 'there';
 
     // Build unsubscribe URL from token (template footer has {{unsubscribe_url}})
     if (unsubToken) {
