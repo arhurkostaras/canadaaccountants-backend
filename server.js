@@ -6650,7 +6650,7 @@ function firmMatchesTopList(firmName, topList) {
 
 // GET /api/admin/founder-outreach-candidates
 // Returns top 10 warm candidates ranked for personal founder outreach
-app.get('/api/admin/founder-outreach-candidates', async (req, res) => {
+app.get('/api/admin/founder-outreach-candidates', authenticateToken, requireAdmin, async (req, res) => {
   try {
     // Driver: only people who have ACTUALLY engaged (clicked OR claimed OR has top-firm bio)
     // This avoids scanning 98K rows with nested subqueries.
@@ -6960,7 +6960,7 @@ app.post('/api/admin/founder-outreach/digest/send', async (req, res) => {
 });
 
 // POST /api/admin/founder-outreach/auto-send — send founder emails to all candidates across platforms
-app.post('/api/admin/founder-outreach/auto-send', async (req, res) => {
+app.post('/api/admin/founder-outreach/auto-send', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const results = await runFounderAutoSend();
     res.json({ success: true, ...results });
