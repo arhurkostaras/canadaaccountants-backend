@@ -6971,6 +6971,11 @@ app.post('/api/admin/founder-outreach/auto-send', authenticateToken, requireAdmi
 });
 
 async function runFounderAutoSend() {
+  if (process.env.FOUNDER_AUTO_SEND_PAUSED === 'true') {
+    console.log('[FounderOutreach] PAUSED via FOUNDER_AUTO_SEND_PAUSED env var');
+    return { sent: 0, skipped: 0, failed: 0, paused: true };
+  }
+
   const fetchJSON = (url) => new Promise((resolve) => {
     const mod = url.startsWith('https://') ? require('https') : require('http');
     mod.get(url, (r) => {
