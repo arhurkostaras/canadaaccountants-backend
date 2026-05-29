@@ -6296,7 +6296,7 @@ app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, asy
 
 app.post('/api/admin/generate-bios', async (req, res) => {
   const apiKey = req.headers['x-api-key'] || req.query.key;
-  if (apiKey !== (process.env.ADMIN_API_KEY || 'bio-gen-2026')) {
+  if (!process.env.ADMIN_API_KEY || apiKey !== process.env.ADMIN_API_KEY) {
     return res.status(401).json({ error: 'Invalid API key' });
   }
   const limit = parseInt(req.query.limit) || 100;
