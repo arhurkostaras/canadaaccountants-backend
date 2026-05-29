@@ -21,6 +21,12 @@
 //   - On exit, prints the v2_supply_enrollments row id so you can manually
 //     delete it after testing if you want a clean repeat.
 
+// Guard: refuse to run if cwd does not look like this backend's repo (catches cd-missing footgun).
+if (!process.cwd().includes('canadaaccountants-backend')) {
+  console.error('refusing to run: cwd does not include \"canadaaccountants-backend\" — got ' + process.cwd());
+  process.exit(2);
+}
+
 const { Pool } = require('pg');
 const path = require('path');
 

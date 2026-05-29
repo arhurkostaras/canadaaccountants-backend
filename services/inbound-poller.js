@@ -99,11 +99,24 @@ async function _dispatchToBackend(route, messagePayload) {
   return res.json().catch(() => ({}));
 }
 
-async function _processMessage(client, uid, parsed) {
+// Custom IMAP keyword the poller uses to track its own processing state,
+// independent of \Seen (which Arthur's normal inbox reading also toggles).
+// Without this, auto-replies that Arthur reads before the next poll cycle
+// (mobile notification, desktop preview) become invisible to the poller
+// because \Seen is already true. With this keyword, we track dispatch state
+// in a poller-owned namespace.
+const POLLER_KEYWORD = 'PlatformInboundDispatched';
+
+async function _processMessage(client, uid, parsed, flags) {
+  if (flags && flags.has(POLLER_KEYWORD)) {
+    // Already dispatched by a prior poll cycle. Skip.
+    return { skipped: true, reason: 'already dispatched' };
+  }
   const route = _resolvePlatform(parsed);
   if (!route) {
     // Mail not addressed to any of the four platform reply-tos — leave it alone.
-    // Don't mark SEEN: this is Arthur's personal inbox traffic. We just skip.
+    // This is Arthur's personal inbox traffic. We do not mark with our keyword
+    // so the cost of re-checking on every poll is a single header parse.
     return { skipped: true, reason: 'not platform mail' };
   }
   const messageId = parsed.messageId || `synthetic-${parsed.from?.value?.[0]?.address || 'unknown'}-${parsed.date?.toISOString() || Date.now()}-${uid}`;
@@ -117,8 +130,11 @@ async function _processMessage(client, uid, parsed) {
     received_at: (parsed.date || new Date()).toISOString()
   };
   await _dispatchToBackend(route, payload);
-  // Mark SEEN only after successful dispatch so failures retry on the next poll.
-  await client.messageFlagsAdd({ uid }, ['\\Seen'], { uid: true });
+  // Mark our custom keyword (and \Seen as a courtesy) only after successful
+  // dispatch so failures retry on the next poll. The keyword is what gates
+  // duplicate dispatch; \Seen is independent and may already be true if
+  // Arthur read the message before this poll cycle ran.
+  await client.messageFlagsAdd({ uid }, ['\\Seen', POLLER_KEYWORD], { uid: true });
   return { dispatched: true, platform: route.platform, message_id: messageId };
 }
 
@@ -146,18 +162,22 @@ async function pollOnce(pool) {
     await client.connect();
     const lock = await client.getMailboxLock('INBOX');
     try {
-      const since = new Date(Date.now() - 24 * 60 * 60 * 1000); // last 24h window
-      const uids = await client.search({ unseen: true, since }, { uid: true });
+      // Search by date only, no unseen filter. Arthur's read state on his
+      // own inbox is orthogonal to whether our poller has dispatched the
+      // message. The POLLER_KEYWORD on each message is what gates duplicate
+      // dispatch — see _processMessage.
+      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000); // last 7d window
+      const uids = await client.search({ since }, { uid: true });
       for (const uid of uids) {
         try {
-          const downloaded = await client.fetchOne(uid, { source: true }, { uid: true });
+          const downloaded = await client.fetchOne(uid, { source: true, flags: true }, { uid: true });
           if (!downloaded?.source) {
             errored++;
             console.error(`[InboundPoller] uid ${uid}: no source`);
             continue;
           }
           const parsed = await simpleParser(downloaded.source);
-          const result = await _processMessage(client, uid, parsed);
+          const result = await _processMessage(client, uid, parsed, downloaded.flags);
           if (result.skipped) skipped++;
           else if (result.dispatched) dispatched++;
         } catch (perMsgErr) {

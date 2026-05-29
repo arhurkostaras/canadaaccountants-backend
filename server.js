@@ -5693,7 +5693,7 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
 
     // Fetch scraped CPA profile
     const profile = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason FROM scraped_cpas WHERE id = $1`,
+      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason, has_enrichment_collision, is_generic_inbox, collision_count FROM scraped_cpas WHERE id = $1`,
       [recipient_id]
     );
     if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
@@ -5703,9 +5703,22 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
     // Pool-contamination gate: ACC pool came back clean in the 2026-05-11
     // audit (0 records flagged) but the gate is shipped for symmetry +
     // defense against future contamination.
-    if (p.is_misclassified === true) {
-      console.warn(`[Claim Profile] REFUSED 410: id=${p.id} reason=${p.misclassified_reason || 'unspecified'}`);
-      return res.status(410).json({ error: 'Profile no longer available pending review' });
+    // Extended 2026-05-13 (Phase A WS B): also gate on has_enrichment_collision
+    // and is_generic_inbox; same recovery path for all three flag types.
+    if (p.is_misclassified === true || p.has_enrichment_collision === true || p.is_generic_inbox === true) {
+      const gateReason = p.is_misclassified ? (p.misclassified_reason || 'misclassified')
+                       : p.has_enrichment_collision ? `enrichment_collision(x${p.collision_count})`
+                       : 'generic_inbox';
+      console.warn(`[Claim Profile] REFUSED 410: id=${p.id} reason=${gateReason}`);
+      const displayName = ((p.first_name || '') + ' ' + (p.last_name || '')).trim() || p.full_name || 'this professional';
+      return res.status(410).json({
+        error: 'Profile no longer available pending review',
+        code: 'PROFILE_UNDER_REVIEW',
+        message: `This profile is currently under review and not publicly visible. If you are ${displayName} and would like to claim this profile or have it removed, please email arthur@negotiateandwin.com with subject 'Profile Review: ${displayName}'. We'll review and respond within 5 business days.`,
+        contact_email: 'arthur@negotiateandwin.com',
+        subject_prefix: 'Profile Review:',
+        profile_name: displayName
+      });
     }
 
     const rawEmail = p.enriched_email || p.email || recipient_email || '';
@@ -5773,9 +5786,13 @@ app.post('/api/claim/instant', async (req, res) => {
     const { recipient_id } = outreach.rows[0];
 
     // Fetch scraped profile
+    // 2026-05-18: removed `specializations` from SELECT — column doesn't exist
+    // on scraped_cpas (only on cpa_profiles). Was crashing /api/claim/instant
+    // with HTTP 500. The INSERT into cpa_profiles below falls back to '[]' via
+    // the `scraped.specializations || '[]'` expression when undefined.
     const profile = await pool.query(
       `SELECT id, first_name, last_name, full_name, firm_name, email, enriched_email, claim_status,
-              province, city, designation, specializations
+              province, city, designation
        FROM scraped_cpas WHERE id = $1`,
       [recipient_id]
     );
@@ -6349,17 +6366,31 @@ app.get('/api/founding-members', async (req, res) => {
 app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, first_name, last_name, firm_name, city, province, designation,
-              phone, generated_bio, claim_status, founding_member, is_misclassified, misclassified_reason
+      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation,
+              phone, generated_bio, claim_status, founding_member, is_misclassified, misclassified_reason,
+              has_enrichment_collision, is_generic_inbox, collision_count
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
     if (rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
 
     // Pool-contamination gate (see /api/claim/profile/:refToken for context).
-    if (rows[0].is_misclassified === true) {
-      console.warn(`[Public Profile] REFUSED 410: id=${rows[0].id} reason=${rows[0].misclassified_reason || 'unspecified'}`);
-      return res.status(410).json({ error: 'Profile no longer available pending review' });
+    // Extended 2026-05-13 (Phase A WS B): also gate on has_enrichment_collision
+    // and is_generic_inbox; same recovery path for all three flag types.
+    if (rows[0].is_misclassified === true || rows[0].has_enrichment_collision === true || rows[0].is_generic_inbox === true) {
+      const gateReason = rows[0].is_misclassified ? (rows[0].misclassified_reason || 'misclassified')
+                       : rows[0].has_enrichment_collision ? `enrichment_collision(x${rows[0].collision_count})`
+                       : 'generic_inbox';
+      console.warn(`[Public Profile] REFUSED 410: id=${rows[0].id} reason=${gateReason}`);
+      const displayName = ((rows[0].first_name || '') + ' ' + (rows[0].last_name || '')).trim() || rows[0].full_name || 'this professional';
+      return res.status(410).json({
+        error: 'Profile no longer available pending review',
+        code: 'PROFILE_UNDER_REVIEW',
+        message: `This profile is currently under review and not publicly visible. If you are ${displayName} and would like to claim this profile or have it removed, please email arthur@negotiateandwin.com with subject 'Profile Review: ${displayName}'. We'll review and respond within 5 business days.`,
+        contact_email: 'arthur@negotiateandwin.com',
+        subject_prefix: 'Profile Review:',
+        profile_name: displayName
+      });
     }
 
     const p = rows[0];
