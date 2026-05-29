@@ -3,3 +3,7 @@ node_modules/
 .env.*
 *.log
 .DS_Store
+
+# Operational artifacts (hygiene pass 2026-05-29)
+/*.sh
+*baseline*.json
