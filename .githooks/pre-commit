@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Pre-commit secret scan.
+#
+# Primary defense: gitleaks (catches high-entropy strings + known service prefixes).
+# Fallback defense: regex sweep over ADDED diff lines for real-secret-value SHAPES.
+#
+# Design rules:
+#  - Scans STAGED diffs only (gitleaks git . --staged / git diff --cached).
+#  - Targets real-secret-value SHAPES, NOT placeholder literals. Removing a
+#    placeholder is the opposite of introducing a secret — diffs that DELETE
+#    'your_jwt_secret_key', 'fallback_secret', 'bio-gen-2026', etc. must NOT block.
+#  - Skips .env.example (template file, intentionally key-names-only).
+#  - Skips lines that read process.env.NAME (legitimate env-var references).
+#
+# To bypass intentionally (use sparingly, with justification in commit message):
+#   git commit --no-verify
+
+set -e
+
+if command -v gitleaks >/dev/null 2>&1; then
+  exec gitleaks git . --staged --redact -v
+fi
+
+# ── Fallback path (no gitleaks installed) ─────────────────────────────────────
+# Get staged diff, excluding .env.example (template) and image binaries.
+diff=$(git diff --cached --unified=0 -- ':!.env.example' ':!*.png' ':!*.jpg' ':!*.jpeg' ':!*.gif' 2>/dev/null || true)
+[ -z "$diff" ] && exit 0
+
+# Keep only ADDED lines (start with single '+', skip file-header '+++').
+added=$(printf '%s\n' "$diff" | grep -E '^\+[^+]' || true)
+[ -z "$added" ] && exit 0
+
+# Real-secret-value shapes.
+patterns='sk_live_[A-Za-z0-9]{20,}|sk_test_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|re_[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|gh[pos]_[A-Za-z0-9]{36}|xox[bp]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}'
+
+# Match and exclude legitimate env-var references.
+hits=$(printf '%s\n' "$added" | grep -E "$patterns" | grep -v 'process\.env\.' || true)
+
+if [ -n "$hits" ]; then
+  echo "❌ Pre-commit secret check: real-secret-shape detected in ADDED lines."
+  echo "Patterns covered: Stripe sk_/whsec_, Resend re_, AWS AKIA, GitHub gh[pos]_,"
+  echo "                  Slack xox*-, PEM private keys, JWT eyJ*.*.* tokens."
+  echo
+  echo "If this is a genuine false positive (test fixture, etc.), use --no-verify with"
+  echo "explicit justification in the commit message."
+  exit 1
+fi
+
+exit 0

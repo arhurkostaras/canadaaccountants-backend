@@ -1,9 +1,14 @@
 node_modules/
 .env
 .env.*
+!.env.example
 *.log
 .DS_Store
 
 # Operational artifacts (hygiene pass 2026-05-29)
 /*.sh
 *baseline*.json
+
+# Phase 1 Step 2b audit artifacts (2026-05-29 — gitignored, never committed)
+SECURITY-AUDIT.md
+gitleaks-report.json
