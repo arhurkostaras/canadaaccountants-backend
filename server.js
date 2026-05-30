@@ -6687,129 +6687,139 @@ function firmMatchesTopList(firmName, topList) {
 
 // GET /api/admin/founder-outreach-candidates
 // Returns top 10 warm candidates ranked for personal founder outreach
+//
+// 2026-05-30 DIGEST-001: candidate fetch+score extracted into _getACCFounderOutreachCandidates
+// so buildFounderDigestHTML + runFounderAutoSend can call it directly without self-fetching
+// over HTTP. SQL/scoring/dedupe/slice unchanged from the prior inline version — verified
+// behavior-preserving against pre-DIGEST-001 HEAD.
+async function _getACCFounderOutreachCandidates() {
+  // Driver: only people who have ACTUALLY engaged (clicked OR claimed OR has top-firm bio)
+  // This avoids scanning 98K rows with nested subqueries.
+  const { rows } = await pool.query(`
+    WITH clicks AS (
+      SELECT recipient_id, COUNT(*) AS click_count, MAX(clicked_at) AS last_click_at
+      FROM outreach_emails
+      WHERE recipient_type = 'scraped_cpa' AND clicked_at IS NOT NULL
+      GROUP BY recipient_id
+    ),
+    candidate_ids AS (
+      SELECT id FROM scraped_cpas WHERE claim_status = 'claimed'
+      UNION
+      SELECT recipient_id AS id FROM clicks
+      UNION
+      (SELECT id FROM scraped_cpas WHERE generated_bio IS NOT NULL AND LENGTH(generated_bio) > 50 ORDER BY id DESC LIMIT 5000)
+    )
+    SELECT
+      sc.id,
+      COALESCE(sc.first_name || ' ' || sc.last_name, sc.full_name) AS name,
+      sc.first_name,
+      sc.last_name,
+      COALESCE(sc.enriched_email, sc.email) AS email,
+      sc.firm_name,
+      sc.city,
+      sc.province,
+      sc.claim_status,
+      sc.generated_bio,
+      cp.years_experience,
+      cp.subscription_status,
+      COALESCE(c.click_count, 0) AS click_count,
+      c.last_click_at,
+      EXISTS (
+        SELECT 1 FROM outreach_unsubscribes u
+        WHERE u.email = COALESCE(sc.enriched_email, sc.email)
+      ) AS unsubscribed,
+      EXISTS (
+        SELECT 1 FROM founder_outreach_log fo
+        WHERE fo.recipient_email = COALESCE(sc.enriched_email, sc.email)
+          AND fo.sent_at > NOW() - INTERVAL '90 days'
+      ) AS already_sent
+    FROM scraped_cpas sc
+    JOIN candidate_ids ci ON ci.id = sc.id
+    LEFT JOIN clicks c ON c.recipient_id = sc.id
+    LEFT JOIN cpa_profiles cp ON LOWER(cp.email) = LOWER(COALESCE(sc.enriched_email, sc.email))
+    WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
+      AND sc.status != 'invalid'
+  `);
+
+  const scored = rows
+    .filter(r => !r.already_sent)
+    .map(r => {
+      let score = 0;
+      const signals = [];
+
+      // Claimed but no active subscription (warmest)
+      const isClaimed = r.claim_status === 'claimed';
+      const hasSub = r.subscription_status && ['active', 'trialing'].includes(r.subscription_status);
+      if (isClaimed && !hasSub) { score += 50; signals.push('claimed_no_sub'); }
+      else if (isClaimed) { signals.push('claimed'); }
+
+      // Click events (+30 each)
+      const clicks = parseInt(r.click_count) || 0;
+      if (clicks > 0) {
+        score += 30 * clicks;
+        signals.push(`clicked_${clicks}x`);
+      }
+
+      // Top firm
+      if (firmMatchesTopList(r.firm_name, ACC_TOP_FIRMS)) {
+        score += 20;
+        signals.push('top_firm');
+      }
+
+      // Experience
+      if (r.years_experience && r.years_experience >= 10) {
+        score += 15;
+        signals.push('experienced_10yr');
+      }
+
+      // Has generated bio (data for personalization)
+      if (r.generated_bio && r.generated_bio.length > 50) {
+        score += 10;
+        signals.push('has_bio');
+      }
+
+      // Hard exclusions (drop entirely, not penalize)
+      if (isRoleEmail(r.email)) {
+        signals.push('exclude:role_email');
+      }
+      if (!nameMatchesEmail(r.name, r.email)) {
+        signals.push('exclude:name_email_mismatch');
+      }
+      if (r.unsubscribed) {
+        signals.push('exclude:unsubscribed');
+      }
+
+      return {
+        id: r.id,
+        name: r.name,
+        first_name: r.first_name,
+        email: r.email,
+        firm_name: r.firm_name,
+        city: r.city,
+        province: r.province,
+        score,
+        signals,
+        last_click_at: r.last_click_at,
+        recipient_type: 'scraped_cpa'
+      };
+    })
+    .filter(c => c.score > 0 && !c.signals.some(s => s.startsWith('exclude:')))
+    // Dedup by email (multiple people sharing same address — keep highest score)
+    .reduce((acc, c) => {
+      const key = (c.email || '').toLowerCase();
+      if (!acc.seen.has(key)) { acc.seen.add(key); acc.list.push(c); }
+      return acc;
+    }, { seen: new Set(), list: [] }).list
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 20);
+
+  return scored;
+}
+
 app.get('/api/admin/founder-outreach-candidates', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Driver: only people who have ACTUALLY engaged (clicked OR claimed OR has top-firm bio)
-    // This avoids scanning 98K rows with nested subqueries.
-    const { rows } = await pool.query(`
-      WITH clicks AS (
-        SELECT recipient_id, COUNT(*) AS click_count, MAX(clicked_at) AS last_click_at
-        FROM outreach_emails
-        WHERE recipient_type = 'scraped_cpa' AND clicked_at IS NOT NULL
-        GROUP BY recipient_id
-      ),
-      candidate_ids AS (
-        SELECT id FROM scraped_cpas WHERE claim_status = 'claimed'
-        UNION
-        SELECT recipient_id AS id FROM clicks
-        UNION
-        (SELECT id FROM scraped_cpas WHERE generated_bio IS NOT NULL AND LENGTH(generated_bio) > 50 ORDER BY id DESC LIMIT 5000)
-      )
-      SELECT
-        sc.id,
-        COALESCE(sc.first_name || ' ' || sc.last_name, sc.full_name) AS name,
-        sc.first_name,
-        sc.last_name,
-        COALESCE(sc.enriched_email, sc.email) AS email,
-        sc.firm_name,
-        sc.city,
-        sc.province,
-        sc.claim_status,
-        sc.generated_bio,
-        cp.years_experience,
-        cp.subscription_status,
-        COALESCE(c.click_count, 0) AS click_count,
-        c.last_click_at,
-        EXISTS (
-          SELECT 1 FROM outreach_unsubscribes u
-          WHERE u.email = COALESCE(sc.enriched_email, sc.email)
-        ) AS unsubscribed,
-        EXISTS (
-          SELECT 1 FROM founder_outreach_log fo
-          WHERE fo.recipient_email = COALESCE(sc.enriched_email, sc.email)
-            AND fo.sent_at > NOW() - INTERVAL '90 days'
-        ) AS already_sent
-      FROM scraped_cpas sc
-      JOIN candidate_ids ci ON ci.id = sc.id
-      LEFT JOIN clicks c ON c.recipient_id = sc.id
-      LEFT JOIN cpa_profiles cp ON LOWER(cp.email) = LOWER(COALESCE(sc.enriched_email, sc.email))
-      WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
-        AND sc.status != 'invalid'
-    `);
-
-    const scored = rows
-      .filter(r => !r.already_sent)
-      .map(r => {
-        let score = 0;
-        const signals = [];
-
-        // Claimed but no active subscription (warmest)
-        const isClaimed = r.claim_status === 'claimed';
-        const hasSub = r.subscription_status && ['active', 'trialing'].includes(r.subscription_status);
-        if (isClaimed && !hasSub) { score += 50; signals.push('claimed_no_sub'); }
-        else if (isClaimed) { signals.push('claimed'); }
-
-        // Click events (+30 each)
-        const clicks = parseInt(r.click_count) || 0;
-        if (clicks > 0) {
-          score += 30 * clicks;
-          signals.push(`clicked_${clicks}x`);
-        }
-
-        // Top firm
-        if (firmMatchesTopList(r.firm_name, ACC_TOP_FIRMS)) {
-          score += 20;
-          signals.push('top_firm');
-        }
-
-        // Experience
-        if (r.years_experience && r.years_experience >= 10) {
-          score += 15;
-          signals.push('experienced_10yr');
-        }
-
-        // Has generated bio (data for personalization)
-        if (r.generated_bio && r.generated_bio.length > 50) {
-          score += 10;
-          signals.push('has_bio');
-        }
-
-        // Hard exclusions (drop entirely, not penalize)
-        if (isRoleEmail(r.email)) {
-          signals.push('exclude:role_email');
-        }
-        if (!nameMatchesEmail(r.name, r.email)) {
-          signals.push('exclude:name_email_mismatch');
-        }
-        if (r.unsubscribed) {
-          signals.push('exclude:unsubscribed');
-        }
-
-        return {
-          id: r.id,
-          name: r.name,
-          first_name: r.first_name,
-          email: r.email,
-          firm_name: r.firm_name,
-          city: r.city,
-          province: r.province,
-          score,
-          signals,
-          last_click_at: r.last_click_at,
-          recipient_type: 'scraped_cpa'
-        };
-      })
-      .filter(c => c.score > 0 && !c.signals.some(s => s.startsWith('exclude:')))
-      // Dedup by email (multiple people sharing same address — keep highest score)
-      .reduce((acc, c) => {
-        const key = (c.email || '').toLowerCase();
-        if (!acc.seen.has(key)) { acc.seen.add(key); acc.list.push(c); }
-        return acc;
-      }, { seen: new Set(), list: [] }).list
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 20);
-
-    res.json({ candidates: scored });
+    const candidates = await _getACCFounderOutreachCandidates();
+    res.json({ candidates });
   } catch (err) {
     console.error('[FounderOutreach] candidates error:', err.message);
     res.status(500).json({ error: err.message });
@@ -6911,27 +6921,13 @@ app.post('/api/admin/founder-outreach/send', async (req, res) => {
 
 // Build the Monday founder digest email (HTML body) from 3 platforms' candidate lists
 async function buildFounderDigestHTML() {
-  const fetchJSON = (url) => new Promise((resolve) => {
-    const mod = url.startsWith('https://') ? require('https') : require('http');
-    mod.get(url, (r) => {
-      let b = '';
-      r.on('data', c => b += c);
-      r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({ candidates: [] }); } });
-      r.on('error', () => resolve({ candidates: [] }));
-    }).on('error', () => resolve({ candidates: [] }));
-  });
-
-  // Call the endpoints on each backend
-  const [accLocal, lawRemote, invRemote] = await Promise.all([
-    fetchJSON(`http://127.0.0.1:${PORT}/api/admin/founder-outreach-candidates`),
-    fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/founder-outreach-candidates'),
-    fetchJSON('https://canadainvesting-backend-production.up.railway.app/api/admin/founder-outreach-candidates')
-  ]);
+  // 2026-05-30 DIGEST-001: ACC-only (Option D). Previously self-fetched + cross-fetched
+  // LAW/INV via HTTP — cross-calls silently 401'd (no auth header). LAW + INV will land
+  // their own per-platform digest crons separately.
+  const candidates = await _getACCFounderOutreachCandidates();
 
   const platforms = [
-    { key: 'accountants', label: 'Accountants', domain: 'canadaaccountants.app', candidates: accLocal.candidates || [] },
-    { key: 'lawyers', label: 'Lawyers', domain: 'canadalawyers.app', candidates: lawRemote.candidates || [] },
-    { key: 'investing', label: 'Investing', domain: 'canadainvesting.app', candidates: invRemote.candidates || [] }
+    { key: 'accountants', label: 'Accountants', domain: 'canadaaccountants.app', candidates }
   ];
 
   const renderPlatform = (p) => {
@@ -6971,8 +6967,8 @@ async function buildFounderDigestHTML() {
 
   const total = platforms.reduce((s, p) => s + p.candidates.length, 0);
   const html = `<div style="font-family:Arial,sans-serif;max-width:800px;margin:0 auto;color:#222;">
-<h1 style="color:#1e3a8a;font-size:22px;">Weekly Founder Outreach Digest</h1>
-<p style="color:#555;">Top ${total} candidates across 3 platforms, ranked by warmth signals. Click "Send Founder Email" to open a pre-filled message in your mail client.</p>
+<h1 style="color:#1e3a8a;font-size:22px;">ACC Weekly Founder Outreach Digest</h1>
+<p style="color:#555;">Top ${total} ACC founder-outreach candidates, ranked by warmth signals. Click "Send Founder Email" to open a pre-filled message in your mail client.</p>
 ${platforms.map(renderPlatform).join('')}
 <p style="color:#999;font-size:11px;margin-top:32px;">Generated Monday 9 AM ET. Score = claim_no_sub (+50) + clicks (+30 each) + top_firm (+20) + experience (+15) + bio (+10) - role_email (-10) - unsubscribed (-50). 90-day dedupe via founder_outreach_log.</p>
 </div>`;
@@ -6985,7 +6981,7 @@ app.post('/api/admin/founder-outreach/digest/send', async (req, res) => {
     const { html, total } = await buildFounderDigestHTML();
     const result = await sendEmail({
       to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
-      subject: `Weekly Founder Outreach Digest (${total} candidates)`,
+      subject: `ACC Weekly Founder Outreach Digest (${total} candidates)`,
       html,
       from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
     });
@@ -7013,32 +7009,16 @@ async function runFounderAutoSend() {
     return { sent: 0, skipped: 0, failed: 0, paused: true };
   }
 
-  const fetchJSON = (url) => new Promise((resolve) => {
-    const mod = url.startsWith('https://') ? require('https') : require('http');
-    mod.get(url, (r) => {
-      let b = '';
-      r.on('data', c => b += c);
-      r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve({ candidates: [] }); } });
-      r.on('error', () => resolve({ candidates: [] }));
-    }).on('error', () => resolve({ candidates: [] }));
-  });
-
-  const [accData, lawData, invData] = await Promise.all([
-    fetchJSON(`http://127.0.0.1:${PORT}/api/admin/founder-outreach-candidates`),
-    fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/founder-outreach-candidates'),
-    fetchJSON('https://canadainvesting-backend-production.up.railway.app/api/admin/founder-outreach-candidates')
-  ]);
+  // 2026-05-30 DIGEST-001: ACC-only (Option D). Cross-platform LAW/INV fetches removed;
+  // those platforms will land their own per-platform auto-send crons separately.
+  const candidates = await _getACCFounderOutreachCandidates();
 
   const platformMap = {
-    accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>', replyTo: 'arthur@canadaaccountants.app' },
-    lawyers: { domain: 'canadalawyers.app', from: 'Arthur Kostaras <arthur@canadalawyers.app>', replyTo: 'arthur@canadalawyers.app' },
-    investing: { domain: 'canadainvesting.app', from: 'Arthur Kostaras <arthur@canadainvesting.app>', replyTo: 'arthur@canadainvesting.app' }
+    accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>', replyTo: 'arthur@canadaaccountants.app' }
   };
 
   const batches = [
-    { key: 'accountants', candidates: accData.candidates || [] },
-    { key: 'lawyers', candidates: lawData.candidates || [] },
-    { key: 'investing', candidates: invData.candidates || [] }
+    { key: 'accountants', candidates }
   ];
 
   let sent = 0, skipped = 0, failed = 0;
@@ -7097,7 +7077,7 @@ cron.schedule('0 9 * * 1', async () => {
     const { html, total } = await buildFounderDigestHTML();
     await sendEmail({
       to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
-      subject: `Weekly Founder Outreach Digest (${total} candidates)`,
+      subject: `ACC Weekly Founder Outreach Digest (${total} candidates)`,
       html,
       from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
     });
@@ -7113,7 +7093,7 @@ cron.schedule('5 9 * * 1', async () => {
     // Send summary to admin
     await sendEmail({
       to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
-      subject: `Founder Auto-Send Complete: ${results.sent} sent, ${results.skipped} deduped, ${results.failed} failed`,
+      subject: `ACC Founder Auto-Send Complete: ${results.sent} sent, ${results.skipped} deduped, ${results.failed} failed`,
       html: `<p>Auto-send results: ${results.sent} sent, ${results.skipped} skipped (90-day dedup), ${results.failed} failed.</p>${results.errors ? '<pre>' + JSON.stringify(results.errors, null, 2) + '</pre>' : ''}`,
       from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
     });
