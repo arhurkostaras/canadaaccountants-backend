@@ -30,6 +30,12 @@ const STRIPE_PRICES = {
   enterprise_yearly: process.env.STRIPE_PRICE_ENTERPRISE_YEARLY || '',
 };
 
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('[FATAL] JWT_SECRET environment variable is not set; refusing to start');
+  process.exit(1);
+}
+
 // Initialize Sentry before anything else
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -292,7 +298,7 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Access token required' });
   }
 
-  jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret_key', (err, user) => {
+  jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
@@ -357,7 +363,7 @@ app.post('/api/auth/login', async (req, res) => {
         email: user.email,
         userType: user.user_type 
       },
-      process.env.JWT_SECRET || 'your_jwt_secret_key',
+      JWT_SECRET,
       { expiresIn: '7d' }
     );
     
@@ -4017,7 +4023,7 @@ app.get('/api/admin/magic-link/:userId', async (req, res) => {
     const user = await pool.query('SELECT id, email, user_type FROM users WHERE id = $1', [req.params.userId]);
     if (user.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     const u = user.rows[0];
-    const token = jwt.sign({ userId: u.id, email: u.email, userType: u.user_type || 'CPA' }, process.env.JWT_SECRET || 'your_jwt_secret_key', { expiresIn: '30d' });
+    const token = jwt.sign({ userId: u.id, email: u.email, userType: u.user_type || 'CPA' }, JWT_SECRET, { expiresIn: '30d' });
     const magicLink = `${FRONTEND_URL}/admin?token=${token}`;
     res.json({ userId: u.id, email: u.email, magicLink });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5220,7 +5226,7 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       try {
-        const decoded = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET || 'your_jwt_secret_key');
+        const decoded = jwt.verify(authHeader.split(' ')[1], JWT_SECRET);
         customerEmail = customerEmail || decoded.email;
         userId = decoded.userId;
         if (!cpaProfileId) {
@@ -5890,7 +5896,7 @@ app.post('/api/claim/instant', async (req, res) => {
     // Generate long-lived JWT for magic link (30 days)
     const token = jwt.sign(
       { userId, email, userType: 'CPA' },
-      process.env.JWT_SECRET || 'your_jwt_secret_key',
+      JWT_SECRET,
       { expiresIn: '30d' }
     );
 
@@ -6238,7 +6244,7 @@ app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, asy
 
         // Generate login token for magic link (7-day expiry)
         const jwt = require('jsonwebtoken');
-        const token = jwt.sign({ userId: cpa.user_id, email: cpa.email, userType: 'CPA' }, process.env.JWT_SECRET || 'your_jwt_secret_key', { expiresIn: '7d' });
+        const token = jwt.sign({ userId: cpa.user_id, email: cpa.email, userType: 'CPA' }, JWT_SECRET, { expiresIn: '7d' });
         const dashboardLink = `${FRONTEND_URL}/cpa-dashboard?token=${token}`;
 
         const subject = `Your profile was viewed ${totalViews} times this week`;
@@ -7668,7 +7674,12 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
       try {
         const cpa = await getCPA(r.recipient_email);
         if (!cpa) continue;
-        const magicToken = jwt.sign({ email: r.recipient_email, cpaId: cpa.id, action: 'claim' }, process.env.JWT_SECRET || 'fallback_secret', { expiresIn: '7d' });
+        // 2026-05-29 F2 (P2a): magic-link claim token. Signs with JWT_SECRET (same
+        // env var as every other JWT site in this file). The previous magic-link
+        // fallback was a distinct historic placeholder; this signing path is
+        // preserved pending a separate wire-up-or-remove decision — no backend
+        // route currently verifies this token's payload. See KNOWN-BUGS MAGIC-LINK-001.
+        const magicToken = jwt.sign({ email: r.recipient_email, cpaId: cpa.id, action: 'claim' }, JWT_SECRET, { expiresIn: '7d' });
         const magicLink = `${FRONTEND_URL}/claim?token=${magicToken}`;
         const html = `
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
