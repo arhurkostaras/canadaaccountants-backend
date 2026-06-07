@@ -17,6 +17,17 @@
 
 set -e
 
+# ── BP-002 backpressure: lint the entry file before the secret scan ───────────
+# Runs the project lint (npm run lint -> eslint server.js), which enforces the
+# sentry-before-express rule and any future server.js rules. Blocks the commit
+# on lint failure. Skipped if eslint is not installed so the secret scan still
+# works in bare environments. Must run BEFORE the gitleaks block below, which
+# ends in `exec` (exec replaces this process, so nothing after it would run).
+if [ -x node_modules/.bin/eslint ]; then
+  echo "pre-commit: lint (npm run lint)..."
+  npm run -s lint
+fi
+
 if command -v gitleaks >/dev/null 2>&1; then
   exec gitleaks git . --staged --redact -v
 fi
