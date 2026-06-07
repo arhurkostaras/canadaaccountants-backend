@@ -9,7 +9,7 @@
     "seed": "node scripts/seed.js",
     "test": "node --test tests/*.test.js",
     "lint": "eslint server.js",
-    "prepare": "git config core.hooksPath .githooks"
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
