@@ -77,11 +77,13 @@ off. fulfilling-empathy was not touched.
 - FE untouched: latestDeployment 000fdd4f (SUCCESS, commit d81d0fd), /health 200,
   source still connected, prod repo dir still linked to fulfilling-empathy.
 
-### Deferred (not faked)
-The "one FE build, zero WS builds" proof waits for the next genuine backend push
-to arhurkostaras/canadaaccountants-backend@main. No throwaway commit will be
-created. Expected: FE latestDeployment changes to a new id; WS latestDeployment
-stays da969245.
+### Proof (satisfied 2026-06-07)
+The "one FE build, zero WS builds" check is satisfied. The commit that added this
+record (66802a4) was the genuine backend push used as the test, so no throwaway
+commit was created. Result: FE built 66802a4 and went green (deployment 4aebf747,
+status SUCCESS, /health 200), while WS stayed at deployment da969245 with no build
+triggered (still commit d81d0fd, /health 200). The autodeploy-disable on
+wonderful-surprise is functionally proven; the double-build is dead.
 
 ### Still open (logged, not done)
 - Full WS decommission (the WS canadaaccountants-backend service, its Postgres,
