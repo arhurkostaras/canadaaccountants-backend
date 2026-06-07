@@ -16,6 +16,14 @@ alongside.
 
 ## 2026-06-07 - ACC duplicate backend: wonderful-surprise reduced to inert (Option A)
 
+> CORRECTION (2026-06-07, later same day): the "inert / incomplete CRM schema"
+> framing in this entry understated reality and was partly wrong about consumers.
+> The WS Postgres holds a live 2.4M-row scraped dataset and the WS SME scraper is
+> alive; consumers attach at the DB/env layer, not via the app domain a code grep
+> can see. The original text below is preserved as the record of what was believed
+> at the time. See the correcting entry "WS Postgres (maglev) is a redundant scrape
+> duplicate" further down.
+
 ### Context
 ACC had two live Railway backends auto-deploying the same GitHub repo
 (arhurkostaras/canadaaccountants-backend, branch main):
@@ -102,3 +110,107 @@ No target architecture has been chosen yet, so these are candidates only:
    how this defect persisted unseen.
 2. Root vs public/ tree drift: two copies of the same asset, only one served,
    diverging silently.
+
+---
+
+## 2026-06-07 (later same day) - CORRECTION: WS Postgres (maglev) is a redundant scrape duplicate, NOT the four-platform demand side
+
+Verification note: figures below are CC-measured this session UNLESS marked
+[operator-supplied]. The fulfilling-empathy production DB (dd9a08) figures are
+operator/dashboard reads: CC could NOT connect to it this session (the public
+proxy turntable.proxy.rlwy.net:13986 returned "password authentication failed"),
+so CC did not independently measure dd9a08's row counts or schema. All maglev and
+accurate-ambition figures, the three system_identifiers, the service/project IDs,
+and the backup hash are CC-measured.
+
+### What triggered the correction
+The WS decommission was paused, then cancelled, when the operator stated the WS
+Postgres was "the demand side for all four platforms." That claim required
+verification before any deletion. Investigation resolved it.
+
+### The true database topology (three distinct Postgres instances)
+- accurate-ambition Postgres (switchback.proxy.rlwy.net:20584, project 85fc2f19,
+  service c435b148, system_identifier 7529571790925643812): the WS ACC backend's
+  DB, reached CROSS-PROJECT from wonderful-surprise. Near-empty ACC schema (about
+  2 users, trivial test data; row counts are pg_stat estimates). Separate project,
+  OUT OF SCOPE for any WS retirement.
+- wonderful-surprise Postgres "maglev" (maglev.proxy.rlwy.net:38500, project
+  fb4795a2, service a2164d8c, system_identifier 7533302060726231076, PostgreSQL
+  16.8): scraped_smes 2,413,950; scraped_cpas 96,119; market_data 7,890;
+  scrape_jobs 1,219 (CC-measured, exact counts). Written to actively: latest
+  scrape_jobs.started_at 2026-06-07 12:00, scraped_cpas enrichment 2026-06-07
+  13:35, market_data 2026-06-07 06:00 (same day); scraped_smes latest 2026-06-05.
+  Sole DB-layer consumer is the WS sme-intelligence-backend instance.
+- fulfilling-empathy production Postgres "dd9a08" (turntable.proxy.rlwy.net:13986):
+  the LIVE serving database. [operator-supplied] scraped_smes 2,579,637;
+  scraped_cpas 100,060; PLUS the full application schema (users, matches,
+  referrals, cpa_profiles, client_profiles, outreach_*, sequence_*,
+  stripe_transactions, etc.). Served to platforms via the -5185 SME API. CC could
+  not connect this session; these are dashboard reads, not CC-measured.
+
+### Corrected facts vs the original Option A entry
+- "WS is inert / dead": WRONG in part. The WS SME backend's HTTP returns 502, but
+  its background SCRAPER is alive and writing maglev (same-day scrape_jobs and
+  enrichment timestamps confirm it). It is a live, redundant scraper, not a dead
+  service.
+- "incomplete CRM schema, inert": UNDERSTATED. The original entry described only
+  the absence of CRM tables on the WS ACC DB and missed the maglev dataset
+  entirely. maglev holds a 2.4M-row live scraped dataset.
+- "no live consumers": correct at the APP-DOMAIN layer (no repo references the WS
+  domains) but the original reasoning was unsafe: it grepped code for the WS domain
+  and could not see DB-layer / env-var consumers. The complete DB-layer consumer
+  sweep this session (by host and by password fingerprint across all
+  personal-platform projects, Phronisi excluded per isolation) found maglev is read
+  only by the WS SME scraper instance; no platform backend connects to it by any
+  variable.
+
+### The actual demand-side data flow (established)
+Platforms that use SME data (canadainvesting-backend, canadalawyers-backend,
+lawyer-intelligence-backend) consume it via the live -5185 SME API
+(sme-intelligence-backend-production-5185.up.railway.app), which reads dd9a08 (FE
+production). ACC and CBE call no SME API (CC-verified by repo grep). maglev is an
+INDEPENDENT, parallel scrape read by nobody downstream. There is no replication or
+sync between maglev and dd9a08 (CC-confirmed in the sme-intelligence-backend repo:
+a single DATABASE_URL client per instance, no sync logic; both SME instances run
+the same repo bound to different DBs).
+
+### Verdict
+maglev is a REDUNDANT, TRAILING duplicate of production demand data. On the
+operator-supplied dd9a08 figures, production (2,579,637 / 100,060) is LARGER than
+maglev (2,413,950 / 96,119) and presumably fresher. The operator's instinct that
+this data is critical was directionally right but identified the wrong copy: the
+live demand side is dd9a08, not maglev. The conclusion that maglev's contents all
+exist in fuller form in dd9a08 rests on the operator-supplied dd9a08 counts; CC did
+not row-compare the two databases (could not read dd9a08). On that basis the WS SME
+scraper is a duplicate pipeline doing the same scrape work for a database nothing
+reads.
+
+### Status and open items
+- Decommission: cancelled as originally scoped; reframed as a future low-stakes
+  pass = stop the redundant WS SME scraper, then retire the WS project. Not
+  executed. If the redundancy holds (pending the dd9a08 superset confirmation
+  above), retirement is low-risk once confirmed.
+- Backups:
+  - maglev: VALIDATED. Custom-format dump, 208M, sha256
+    44e44a4eb5a732fd0975b1787546e221d3a0247e649a83e0f8a024f84cb88558, at
+    ~/cc-backups/2026-06-07/wonderful-surprise-postgres/railway.dump, test-restored
+    with exact row-count match on all four data tables. Single LOCAL copy only;
+    NEEDS a second off-machine copy.
+  - accurate-ambition Postgres: NOT backed up (the approved Stage 1b never ran
+    after the pivot). Tiny; back up before any future action involving WS ACC.
+  - dd9a08 (PRODUCTION): NO session backup exists, and CC could not connect to it.
+    This is the real exposure: the live demand-and-operational DB (also holds users
+    and stripe_transactions per the operator-supplied schema) has no fresh
+    validated dump. Highest-priority backup target; CC needs working credentials or
+    a dashboard-side dump to address it.
+- Two scrapers run the same scrape against the same sources (one feeds dd9a08, one
+  feeds the unread maglev): wasteful compute and duplicate target-site load.
+
+### Lesson (backpressure candidate, not yet a ledger row)
+Infra-dependency mapping must be done by database identity (system_identifier) and
+env-var fingerprint, NEVER by code grep alone. A code grep declared WS an "isolated
+orphan"; the truth (cross-project DB reach, a live scraper, a 2.4M-row dataset) was
+only visible at the DB/env layer. This blind spot appeared TWICE this session (WS
+ACC reaching cross-project into accurate-ambition, and the maglev scare) and nearly
+drove deletion of data that looked deletable. Strongest ledger candidate from this
+session; encode once a target convention is chosen.
