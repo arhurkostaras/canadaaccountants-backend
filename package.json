@@ -7,7 +7,9 @@
     "dev": "nodemon server.js",
     "migrate": "node scripts/migrate.js",
     "seed": "node scripts/seed.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "lint": "eslint server.js",
+    "prepare": "git config core.hooksPath .githooks"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
@@ -26,6 +28,7 @@
     "stripe": "^14.25.0"
   },
   "devDependencies": {
+    "eslint": "^9.39.4",
     "nodemon": "^3.0.2"
   }
 }
