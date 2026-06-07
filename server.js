@@ -1,4 +1,14 @@
 const Sentry = require('@sentry/node');
+// Initialize Sentry before anything else (BP-002: before the express import, so
+// errors thrown while Express is setting up are captured). process.env is
+// runtime-injected (no dotenv in this file), so SENTRY_DSN resolves here.
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'production',
+    tracesSampleRate: 0.2,
+  });
+}
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -34,15 +44,6 @@ const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
   console.error('[FATAL] JWT_SECRET environment variable is not set; refusing to start');
   process.exit(1);
-}
-
-// Initialize Sentry before anything else
-if (process.env.SENTRY_DSN) {
-  Sentry.init({
-    dsn: process.env.SENTRY_DSN,
-    environment: process.env.NODE_ENV || 'production',
-    tracesSampleRate: 0.2,
-  });
 }
 
 const app = express();
