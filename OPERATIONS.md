@@ -214,3 +214,58 @@ only visible at the DB/env layer. This blind spot appeared TWICE this session (W
 ACC reaching cross-project into accurate-ambition, and the maglev scare) and nearly
 drove deletion of data that looked deletable. Strongest ledger candidate from this
 session; encode once a target convention is chosen.
+
+---
+
+## 2026-06-07 - Production database had zero backups: discovered and remediated
+
+Verification note: the backup actions below were operator-performed via the Railway
+dashboard; no credentials were surfaced to any agent. CC could NOT independently
+verify the manual backup or the schedules: the Railway CLI exposes no
+backup-schedule data (railway volume list shows only storage and mount path;
+status --json shows only deployment cronSchedule, all null). Every backup fact in
+this entry is therefore operator-reported, not CC-confirmed. The dd9a08 row-count
+and schema references remain operator-supplied, as in the prior entry.
+
+### What was found
+While closing the dd9a08 backup item, a Railway dashboard check (operator-performed,
+no credentials surfaced) found that the fulfilling-empathy production Postgres
+(dd9a08 / turntable.proxy.rlwy.net:13986, the live serving and operational DB
+holding users, stripe_transactions, matches, and the demand-side scraped data) had
+NO backups and NO backup schedule at all. Not stale backups: none, and no schedule.
+This is the most serious finding of the session, larger than the WS cleanup that
+started it. The earlier log wording ("no session backup") understated it: the true
+state was zero backup protection on live production data.
+
+### Root cause
+Railway Postgres services do not auto-configure backups by default, and none of the
+operator's Postgres services had a schedule set. The assumption that production was
+being auto-backed-up was false.
+
+### Remediation (operator-reported; all via Railway dashboard, no credentials surfaced to any agent)
+- dd9a08 (production, fulfilling-empathy): manual backup taken (2026-06-08 00:30
+  UTC, 1.95 GB); backup schedule enabled, Daily plus Weekly plus Monthly tiers
+  (layered retention: 6 days / 1 month / 3 months). Next scheduled backup reported
+  pending.
+- maglev (wonderful-surprise Postgres, the redundant 2.4M-row scrape): backup
+  schedule enabled, Daily. A local validated dump also exists from earlier this
+  session (208M custom-format, sha256
+  44e44a4eb5a732fd0975b1787546e221d3a0247e649a83e0f8a024f84cb88558, restore-verified;
+  that local dump is CC-verified, distinct from the dashboard schedule).
+- accurate-ambition Postgres (cross-project DB the WS ACC backend reaches into,
+  near-empty): backup schedule enabled, Daily. Previously had no backup of any kind.
+
+### Status
+All three Postgres services now have active backup schedules (operator-reported; CC
+could not CLI-verify, see verification note). The acute exposure (unprotected
+production data) is closed. Note: Railway-native backups live in Railway storage,
+which protects against corruption, accidental delete, and bad migration, but NOT
+against loss of the Railway account. An off-platform copy of production remains a
+lower-priority open item.
+
+### Backpressure candidate (elevate toward a ledger row)
+"Every production Postgres must have an active backup schedule." This session found
+a production DB with zero backups; the systemic fix is a periodic check asserting
+every platform database has a recent backup and a schedule, alerting if not. Among
+the strongest ledger candidates from this session, alongside the DB-identity-mapping
+lesson. Encode once a mechanism is chosen.
