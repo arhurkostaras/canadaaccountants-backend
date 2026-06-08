@@ -677,7 +677,11 @@ const pool = new Pool({
 // NOT the receiver. Returns freshness of the events table so a probe can tell
 // whether real signed events are landing. The receiver still rejects unsigned POSTs.
 app.locals.pgPool = pool;
-app.use('/api/webhooks/resend/health', require('./routes/resend-webhook-health'));
+const buildResendHealth = require('./routes/resend-health');
+app.use(buildResendHealth(pool, {
+  lastSendSql:  `SELECT MAX(sent_at) AS ts FROM outreach_emails WHERE sent_at IS NOT NULL`,
+  lastEventSql: `SELECT GREATEST(MAX(delivered_at),MAX(opened_at),MAX(clicked_at),MAX(bounced_at),MAX(complained_at)) AS ts FROM outreach_emails`,
+}));
 
 // Initialize Outreach Engine
 const outreachEngine = new OutreachEngine(pool);
