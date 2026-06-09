@@ -1,4 +1,4 @@
-# Backpressure Ledger — Personal Platforms
+# Backpressure Ledger: Personal Platforms
 
 Canonical backpressure ledger for the four personal platforms (CanadaAccountants,
 CanadaLawyers, CanadaInvesting, CanadaBusinessExits). Referenced from the
