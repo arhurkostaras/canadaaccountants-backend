@@ -269,3 +269,42 @@ a production DB with zero backups; the systemic fix is a periodic check assertin
 every platform database has a recent backup and a schedule, alerting if not. Among
 the strongest ledger candidates from this session, alongside the DB-identity-mapping
 lesson. Encode once a mechanism is chosen.
+
+---
+
+## 2026-06-09 - CORRECTION: maglev is NOT a confirmed subset of production; "redundant duplicate" verdict overturned
+
+Step 5 by-key superset gate (read-only; frozen local captures of corporate_number
+from both sides; local staging only, dropped after). Result: maglev is NOT a
+confirmed subset of ACC production (turntable, sysid 7533606245792546852). The gate
+does NOT pass, for three independent reasons:
+- KEYED ANTI-JOIN not empty. corporate_number is the only shared key (scraped_smes
+  has NO name_hash column, so the planned fallback does not exist). 7,077 maglev
+  corporate_numbers are ABSENT from production (subset requires zero). Bidirectional
+  divergence: 2,807 production keys are absent from maglev.
+- ABOUT 40% UNKEYABLE. maglev 907,029 NULL corporate_number (37.6%); production
+  1,074,928 (41.7%). With no name_hash fallback these rows cannot be key-compared,
+  so the gate is structurally inconclusive for them.
+- FRESHNESS INVERSION. maglev scraped_smes max enrichment_date 2026-06-05 is NEWER
+  than production's 2026-05-19. maglev is not a stale trailing copy; its enrichment
+  is more recent.
+
+Row counts (CC-measured 2026-06-09): maglev scraped_smes 2,413,950 (1,506,783
+distinct corpnum, 907,029 null); production 2,579,637 (1,502,513 distinct,
+1,074,928 null). Enrichment is sparse on both (phone ~100% null, full_address
+~87% null).
+
+Verdict: the earlier "redundant, trailing duplicate" framing (based on row count
+alone: prod 2.58M > maglev 2.41M) is OVERTURNED. Row count does not establish
+containment, and enrichment recency runs the other way. maglev holds at least 7,077
+keyed SMEs production lacks, a roughly 907K unkeyable fraction, and fresher
+enrichment - it has independent value.
+
+Decommission: remains CANCELLED and is now CONTRAINDICATED. The gate did not pass,
+so retiring maglev or the WS scraper is not authorized; a real reconciliation would
+first need a stable shared key (name_hash does not exist) and a plan for the ~907K
+null-key rows. All read-only; no changes; surface, don't repair.
+
+Related: BP-001 in BACKPRESSURE_LEDGER.md gained a 2026-06-09 DATA RESULT (bounces
+ARE written into outreach_unsubscribes on ACC/LAW/INV; protective for deliverability
+but conflates suppression metrics; my prior re-spec corrected).
