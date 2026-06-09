@@ -308,3 +308,55 @@ null-key rows. All read-only; no changes; surface, don't repair.
 Related: BP-001 in BACKPRESSURE_LEDGER.md gained a 2026-06-09 DATA RESULT (bounces
 ARE written into outreach_unsubscribes on ACC/LAW/INV; protective for deliverability
 but conflates suppression metrics; my prior re-spec corrected).
+
+---
+
+## 2026-06-09 - KNOWN ISSUE: canadaaccountants.app profile pages soft-404 / not-indexed
+
+SEVERITY: growth issue (pages not indexed), NOT data-loss. Lower priority than the
+pending fleet backup. Read-only diagnostic; no code/sitemap/DB change, no deploy.
+
+SYMPTOM (Google Search Console): 387 soft-404 (sample), 2,301 crawled-not-indexed,
+4,689 discovered-not-indexed on /profile?id=N pages.
+
+ROOT CAUSE (two compounding, structural; NOT a data-quality problem):
+1. Stale served sitemap. The served sitemap-profiles-1/2.xml is a raw id-range dump
+   (id 14671..27470, about 12,800 URLs) that was never regenerated from the current
+   generator. Of that served pool: 96% have no email, 95% no firm name, about 0.8%
+   (103) would qualify as indexable. The generator itself is fine
+   (/api/sitemap-profiles.xml filters to email present + status<>'invalid' -> 7,427
+   well-populated profiles, thin about 0%). So Google is being fed about 12,700
+   non-qualifying URLs from the stale static files, not from the live generator.
+2. Static-200 SPA. /profile?id=N is a Firebase-served static page that always
+   returns HTTP 200 and fetches the real record client-side. The API returns the
+   correct status (404 missing / 410 gated / 200 valid), but it never reaches Google
+   as an HTTP status, so missing and gated profiles render as soft-404s. Confirmed
+   live: /profile?id=28181 returns page 200 while /api/profiles/28181 returns 410.
+   The six sampled soft-404 ids were well-populated (firm/city/name/designation
+   present) but all had has_enrichment_collision=true -> API 410, page 200: gated,
+   not thin.
+
+PROPOSED FIX (NOT implemented; for a future reviewed change, deploy gated):
+A. Propagate real HTTP status via a Cloud Function / SSR in front of /profile: 404
+   if id absent, 410 if gated (is_misclassified OR has_enrichment_collision OR
+   is_generic_inbox), noindex-200 if below the content threshold, 200 if indexable.
+B. Content-threshold gate as specced: indexable = exists AND not gated AND has email
+   AND status<>'invalid' AND firm_name AND city present (plus bio or designation).
+   Do NOT require phone (100% null across the pool would noindex everything).
+C. Regenerate the served sitemap from the generator and add a regeneration step so
+   it cannot drift stale again; also tighten the generator filter to the content
+   threshold (currently email + status only, which lets about 1,117 gated records
+   through).
+D. Audit internal directory / find-cpa links to omit or nofollow below-threshold or
+   gated profiles. Google soft-404'd ids that are NOT in the sitemap (e.g. 28181,
+   37195), so it is discovering profile URLs via internal links; a sitemap-only fix
+   leaves that bleed.
+
+SEQUENCING: ship A+B+C together; C alone leaves the soft-404 bleed via internal
+links (D). The content threshold must be set carefully to avoid deindexing the
+7,427 already-good profiles.
+
+Measurements (CC-measured 2026-06-09, read-only): scraped_cpas total 100,060;
+generator-qualifying pool 7,427 (thin about 0%, 1,117 gated); served-sitemap id
+range 14671..27470 = 12,800 rows (no_email 12,281, no_firm 12,175, status invalid
+232, gated 214, would-qualify 103). All read-only; surface, don't repair.
