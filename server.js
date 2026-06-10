@@ -1894,11 +1894,17 @@ app.post('/api/match-cpas', async (req, res) => {
       console.error('[Match] Admin notification exception:', notifyErr.message, notifyErr.stack);
     }
 
-    // Notify matched CPAs about new client interest (only if there's contact info to share)
+    // Notify matched CPAs about new client interest (only if there's contact info to share).
+    // SENDING gated behind FRICTION_NOTIFY_ENABLED (default OFF) — this leg was previously live+un-gated.
+    const MC_NOTIFY_ENABLED = process.env.FRICTION_NOTIFY_ENABLED === 'true';
     if (scoredMatches.length > 0 && (email || name)) {
       for (const match of scoredMatches) {
         const cpaEmail = await pool.query('SELECT email FROM cpa_profiles WHERE id = $1', [match.id]);
         if (cpaEmail.rows[0]?.email) {
+          if (!MC_NOTIFY_ENABLED) {
+            console.log(`[Match-search][DRY-RUN] would notify CPA ${cpaEmail.rows[0].email} (FRICTION_NOTIFY_ENABLED off)`);
+            continue;
+          }
           sendEmail({
             to: cpaEmail.rows[0].email,
             subject: `New Client Match: ${searchCity || searchProvince || 'A client'} is looking for a ${searchSpec || 'CPA'}`,
