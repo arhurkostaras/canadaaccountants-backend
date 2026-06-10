@@ -7793,6 +7793,11 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════
 app.post('/api/admin/send-visitor-notifications', async (req, res) => {
   try {
+    // GATED behind FRICTION_NOTIFY_ENABLED (default OFF). Manual admin trigger that emails CPAs
+    // ("someone viewed your profile"); stays dark per the ACC professional-contact moratorium.
+    if (process.env.FRICTION_NOTIFY_ENABLED !== 'true') {
+      return res.json({ success: true, skipped: true, reason: 'FRICTION_NOTIFY_ENABLED off — professional notify suppressed (moratorium)', notified: 0 });
+    }
     const delay = ms => new Promise(r => setTimeout(r, ms));
 
     // Get un-notified visits grouped by profile
@@ -8153,6 +8158,14 @@ app.post('/api/admin/trigger-client-signal', async (req, res) => {
 
 // Background: process recent search events for client signals
 async function processClientSignal(event) {
+  // GATED behind FRICTION_NOTIFY_ENABLED (default OFF). This leg auto-runs every 15 min and
+  // emails claimed + unclaimed CPAs on search events; it sent David Mark 5+ "New Client Match"
+  // emails un-reviewed (the 2026-06-10 incident). Stays dark per the ACC professional-contact
+  // moratorium until Arthur lifts it. No professional email fires while the flag is off.
+  if (process.env.FRICTION_NOTIFY_ENABLED !== 'true') {
+    console.log(`[ClientSignal][DRY-RUN] search event ${event && event.id} (${event && (event.city || event.province)}) — professional notify suppressed (FRICTION_NOTIFY_ENABLED off)`);
+    return { triggered: 0, reason: 'FRICTION_NOTIFY_ENABLED off' };
+  }
   const city = event.city;
   const province = event.province;
   const specialty = event.specialty;
