@@ -1087,6 +1087,18 @@ const crmIntelligence = new CRMIntelligence({
         platform VARCHAR(20) DEFAULT 'accountants'
       )
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS organic_claim_attempts (
+        id SERIAL PRIMARY KEY,
+        cpa_id INTEGER NOT NULL,
+        email VARCHAR(255),
+        name VARCHAR(255),
+        visitor_ip VARCHAR(50),
+        user_agent TEXT,
+        source_page VARCHAR(120),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_ab_test_variant ON ab_test_results (variant, form_completed_at)`);
 
     // Founder outreach log: tracks personal founder emails sent by Arthur to warm candidates
@@ -3167,17 +3179,27 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
     // Honest demand/match counts (P1-A.3): exclude self-test/seed requests and matches linked to them.
     const REQ_REAL = `(contact_info->>'email' NOT ILIKE 'arthur@%' AND contact_info->>'email' NOT ILIKE 'arthur+%' AND contact_info->>'email' NOT ILIKE '%negotiateandwin%' AND contact_info->>'email' NOT ILIKE '%akrosfinancial%' AND contact_info->>'email' NOT ILIKE '%@test.%' AND contact_info->>'email' NOT ILIKE '%@testcpa%' AND contact_info->>'email' NOT ILIKE '%@example.%')`;
     const MATCH_REAL = `NOT EXISTS (SELECT 1 FROM sme_friction_requests r WHERE r.request_id = fm.request_id AND (r.contact_info->>'email' ILIKE 'arthur@%' OR r.contact_info->>'email' ILIKE 'arthur+%' OR r.contact_info->>'email' ILIKE '%negotiateandwin%' OR r.contact_info->>'email' ILIKE '%akrosfinancial%' OR r.contact_info->>'email' ILIKE '%@test.%' OR r.contact_info->>'email' ILIKE '%@testcpa%' OR r.contact_info->>'email' ILIKE '%@example.%'))`;
+    // Addition A: ACC demand lands in TWO pipelines — sme_friction_requests (friction forms) and
+    // client_search_requests (find-cpa.html / match-cpas). The scorecard UNIONs both. CSR stores the
+    // requester email in a plain text column, so the self-test predicate runs against `email` directly.
+    // Self-test exclusion is pattern-based (an invariant); low-quality "junk" rows (e.g. all-digit local
+    // parts, throwaway addresses) are NOT pattern-excludable and are curated manually in reporting, never
+    // welded into this SQL.
+    const CSR_REAL = `(email NOT ILIKE 'arthur@%' AND email NOT ILIKE 'arthur+%' AND email NOT ILIKE '%negotiateandwin%' AND email NOT ILIKE '%akrosfinancial%' AND email NOT ILIKE '%@test.%' AND email NOT ILIKE '%@testcpa%' AND email NOT ILIKE '%@example.%')`;
     const stats = await pool.query(`
       SELECT
         (SELECT COUNT(*) FROM users WHERE user_type = 'CPA' AND email NOT IN (${TEST_EMAILS})) AS total_cpas,
         (SELECT COUNT(*) FROM users WHERE user_type = 'SME' AND email NOT IN (${TEST_EMAILS})) AS total_smes,
         (SELECT COUNT(*) FROM sme_friction_requests WHERE ${REQ_REAL}) AS total_sme_requests,
+        (SELECT COUNT(*) FROM client_search_requests WHERE ${CSR_REAL}) AS total_client_search_requests,
+        ((SELECT COUNT(*) FROM sme_friction_requests WHERE ${REQ_REAL}) + (SELECT COUNT(*) FROM client_search_requests WHERE ${CSR_REAL})) AS total_demand_all,
         (SELECT COUNT(*) FROM friction_matches fm WHERE ${MATCH_REAL}) AS total_matches,
         (SELECT COUNT(*) FROM friction_matches fm WHERE partnership_formed = true AND ${MATCH_REAL}) AS total_partnerships,
         (SELECT COUNT(*) FROM cpa_friction_profiles) AS total_cpa_friction_profiles,
         (SELECT COUNT(*) FROM cpa_profiles WHERE verification_status = 'verified') AS verified_cpas,
         (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days' AND email NOT IN (${TEST_EMAILS})) AS new_users_7d,
-        (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days' AND ${REQ_REAL}) AS new_requests_7d
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days' AND ${REQ_REAL}) AS new_requests_7d,
+        (SELECT COUNT(*) FROM client_search_requests WHERE created_at >= NOW() - INTERVAL '7 days' AND ${CSR_REAL}) AS new_client_requests_7d
     `);
     res.json({ success: true, stats: stats.rows[0] });
   } catch (error) {
@@ -5133,9 +5155,9 @@ app.get('/api/outreach/health', async (req, res) => {
     const outreachConv = await pool.query(`SELECT COALESCE(SUM(total_converted), 0) AS conv FROM outreach_campaigns`).catch(() => ({ rows: [{ conv: 0 }] }));
     const paidSubs = await pool.query(`SELECT COUNT(*) FROM cpa_subscriptions WHERE status = 'active'`).catch(() => ({ rows: [{ count: 0 }] }));
     const revQuery = await pool.query(`SELECT COALESCE(SUM(CASE WHEN plan_type = 'enterprise' THEN 599 WHEN plan_type = 'professional' THEN 299 WHEN plan_type = 'associate' THEN 199 ELSE 0 END), 0) AS mrr FROM cpa_subscriptions WHERE status = 'active' AND plan_type != 'free'`).catch(() => ({ rows: [{ mrr: 0 }] }));
-    const demandClients = await pool.query(`SELECT COUNT(*) FROM client_profiles`).catch(() => ({ rows: [{ count: 0 }] }));
+    const demandClients = await pool.query(`SELECT COUNT(*) FROM client_profiles WHERE contact_email NOT ILIKE 'arthur@%' AND contact_email NOT ILIKE 'arthur+%' AND contact_email NOT ILIKE '%negotiateandwin%' AND contact_email NOT ILIKE '%akrosfinancial%' AND contact_email NOT ILIKE '%@test.%' AND contact_email NOT ILIKE '%@testcpa%' AND contact_email NOT ILIKE '%@example.%'`).catch(() => ({ rows: [{ count: 0 }] }));
     const demandContact = await pool.query(`SELECT COUNT(*) FROM contact_submissions`).catch(() => ({ rows: [{ count: 0 }] }));
-    const matchedLeads = await pool.query(`SELECT COUNT(*) FROM friction_matches`).catch(() => ({ rows: [{ count: 0 }] }));
+    const matchedLeads = await pool.query(`SELECT COUNT(*) FROM friction_matches fm WHERE NOT EXISTS (SELECT 1 FROM sme_friction_requests r WHERE r.request_id = fm.request_id AND (r.contact_info->>'email' ILIKE 'arthur@%' OR r.contact_info->>'email' ILIKE 'arthur+%' OR r.contact_info->>'email' ILIKE '%negotiateandwin%' OR r.contact_info->>'email' ILIKE '%akrosfinancial%' OR r.contact_info->>'email' ILIKE '%@test.%' OR r.contact_info->>'email' ILIKE '%@testcpa%' OR r.contact_info->>'email' ILIKE '%@example.%'))`).catch(() => ({ rows: [{ count: 0 }] }));
     const contacts7d = await pool.query(`SELECT COUNT(*) FROM contact_submissions WHERE created_at > NOW() - INTERVAL '7 days'`).catch(() => ({ rows: [{ count: 0 }] }));
     res.json({
       sent_today: parseInt(today.rows[0].count),
@@ -5375,6 +5397,53 @@ pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS is_bot_click BO
 pool.query(`ALTER TABLE outreach_emails ADD COLUMN IF NOT EXISTS real_visit_at TIMESTAMPTZ`).catch(() => {}); // non-critical, fire-and-forget
 
 // POST /api/claim/real-visit — called by claim page JS to record a real human visit
+// Organic claim-capture: a visitor on a public profile page clicks "Is this you? Claim your profile".
+// Records the intent (plus any optional contact) and alerts admin. The only email here goes to
+// ADMIN_EMAIL (not a professional/requester), so it is allowed under the ACC moratorium.
+app.post('/api/claim/attempt', async (req, res) => {
+  try {
+    const { pid, email, name, source_page } = req.body || {};
+    const cpaId = parseInt(pid, 10);
+    if (!Number.isInteger(cpaId)) return res.status(400).json({ error: 'valid pid required' });
+
+    const cpa = await pool.query(
+      'SELECT id, first_name, last_name, email AS profile_email, city, province FROM cpa_profiles WHERE id = $1',
+      [cpaId]
+    );
+    if (cpa.rows.length === 0) return res.status(404).json({ error: 'profile not found' });
+    const p = cpa.rows[0];
+
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
+    await pool.query(
+      `INSERT INTO organic_claim_attempts (cpa_id, email, name, visitor_ip, user_agent, source_page)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [cpaId, (email || '').trim() || null, (name || '').trim() || null, ip, req.headers['user-agent'] || null, source_page || 'profile']
+    );
+
+    try {
+      await sendEmail({
+        to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+        subject: `Organic claim attempt: ${p.first_name || ''} ${p.last_name || ''} (cpa ${cpaId})`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+          <h2 style="font-size:18px;color:#1a1a1a;">Organic claim attempt</h2>
+          <p><strong>Profile:</strong> ${p.first_name || ''} ${p.last_name || ''} (id ${cpaId}, ${p.city || ''} ${p.province || ''})</p>
+          <p><strong>Profile email on file:</strong> ${p.profile_email || 'none'}</p>
+          <p><strong>Submitted contact:</strong> ${name || 'none'} / ${email || 'none'}</p>
+          <p><strong>Source:</strong> ${source_page || 'profile'} &middot; IP ${ip || 'n/a'}</p>
+          <p style="color:#888;font-size:12px;">${new Date().toISOString()}</p>
+        </div>`,
+      });
+    } catch (alertErr) {
+      console.error('[ClaimAttempt] admin alert failed:', alertErr.message);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[ClaimAttempt] error:', err.message);
+    res.status(500).json({ error: 'failed to record claim attempt' });
+  }
+});
+
 app.post('/api/claim/real-visit', async (req, res) => {
   try {
     const { ref } = req.body;
@@ -8619,7 +8688,8 @@ app.get('/api/admin/leads/funnel', async (req, res) => {
         lead_status,
         COUNT(*) AS count,
         COUNT(*) FILTER (WHERE status_updated_at >= NOW() - INTERVAL '7 days') AS this_week
-      FROM friction_matches
+      FROM friction_matches fm
+      WHERE NOT EXISTS (SELECT 1 FROM sme_friction_requests r WHERE r.request_id = fm.request_id AND (r.contact_info->>'email' ILIKE 'arthur@%' OR r.contact_info->>'email' ILIKE 'arthur+%' OR r.contact_info->>'email' ILIKE '%negotiateandwin%' OR r.contact_info->>'email' ILIKE '%akrosfinancial%' OR r.contact_info->>'email' ILIKE '%@test.%' OR r.contact_info->>'email' ILIKE '%@testcpa%' OR r.contact_info->>'email' ILIKE '%@example.%'))
       GROUP BY lead_status
       ORDER BY ARRAY_POSITION(
         ARRAY['new_lead','advisor_notified','advisor_accepted','client_contacted','won','lost'],
