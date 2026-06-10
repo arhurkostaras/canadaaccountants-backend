@@ -2002,7 +2002,11 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
       sendFrictionMatchNotification(requestId, frictionRequest, cpaMatches);
     }, 1000);
 
-    // Notify matched CPAs about the client inquiry
+    // Notify matched CPAs about the client inquiry.
+    // SENDING gated behind FRICTION_NOTIFY_ENABLED (default OFF). The lookup below is currently
+    // id-broken (scraped_cpas.id vs cpa_id) and never resolves; the gate lands FIRST (this commit),
+    // the id fix is a separate commit, so fixing the lookup can never silently start live sends.
+    const NOTIFY_ENABLED = process.env.FRICTION_NOTIFY_ENABLED === 'true';
     for (const match of cpaMatches) {
       try {
         const cpaRow = await pool.query(
@@ -2012,6 +2016,10 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
         const cpaEmail = cpaRow.rows[0]?.email;
         if (cpaEmail) {
           const ci = frictionRequest.contactInfo || {};
+          if (!NOTIFY_ENABLED) {
+            console.log(`[Match][DRY-RUN] would notify CPA ${cpaEmail} re request ${requestId} (FRICTION_NOTIFY_ENABLED off)`);
+            continue;
+          }
           try {
             await sendEmail({
               to: cpaEmail,
@@ -2442,7 +2450,7 @@ async function generateFrictionBasedMatches(request, frictionScore) {
       `SELECT * FROM cpa_profiles WHERE is_active = true
          AND COALESCE(fallback_priority, false) = false
          AND email NOT ILIKE '%@testcpa.com'
-         AND email NOT ILIKE '%arthur%' AND email NOT ILIKE '%negotiateandwin%'
+         AND email NOT ILIKE 'arthur@%' AND email NOT ILIKE 'arthur+%' AND email NOT ILIKE '%negotiateandwin%'
          AND email NOT ILIKE '%akrosfinancial%'
          AND email NOT ILIKE '%@test.%' AND email NOT ILIKE '%@example.%'`
     );
@@ -2769,8 +2777,9 @@ app.get('/api/cpa/my-stats', authenticateToken, requireCPA, async (req, res) => 
         COUNT(CASE WHEN status = 'contacted' THEN 1 END) AS contacted,
         COUNT(CASE WHEN status = 'meeting_scheduled' THEN 1 END) AS meetings,
         COUNT(CASE WHEN partnership_formed = true THEN 1 END) AS partnerships
-      FROM friction_matches
-      WHERE cpa_id = $1
+      FROM friction_matches fm
+      WHERE fm.cpa_id = $1
+        AND NOT EXISTS (SELECT 1 FROM sme_friction_requests r WHERE r.request_id = fm.request_id AND (r.contact_info->>'email' ILIKE 'arthur@%' OR r.contact_info->>'email' ILIKE 'arthur+%' OR r.contact_info->>'email' ILIKE '%negotiateandwin%' OR r.contact_info->>'email' ILIKE '%akrosfinancial%' OR r.contact_info->>'email' ILIKE '%@test.%' OR r.contact_info->>'email' ILIKE '%@testcpa%' OR r.contact_info->>'email' ILIKE '%@example.%'))
     `, [cpaId]);
 
     const s = statsResult.rows[0];
@@ -3151,17 +3160,20 @@ app.get('/api/admin/dashboard-stats', async (req, res) => {
     // Exclude known test emails from counts. These 5 records were identified
     // on 2026-04-16 as polluting ACC dashboard metrics with non-real data.
     const TEST_EMAILS = `'test@cpa.com','arthur@negotiateandwin.com','arthur+cpa-app-test@negotiateandwin.com','akrosfinancial@gmail.com','sarah.johnson@testcpa.com','sarah.williams@testcpa.com'`;
+    // Honest demand/match counts (P1-A.3): exclude self-test/seed requests and matches linked to them.
+    const REQ_REAL = `(contact_info->>'email' NOT ILIKE 'arthur@%' AND contact_info->>'email' NOT ILIKE 'arthur+%' AND contact_info->>'email' NOT ILIKE '%negotiateandwin%' AND contact_info->>'email' NOT ILIKE '%akrosfinancial%' AND contact_info->>'email' NOT ILIKE '%@test.%' AND contact_info->>'email' NOT ILIKE '%@testcpa%' AND contact_info->>'email' NOT ILIKE '%@example.%')`;
+    const MATCH_REAL = `NOT EXISTS (SELECT 1 FROM sme_friction_requests r WHERE r.request_id = fm.request_id AND (r.contact_info->>'email' ILIKE 'arthur@%' OR r.contact_info->>'email' ILIKE 'arthur+%' OR r.contact_info->>'email' ILIKE '%negotiateandwin%' OR r.contact_info->>'email' ILIKE '%akrosfinancial%' OR r.contact_info->>'email' ILIKE '%@test.%' OR r.contact_info->>'email' ILIKE '%@testcpa%' OR r.contact_info->>'email' ILIKE '%@example.%'))`;
     const stats = await pool.query(`
       SELECT
         (SELECT COUNT(*) FROM users WHERE user_type = 'CPA' AND email NOT IN (${TEST_EMAILS})) AS total_cpas,
         (SELECT COUNT(*) FROM users WHERE user_type = 'SME' AND email NOT IN (${TEST_EMAILS})) AS total_smes,
-        (SELECT COUNT(*) FROM sme_friction_requests) AS total_sme_requests,
-        (SELECT COUNT(*) FROM friction_matches) AS total_matches,
-        (SELECT COUNT(*) FROM friction_matches WHERE partnership_formed = true) AS total_partnerships,
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE ${REQ_REAL}) AS total_sme_requests,
+        (SELECT COUNT(*) FROM friction_matches fm WHERE ${MATCH_REAL}) AS total_matches,
+        (SELECT COUNT(*) FROM friction_matches fm WHERE partnership_formed = true AND ${MATCH_REAL}) AS total_partnerships,
         (SELECT COUNT(*) FROM cpa_friction_profiles) AS total_cpa_friction_profiles,
         (SELECT COUNT(*) FROM cpa_profiles WHERE verification_status = 'verified') AS verified_cpas,
         (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days' AND email NOT IN (${TEST_EMAILS})) AS new_users_7d,
-        (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days') AS new_requests_7d
+        (SELECT COUNT(*) FROM sme_friction_requests WHERE created_at >= NOW() - INTERVAL '7 days' AND ${REQ_REAL}) AS new_requests_7d
     `);
     res.json({ success: true, stats: stats.rows[0] });
   } catch (error) {
