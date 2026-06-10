@@ -2436,9 +2436,15 @@ function calculateCPAFrictionScore(request) {
 
 async function generateFrictionBasedMatches(request, frictionScore) {
   try {
-    // Query real CPAs from the database
+    // Query real CPAs. Exclude Arthur-linked, @testcpa seed, and the fallback profile
+    // from the SCORED pool entirely; the house fallback enters only via the <3 append below.
     const result = await pool.query(
-      'SELECT * FROM cpa_profiles WHERE is_active = true'
+      `SELECT * FROM cpa_profiles WHERE is_active = true
+         AND COALESCE(fallback_priority, false) = false
+         AND email NOT ILIKE '%@testcpa.com'
+         AND email NOT ILIKE '%arthur%' AND email NOT ILIKE '%negotiateandwin%'
+         AND email NOT ILIKE '%akrosfinancial%'
+         AND email NOT ILIKE '%@test.%' AND email NOT ILIKE '%@example.%'`
     );
 
     if (result.rows.length === 0) {
@@ -2455,8 +2461,8 @@ async function generateFrictionBasedMatches(request, frictionScore) {
 
     const relevantSpecs = painPointSpecializations[request.painPoint] || null;
 
-    // Score each CPA
-    const scoredCPAs = result.rows.map(cpa => {
+    // Score each CPA (reusable so the house fallback is scored identically).
+    const scoreCPA = (cpa) => {
       let score = 0;
 
       // Specialization match (0-40 pts)
@@ -2527,12 +2533,21 @@ async function generateFrictionBasedMatches(request, frictionScore) {
         availability: 'within_24h',
         matchScore: matchScore
       };
-    });
+    };
+    const scoredCPAs = result.rows.map(scoreCPA);
 
-    // Sort by score descending, return top 3
-    return scoredCPAs
-      .sort((a, b) => b.matchScore - a.matchScore)
-      .slice(0, 3);
+    // Sort by score descending, take top 3 real third-party matches.
+    const topMatches = scoredCPAs.sort((a, b) => b.matchScore - a.matchScore).slice(0, 3);
+    // House fallback: append the canonical Arthur CPA ONLY when third-party matches < 3.
+    // Appended after ranking, so it never competes for a ranked slot.
+    if (topMatches.length < 3) {
+      const fb = await pool.query("SELECT * FROM cpa_profiles WHERE COALESCE(fallback_priority, false) = true AND is_active = true LIMIT 1");
+      if (fb.rows.length) {
+        topMatches.push(scoreCPA(fb.rows[0]));
+        console.log(`[FrictionMatch] house fallback appended (third-party matches=${topMatches.length - 1})`);
+      }
+    }
+    return topMatches;
   } catch (error) {
     console.error('Error generating friction-based matches:', error);
     return [];

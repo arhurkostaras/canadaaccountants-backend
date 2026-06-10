@@ -133,8 +133,12 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
     `),
   });
 
-  // Confirmation to SME (if we have their email)
-  if (contactInfo.email) {
+  // Confirmation to SME (if we have their email) — skip self-test/seed addresses to
+  // protect sender reputation (synthetic addresses hard-bounce). Loud log on skip.
+  const __isSelfTest = e => /arthur|negotiateandwin|akrosfinancial|@test\.|@testcpa|@example\./i.test(e || '');
+  if (contactInfo.email && __isSelfTest(contactInfo.email)) {
+    console.warn(`[FrictionAck] SKIPPED requester ack to self-test/seed address ${contactInfo.email} (request ${requestId})`);
+  } else if (contactInfo.email) {
     await sendEmail({
       to: contactInfo.email,
       subject: 'Your CPA Matches Are Ready — CanadaAccountants',
