@@ -141,14 +141,13 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
   } else if (contactInfo.email) {
     await sendEmail({
       to: contactInfo.email,
-      subject: 'Your CPA Matches Are Ready — CanadaAccountants',
+      replyTo: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+      subject: `We've got your request — a CPA match in ${contactInfo.city || contactInfo.location || 'your area'}`,
       html: wrapInBrandTemplate(`
-        <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">Great news, ${contactInfo.name || 'there'}!</h2>
-        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Our AI has finished analyzing your needs and found <strong>${matches.length} CPA matches</strong> for you.</p>
-        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">You can view your matches anytime at:<br>
-        <a href="https://canadaaccountants.app/cpa-matches?request=${requestId}" style="color:#2563eb;text-decoration:none;">View My CPA Matches</a></p>
-        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">A member of our team will also follow up within 24 hours.</p>
-        <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Best regards,<br>Arthur Kostaras, CPA, CF<br>CanadaAccountants</p>
+        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${contactInfo.name || 'there'},</p>
+        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Thanks for reaching out${request.painPoint ? ' about ' + request.painPoint : ''}. Here's exactly what happens next: I'll match you with a CPA who fits &mdash; you'll have an introduction in your inbox within 24 hours. I personally review every request at this stage, so a real person (me) is reading yours. If you want to add anything, just reply to this email; it comes straight to me.</p>
+        <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
+        <p style="margin:18px 0 0;color:#888888;font-size:12px;line-height:1.6;">You're receiving this because you submitted a match request at canadaaccountants.app. We use your details only to match you with a CPA and follow up. <a href="https://canadaaccountants.app/privacy-policy" style="color:#2563eb;">Privacy policy</a> &middot; reply "unsubscribe" to opt out.</p>
       `),
     });
   }
