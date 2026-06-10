@@ -2010,9 +2010,7 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
     for (const match of cpaMatches) {
       try {
         const cpaRow = await pool.query(
-          `SELECT COALESCE(cp.email, sc.enriched_email, sc.email) AS email, COALESCE(cp.first_name, sc.first_name) AS first_name
-           FROM scraped_cpas sc LEFT JOIN cpa_profiles cp ON cp.user_id = sc.claimed_by
-           WHERE sc.id = $1 OR CAST(sc.id AS TEXT) = $1`, [match.id]);
+          `SELECT email, first_name, id AS profile_id FROM cpa_profiles WHERE id::text = $1`, [String(match.id)]);
         const cpaEmail = cpaRow.rows[0]?.email;
         if (cpaEmail) {
           const ci = frictionRequest.contactInfo || {};
@@ -2529,7 +2527,7 @@ async function generateFrictionBasedMatches(request, frictionScore) {
         : (typeof cpa.specializations === 'string' ? JSON.parse(cpa.specializations || '[]') : []);
 
       return {
-        id: cpa.cpa_id || String(cpa.id),
+        id: String(cpa.id), // cpa_profiles.id — registry the matcher queries; notify resolves from cpa_profiles, not scraped_cpas
         name: `${cpa.first_name || ''} ${cpa.last_name || ''}`.trim() || cpa.firm_name || 'CPA',
         specializations: cpaSpecs,
         experience: cpa.years_experience || 0,
