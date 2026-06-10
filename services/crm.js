@@ -739,6 +739,14 @@ class SequenceEngine {
   // ── Sequence Scheduler (runs every 15 min via cron) ───────────────────
 
   async processScheduledSends() {
+    // KILL-SWITCH: SEQUENCES_ENABLED (default OFF). This engine auto-emails claimed/engaged
+    // professionals (Post-Claim Welcome, Engaged No-Claim, etc.) on a timer. Under the ACC
+    // professional-contact moratorium (2026-06-10) every leg that can email a claimed professional
+    // gets an explicit switch; this one stays off until Arthur sets SEQUENCES_ENABLED=true.
+    if (process.env.SEQUENCES_ENABLED !== 'true') {
+      console.log(`[Sequences:${this.platform}] SUPPRESSED — SEQUENCES_ENABLED off (moratorium kill-switch)`);
+      return;
+    }
     if (this.processing) {
       console.log(`[Sequences:${this.platform}] Already processing, skipping`);
       return;
