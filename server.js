@@ -5287,7 +5287,7 @@ app.get('/api/checkout/:tier', async (req, res) => {
       mode: 'subscription',
       payment_method_types: ['card'],
       line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${FRONTEND_URL}/welcome?upgraded=true&tier=${tier}`,
+      success_url: `${FRONTEND_URL}/checkout-success?upgraded=true&tier=${tier}`,
       cancel_url: `${FRONTEND_URL}/pricing`,
       customer_email: email,
       metadata: {
