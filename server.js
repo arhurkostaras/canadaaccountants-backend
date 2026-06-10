@@ -6478,6 +6478,47 @@ app.get('/api/founding-members', async (req, res) => {
 });
 
 // ==================== PUBLIC PROFILE PAGE (SEO) ====================
+// Profile data normalization (bio-quality gate, 2026-06-10). Applied in /api/profiles/:id so EVERY
+// surface (SPA H1/title/meta, the static pre-gen capture, and the JSON-LD this endpoint builds) gets
+// clean data from one place.
+function dedupeName(name) {
+  // Suppress a preferred-name parenthetical when its content already appears in the rest of the name
+  // ("Ann Marie (Ann Marie) Aase" -> "Ann Marie Aase"); keep genuine alternates ("Bob (Robert) Smith").
+  if (!name) return name;
+  return name.replace(/\s*\(([^)]+)\)/g, (m, inner) => {
+    const rest = name.replace(m, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+    const innerL = inner.trim().toLowerCase();
+    return innerL && rest.includes(innerL) ? '' : m;
+  }).replace(/\s+/g, ' ').trim();
+}
+function cleanBio(bio) {
+  if (!bio) return bio;
+  let b = bio;
+  // Correct wrong designation expansions (CGA/CMA are CERTIFIED, not Chartered; CPA/CA stay Chartered).
+  b = b.replace(/Chartered General Accountant/gi, 'Certified General Accountant')
+       .replace(/Chartered Management Accountant/gi, 'Certified Management Accountant');
+  // Strip markdown so the '#'/'*' syntax never leaks into rendered body / meta / JSON-LD.
+  b = b.replace(/^#{1,6}\s+/gm, '').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/\*([^*]+)\*/g, '$1')
+       .replace(/^[-*]\s+/gm, '').replace(/`([^`]+)`/g, '$1').replace(/#/g, '');
+  return b.replace(/\n{3,}/g, '\n\n').trim();
+}
+const PROFILE_CITY_PROV = { calgary:'AB', edmonton:'AB', 'red deer':'AB', lethbridge:'AB', 'fort mcmurray':'AB',
+  toronto:'ON', ottawa:'ON', mississauga:'ON', hamilton:'ON', london:'ON', 'thunder bay':'ON', brampton:'ON', markham:'ON', kitchener:'ON', windsor:'ON',
+  vancouver:'BC', victoria:'BC', surrey:'BC', burnaby:'BC', kelowna:'BC', richmond:'BC',
+  winnipeg:'MB', brandon:'MB', halifax:'NS', moncton:'NB', fredericton:'NB', "saint john":'NB',
+  saskatoon:'SK', regina:'SK', montreal:'QC', montréal:'QC', laval:'QC', gatineau:'QC', "st. john's":'NL', "st johns":'NL', charlottetown:'PE' };
+function resolveLocation(city, province) {
+  // Province is authoritative (it matches the registration source). If the city is a known major city
+  // whose province differs, the pair is geographically false ("Calgary, BC") -> drop the city, never
+  // render a false pair. The existing front-end falls back to province / firm-directory line.
+  let outCity = city || null;
+  if (outCity && province) {
+    const known = PROFILE_CITY_PROV[outCity.trim().toLowerCase()];
+    if (known && known !== province) outCity = null;
+  }
+  return { city: outCity, province: province || null };
+}
+
 app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
@@ -6518,7 +6559,7 @@ app.get('/api/profiles/:id', async (req, res) => {
       lastName = parts[0];
       firstName = parts[1] || '';
     }
-    const fullName = `${firstName} ${lastName}`.trim();
+    const fullName = dedupeName(`${firstName} ${lastName}`.trim());
 
     // Generate AI bio on-the-fly if missing
     let bio = p.generated_bio;
@@ -6532,6 +6573,7 @@ app.get('/api/profiles/:id', async (req, res) => {
         bio = null;
       }
     }
+    bio = cleanBio(bio);
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
@@ -6548,7 +6590,8 @@ app.get('/api/profiles/:id', async (req, res) => {
     });
 
     const jobTitle = p.designation ? `${p.designation} — Chartered Professional Accountant` : 'Chartered Professional Accountant';
-    const location = [p.city, p.province].filter(Boolean).join(', ');
+    const loc = resolveLocation(p.city, p.province);
+    const location = [loc.city, loc.province].filter(Boolean).join(', ');
 
     const jsonLd = {
       '@context': 'https://schema.org',
@@ -6556,7 +6599,7 @@ app.get('/api/profiles/:id', async (req, res) => {
       name: fullName,
       jobTitle,
       ...(p.firm_name && { worksFor: { '@type': 'Organization', name: p.firm_name } }),
-      ...(location && { address: { '@type': 'PostalAddress', addressLocality: p.city || '', addressRegion: p.province || '', addressCountry: 'CA' } }),
+      ...(location && { address: { '@type': 'PostalAddress', addressLocality: loc.city || '', addressRegion: loc.province || '', addressCountry: 'CA' } }),
       ...(bio && { description: bio }),
       url: `https://canadaaccountants.app/profile?id=${p.id}`
     };
@@ -6590,8 +6633,8 @@ app.get('/api/profiles/:id', async (req, res) => {
         first_name: firstName,
         last_name: lastName,
         firm_name: p.firm_name,
-        city: p.city,
-        province: p.province,
+        city: loc.city,
+        province: loc.province,
         designation: p.designation,
         bio: bio,
         claim_status: p.claim_status || 'unclaimed',
