@@ -2576,16 +2576,18 @@ async function generateCPAClientMatches(request, frictionScore) {
 }
 
 async function storeFrictionMatches(requestId, matches) {
-  try {
-    for (const match of matches) {
+  for (const match of matches) {
+    try {
+      // Column was `designation` (does not exist) -> retargeted to the real
+      // `specializations`(jsonb) column; the value already IS the specializations JSON.
       const insertQuery = `
         INSERT INTO friction_matches (
-          request_id, cpa_id, cpa_name, designation, match_score,
+          request_id, cpa_id, cpa_name, specializations, match_score,
           friction_expertise, success_rate, avg_time_savings, avg_cost_savings,
-          location, availability, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW());
+          location, availability, status, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', NOW());
       `;
-      
+
       await pool.query(insertQuery, [
         requestId,
         match.id,
@@ -2599,9 +2601,11 @@ async function storeFrictionMatches(requestId, matches) {
         match.location,
         match.availability
       ]);
+      console.log(`[FrictionMatch] stored: request=${requestId} cpa=${match.id} (${match.name}) score=${match.matchScore}`);
+    } catch (error) {
+      // Per-match isolation + loud failure (was a loop-level swallow that aborted all matches).
+      console.error(`[FrictionMatch] INSERT FAILED request=${requestId} cpa=${match.id}:`, error.message, error.detail || '');
     }
-  } catch (error) {
-    console.error('Error storing friction matches:', error);
   }
 }
 
