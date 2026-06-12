@@ -1706,10 +1706,12 @@ async function runCPAMatchingAlgorithm(clientProfile) {
       `SELECT cp.* FROM cpa_profiles cp
        WHERE cp.is_active = true AND cp.profile_status = 'active'
          AND cp.subscription_status = 'active'
+         AND COALESCE(cp.fallback_priority, false) = false
        ORDER BY CASE cp.subscription_tier WHEN 'enterprise' THEN 1 WHEN 'professional' THEN 2 ELSE 3 END`
     );
 
-    const scored = cpas.rows.map(cpa => {
+    // Scorer extracted to a named function so the house fallback is scored identically (mirrors friction).
+    function scoreCpaRow(cpa) {
       // Factor 1: Specialization Match (25%)
       let specScore = 50;
       const specs = typeof cpa.specializations === 'string' ? JSON.parse(cpa.specializations) : (cpa.specializations || []);
@@ -1774,10 +1776,22 @@ async function runCPAMatchingAlgorithm(clientProfile) {
         fee_score: feeScore, regulatory_score: regScore,
         geographic_score: geoScore, availability_score: availScore
       };
-    });
+    }
+    const scored = cpas.rows.map(scoreCpaRow);
 
     scored.sort((a, b) => b.overall_score - a.overall_score);
     const topMatches = scored.slice(0, 5);
+
+    // SEV3-B: house fallback — append the canonical Arthur CPA ONLY when real matches < 3 (mirrors
+    // the friction pipeline at server.js ~2565). Appended after ranking + before the store loop so it
+    // persists to `matches`, and scored identically via scoreCpaRow so it never competes for a slot.
+    if (topMatches.length < 3) {
+      const fb = await pool.query("SELECT * FROM cpa_profiles WHERE COALESCE(fallback_priority, false) = true AND is_active = true LIMIT 1");
+      if (fb.rows.length) {
+        topMatches.push(scoreCpaRow(fb.rows[0]));
+        console.log(`[CPAMatch] house fallback appended (real matches=${topMatches.length - 1})`);
+      }
+    }
 
     // Store matches in DB
     for (const match of topMatches) {
