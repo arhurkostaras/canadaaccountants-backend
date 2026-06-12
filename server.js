@@ -6516,19 +6516,20 @@ function cleanBio(bio) {
        .replace(/^[-*]\s+/gm, '').replace(/`([^`]+)`/g, '$1').replace(/#/g, '');
   return b.replace(/\n{3,}/g, '\n\n').trim();
 }
-const PROFILE_CITY_PROV = { calgary:'AB', edmonton:'AB', 'red deer':'AB', lethbridge:'AB', 'fort mcmurray':'AB',
-  toronto:'ON', ottawa:'ON', mississauga:'ON', hamilton:'ON', london:'ON', 'thunder bay':'ON', brampton:'ON', markham:'ON', kitchener:'ON', windsor:'ON',
-  vancouver:'BC', victoria:'BC', surrey:'BC', burnaby:'BC', kelowna:'BC', richmond:'BC',
-  winnipeg:'MB', brandon:'MB', halifax:'NS', moncton:'NB', fredericton:'NB', "saint john":'NB',
-  saskatoon:'SK', regina:'SK', montreal:'QC', montréal:'QC', laval:'QC', gatineau:'QC', "st. john's":'NL', "st johns":'NL', charlottetown:'PE' };
+// GeoNames allowlist (21,672 Canadian municipalities by province) — replaces the old 35-city denylist,
+// which only caught known major cities in the wrong province and missed foreign / other-province cities.
+const CA_CITIES = require('./ca-cities.json');
+const CA_CITY_SET = {};
+for (const _p in CA_CITIES) CA_CITY_SET[_p] = new Set(CA_CITIES[_p]);
 function resolveLocation(city, province) {
-  // Province is authoritative (it matches the registration source). If the city is a known major city
-  // whose province differs, the pair is geographically false ("Calgary, BC") -> drop the city, never
-  // render a false pair. The existing front-end falls back to province / firm-directory line.
+  // Province is authoritative (it matches the registration source). Keep the city ONLY if it is a real
+  // municipality of that province; otherwise the pair is geographically false ("Chicago, ON", "Seoul, ON",
+  // "Calgary, ON" = an Ontario-registered CPA working elsewhere) -> drop the city, render province-only.
+  // Province not in the list -> keep the city (no validation possible). The front-end falls back to
+  // province / firm-directory line.
   let outCity = city || null;
-  if (outCity && province) {
-    const known = PROFILE_CITY_PROV[outCity.trim().toLowerCase()];
-    if (known && known !== province) outCity = null;
+  if (outCity && province && CA_CITY_SET[province]) {
+    if (!CA_CITY_SET[province].has(outCity.trim().toLowerCase())) outCity = null;
   }
   return { city: outCity, province: province || null };
 }

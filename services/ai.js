@@ -92,6 +92,13 @@ async function generateBio(profile, platform = 'investing') {
   };
   const p = professionMap[platform] || professionMap.investing;
 
+  // In-house softening: if the firm is not an accounting practice, this is an in-house accounting role,
+  // not a public practice. Frame accordingly so the bio does not oversell them as client-serving.
+  const _acctFirm = /CPA|chartered professional account|chartered account|accounting|accountant|bookkeep|\btax\b|MNP|BDO|KPMG|Deloitte|PwC|PricewaterhouseCoopers|Grant Thornton|Ernst|Baker Tilly|\bCrowe\b|\bRSM\b|advisory/i;
+  const _inHouse = profile.firm_name && !_acctFirm.test(profile.firm_name);
+  const _firmGuidance = _inHouse
+    ? `\n\nIMPORTANT: "${profile.firm_name}" is where this person works in an in-house accounting/finance role, NOT a public accounting practice. Do NOT imply they run a general or public practice, "serve clients," or take on client engagements. Describe their in-house accounting work and professional credentials.`
+    : '';
   const prompt = `Write a professional 2-paragraph bio for a Canadian ${p.title}. Use the following details. Do NOT fabricate information not provided. Write in third person. Keep it under 150 words. Professional but warm tone.
 
 Name: ${profile.first_name} ${profile.last_name}
@@ -100,7 +107,7 @@ City: ${profile.city || 'N/A'}
 Province: ${profile.province || 'N/A'}
 Designation: ${profile.designation || 'N/A'}
 Specializations: ${profile.specializations || 'General practice'}
-Years of Experience: ${profile.years_experience || 'N/A'}
+Years of Experience: ${profile.years_experience || 'N/A'}${_firmGuidance}
 
 Write the bio now:`;
 
