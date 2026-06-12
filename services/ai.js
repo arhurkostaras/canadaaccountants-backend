@@ -95,7 +95,15 @@ async function generateBio(profile, platform = 'investing') {
   // In-house softening: if the firm is not an accounting practice, this is an in-house accounting role,
   // not a public practice. Frame accordingly so the bio does not oversell them as client-serving.
   const _acctFirm = /CPA|chartered professional account|chartered account|accounting|accountant|bookkeep|\btax\b|MNP|BDO|KPMG|Deloitte|PwC|PricewaterhouseCoopers|Grant Thornton|Ernst|Baker Tilly|\bCrowe\b|\bRSM\b|advisory/i;
-  const _inHouse = profile.firm_name && !_acctFirm.test(profile.firm_name);
+  // Eponymous / own-practice carve-out: a "Professional Corporation" or a firm whose name contains the
+  // person's surname is their OWN public practice, not an in-house employer -> keep public-practice framing.
+  const _nameWords = `${profile.first_name || ''} ${profile.last_name || ''}`.trim().split(/\s+/).filter(Boolean);
+  const _surname = _nameWords.length ? _nameWords[_nameWords.length - 1] : '';
+  const _ownPractice = profile.firm_name && (
+    /professional corporation|\bP\.?C\.?\b|chartered professional/i.test(profile.firm_name) ||
+    (_surname.length >= 3 && profile.firm_name.toLowerCase().includes(_surname.toLowerCase()))
+  );
+  const _inHouse = profile.firm_name && !_acctFirm.test(profile.firm_name) && !_ownPractice;
   const _firmGuidance = _inHouse
     ? `\n\nIMPORTANT: "${profile.firm_name}" is where this person works in an in-house accounting/finance role, NOT a public accounting practice. Do NOT imply they run a general or public practice, "serve clients," or take on client engagements. Describe their in-house accounting work and professional credentials.`
     : '';
