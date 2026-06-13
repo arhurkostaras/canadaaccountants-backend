@@ -864,6 +864,9 @@ const crmIntelligence = new CRMIntelligence({
       await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS outcome_notes TEXT`);
       await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS professional_notified_at TIMESTAMPTZ`);
     } catch (e) { console.error('[Migration] Lead status columns:', e.message); }
+    try {
+      await pool.query(`ALTER TABLE client_profiles ADD COLUMN IF NOT EXISTS timeline VARCHAR(50)`);
+    } catch (e) { console.error('[Migration] client_profiles.timeline column:', e.message); }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_validations (
         id SERIAL PRIMARY KEY,
@@ -1813,7 +1816,7 @@ async function runCPAMatchingAlgorithm(clientProfile) {
 app.post('/api/match-cpas', async (req, res) => {
   try {
     const { province, city, specialization, email, name, phone, businessRequirements,
-            businessSize, budgetRange, feePreference, meetingPreference, serviceType } = req.body;
+            businessSize, budgetRange, feePreference, meetingPreference, serviceType, timeline } = req.body;
     const searchProvince = province || businessRequirements?.province || '';
     const searchCity = city || businessRequirements?.city || '';
     const searchSpec = specialization || serviceType || businessRequirements?.specialization || businessRequirements?.industry || '';
@@ -1821,12 +1824,13 @@ app.post('/api/match-cpas', async (req, res) => {
     const searchFeePreference = feePreference || businessRequirements?.feePreference || '';
     const searchMeetingPreference = meetingPreference || businessRequirements?.meetingPreference || '';
     const searchBudgetRange = budgetRange || businessRequirements?.budgetRange || '';
+    const searchTimeline = timeline || businessRequirements?.timeline || '';
 
     // Create client profile
     const clientResult = await pool.query(
-      `INSERT INTO client_profiles (service_type, business_size, budget_range, fee_preference, province, city, meeting_preference, contact_name, contact_email, contact_phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [searchSpec, searchBusinessSize, searchBudgetRange, searchFeePreference, searchProvince, searchCity, searchMeetingPreference, name || '', email || '', phone || '']
+      `INSERT INTO client_profiles (service_type, business_size, budget_range, fee_preference, province, city, meeting_preference, contact_name, contact_email, contact_phone, timeline)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [searchSpec, searchBusinessSize, searchBudgetRange, searchFeePreference, searchProvince, searchCity, searchMeetingPreference, name || '', email || '', phone || '', searchTimeline]
     );
 
     // Store in legacy table too (backwards compat)
@@ -1900,6 +1904,7 @@ app.post('/api/match-cpas', async (req, res) => {
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Phone</td><td style="padding:8px;border:1px solid #e2e8f0;">${phone || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Service Type</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchSpec || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Business Size</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchBusinessSize || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Timeline</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchTimeline || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchProvince || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Budget</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchBudgetRange || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Fee Preference</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchFeePreference || '—'}</td></tr>
