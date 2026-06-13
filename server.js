@@ -6521,6 +6521,16 @@ function cleanBio(bio) {
        .replace(/^[-*]\s+/gm, '').replace(/`([^`]+)`/g, '$1').replace(/#/g, '');
   return b.replace(/\n{3,}/g, '\n\n').trim();
 }
+
+// Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
+// '#'/'**' markdown and the Chartered->Certified wording fix never leak through bio_snippet
+// (the single point all directory consumers, incl. generate-directory-pages.js, read through).
+function withCleanSnippet(rows) {
+  return rows.map(({ generated_bio, ...rest }) => ({
+    ...rest,
+    bio_snippet: generated_bio ? cleanBio(generated_bio).slice(0, 160) : null,
+  }));
+}
 // GeoNames allowlist (21,672 Canadian municipalities by province) — replaces the old 35-city denylist,
 // which only caught known major cities in the wrong province and missed foreign / other-province cities.
 const CA_CITIES = require('./ca-cities.json');
@@ -6694,7 +6704,7 @@ app.get('/api/directory/city/:city', async (req, res) => {
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                LEFT(generated_bio, 160) AS bio_snippet, claim_status
+                generated_bio, claim_status
          FROM scraped_cpas
          WHERE city ILIKE $1
          ORDER BY claim_status DESC NULLS LAST, full_name ASC
@@ -6711,7 +6721,7 @@ app.get('/api/directory/city/:city', async (req, res) => {
     res.json({
       city,
       total: parseInt(countResult.rows[0].count),
-      professionals: professionalsResult.rows
+      professionals: withCleanSnippet(professionalsResult.rows)
     });
   } catch (err) {
     console.error('Directory city error:', err.message);
@@ -6732,7 +6742,7 @@ app.get('/api/directory/:province', async (req, res) => {
     const [professionalsResult, countResult, designationCounts] = await Promise.all([
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                LEFT(generated_bio, 160) AS bio_snippet
+                generated_bio
          FROM scraped_cpas WHERE UPPER(province) = $1
          ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
         [provinceCode, limit, offset]
@@ -6758,7 +6768,7 @@ app.get('/api/directory/:province', async (req, res) => {
       page,
       total_pages: Math.ceil(total / limit),
       designation_counts: designationCounts.rows,
-      professionals: professionalsResult.rows
+      professionals: withCleanSnippet(professionalsResult.rows)
     });
   } catch (err) {
     console.error('Directory province error:', err.message);
@@ -6780,7 +6790,7 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                LEFT(generated_bio, 160) AS bio_snippet
+                generated_bio
          FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
          ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
         [provinceCode, `%${designation.toUpperCase()}%`, limit, offset]
@@ -6800,7 +6810,7 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
       total,
       page,
       total_pages: Math.ceil(total / limit),
-      professionals: professionalsResult.rows
+      professionals: withCleanSnippet(professionalsResult.rows)
     });
   } catch (err) {
     console.error('Directory province/designation error:', err.message);
