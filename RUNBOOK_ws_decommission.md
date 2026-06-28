@@ -1,5 +1,19 @@
 # Runbook - Decommission the wonderful-surprise project
 
+> **BLOCKED: DO NOT EXECUTE STAGES 3/5/6/7 (added 2026-06-28).**
+> This runbook is stale relative to the 2026-06-09 OPERATIONS correction. Service
+> `a2164d8c` is `maglev` (the 2.4M-row scrape), NOT the `switchback` DB this runbook
+> pairs it with. Per OPERATIONS.md (2026-06-09), retiring maglev or the WS scraper is
+> CONTRAINDICATED (maglev holds about 7,077 keyed SMEs production lacks, about 907K
+> unkeyable rows, and fresher enrichment). Therefore Stage 6 (delete `a2164d8c`) and
+> Stage 7 (delete the project, which contains it) would destroy contraindicated data,
+> and the TARGET LOCK below will NOT stop it: the flaw is in scope, not targeting. Note
+> too that Stage 1's backup host note (`switchback:20584`) points at a different DB than
+> Stage 6 deletes. Only safe action: remove the WS ACC backend service `da3bd205`
+> (the service only, never the project). Unblock Stages 5-7 only after OPERATIONS records
+> a real maglev-to-production reconciliation: a stable shared key (`name_hash` does not
+> exist), plus a plan for the roughly 907K null-key rows.
+
 Status: PLAN ONLY. Not executed. Every destructive stage is always-ask and gated
 individually. The decommission OUTCOME is recorded in OPERATIONS.md when executed;
 this file is the procedure and stays as-is.
