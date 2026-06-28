@@ -379,3 +379,18 @@ safe action: remove the WS ACC backend service da3bd205 (service only, never the
 project). Banner committed d8c4ba8 (acc-directory-cleanbio-snippet), cherry-picked
 to main as 4d626ce via PR #1. No infra action taken; maglev, the scraper, and the
 project all remain.
+
+---
+
+## 2026-06-28 - maglev fresh validated backup
+
+2026-06-28 - Took a fresh validated backup of maglev (wonderful-surprise Postgres,
+system_identifier 7533302060726231076, host maglev.proxy.rlwy.net:38500). Identity
+guarded before and during the dump. railway db: railway.dump 218,071,470 bytes,
+sha256 2245236faeb713ccf50361217f7921a002f084cd71f748ae5942c37843d82891; postgres
+db trivial (1,092 bytes). Test-restored into a throwaway local cluster, pg_restore
+exit 0 with zero errors, row counts matched live (scraped_smes 2,415,586;
+scraped_cpas 96,335; 13 tables). Files in ~/cc-backups/2026-06-28/. Supersedes the
+2026-06-07 dump (208M) as the current recoverability point. Still single-local;
+an off-machine second copy is pending a chosen destination. Read-only operation;
+maglev, the WS scraper, and the project are untouched.
