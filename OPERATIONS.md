@@ -379,3 +379,9 @@ safe action: remove the WS ACC backend service da3bd205 (service only, never the
 project). Banner committed d8c4ba8 (acc-directory-cleanbio-snippet), cherry-picked
 to main as 4d626ce via PR #1. No infra action taken; maglev, the scraper, and the
 project all remain.
+
+---
+
+## 2026-06-28 - maglev fresh validated backup
+
+2026-06-28 - Took a fresh validated backup of maglev (wonderful-surprise Postgres, system_identifier 7533302060726231076, host maglev.proxy.rlwy.net:38500). Identity guarded before and during the dump. railway db: railway.dump 218,071,470 bytes, sha256 2245236faeb713ccf50361217f7921a002f084cd71f748ae5942c37843d82891; postgres db trivial (1,092 bytes). Test-restored into a throwaway local cluster: pg_restore exit 0, zero errors, row counts matched live (scraped_smes 2,415,586; scraped_cpas 96,335; 13 tables). Files in ~/cc-backups/2026-06-28/wonderful-surprise-maglev/. Supersedes the 2026-06-07 dump (208M, sha256 44e44a4e...) as the current recoverability point. Off-site second copy: client-side encrypted with age to railway.dump.age (218,124,884 bytes, sha256 05ce0dc735ce4edbfadaf344eaedaa6ef18f1021571f444000e8c13ce666174d), uploaded to the private Cloudflare R2 bucket personal-platforms-db-backups (account cda07df3acfc6a5d53c87c7b0771f52c, Public Access disabled). Passphrase held in the operator password manager, stored separately from the backup. Read-only operation; maglev, the WS scraper, and the project are untouched.
