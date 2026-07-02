@@ -174,7 +174,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 const passwordHash = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), 10);
                 const userResult = await pool.query(
                   `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA')
-                   ON CONFLICT (email) DO UPDATE SET updated_at = NOW() RETURNING id`,
+                   ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
                   [applicant.email, passwordHash]
                 );
 
@@ -4629,7 +4629,7 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
     const passwordHash = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), 10);
     const userResult = await pool.query(
       `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA')
-       ON CONFLICT (email) DO UPDATE SET updated_at = NOW() RETURNING id`,
+       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
       [a.email, passwordHash]
     );
 
