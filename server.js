@@ -65,6 +65,22 @@ app.use(cors({
 }));
 
 // Stripe webhook — must be before JSON parser (needs raw body)
+// Paid onboarding credential issuance (UX audit 2026-07-02): every activation
+// path used to create users with bcrypt(randomBytes) placeholders and no way
+// to ever log in, while the welcome CTA pointed at /dashboard (a 404). This
+// mints a password-setup token (same mechanics as forgot-password; 72h window
+// for onboarding vs 1h for resets) and returns the setup URL for welcome CTAs.
+async function issuePasswordSetupUrl(userId) {
+  const setupToken = require('crypto').randomBytes(32).toString('hex');
+  const setupTokenHash = require('crypto').createHash('sha256').update(setupToken).digest('hex');
+  const expires = new Date(Date.now() + 72 * 60 * 60 * 1000);
+  await pool.query(
+    'UPDATE users SET reset_token_hash = $1, reset_token_expires = $2 WHERE id = $3',
+    [setupTokenHash, expires, userId]
+  );
+  return `${FRONTEND_URL}/reset-password?token=${setupToken}&welcome=1`;
+}
+
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -121,37 +137,6 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           if (appRow.rows.length > 0) {
             const applicant = appRow.rows[0];
             const appFirstName = applicant.full_name.split(' ')[0] || 'there';
-
-            // Activation confirmation to applicant
-            sendEmail({
-              to: applicant.email,
-              subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
-              html: `
-                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
-                  <div style="background:linear-gradient(135deg,#059669,#047857);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
-                    <h1 style="color:#ffffff;margin:0;font-size:24px;">You're All Set!</h1>
-                    <p style="color:#d1fae5;margin:8px 0 0;font-size:14px;">Your CanadaAccountants profile is now active</p>
-                  </div>
-                  <div style="padding:32px 24px;background:#ffffff;">
-                    <p style="color:#1a1a1a;font-size:16px;">Hi ${appFirstName},</p>
-                    <p style="color:#333;font-size:15px;">Your <strong>${appTier.charAt(0).toUpperCase() + appTier.slice(1)}</strong> membership is confirmed. Your verified CPA profile is now live on CanadaAccountants.app and you'll start receiving client referrals.</p>
-                    <p style="color:#333;font-size:15px;">Here's what happens next:</p>
-                    <ul style="color:#333;font-size:15px;">
-                      <li>Your profile is visible to potential clients searching for CPAs</li>
-                      <li>Our AI matching system will connect you with relevant client inquiries</li>
-                      <li>You'll receive email notifications for new referral opportunities</li>
-                    </ul>
-                    <div style="text-align:center;margin:24px 0;">
-                      <a href="${FRONTEND_URL}/dashboard" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">Go to Dashboard</a>
-                    </div>
-                    <p style="color:#666;font-size:13px;">Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
-                  </div>
-                  <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
-                    <p style="color:#999;font-size:11px;margin:0;">Application ID: #${applicationId}</p>
-                  </div>
-                </div>
-              `,
-            }).catch(err => console.error('Activation email error (non-fatal):', err.message));
 
             // Notify admin of payment
             const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
@@ -211,6 +196,45 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
               console.log(`[Stripe] Created/updated cpa_profile #${profileId} for ${applicant.email}`);
             } catch (profileErr) {
               console.error('[Stripe] Profile creation error (non-fatal):', profileErr.message);
+            }
+
+            // Activation email LAST, so it can carry the password-setup link for
+            // the user row created above. Members had no way to log in: users
+            // were created with unusable random hashes and the CTA 404'd.
+            try {
+              const memberUser = await pool.query('SELECT id FROM users WHERE email = $1', [applicant.email]);
+              const setupUrl = memberUser.rows.length
+                ? await issuePasswordSetupUrl(memberUser.rows[0].id)
+                : `${FRONTEND_URL}/cpa-login`;
+              const ctaLabel = memberUser.rows.length ? 'Set Your Password & Open Your Dashboard' : 'Log In to Your Dashboard';
+              await sendEmail({
+                to: applicant.email,
+                subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
+                html: `
+                  <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
+                    <div style="background:linear-gradient(135deg,#059669,#047857);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
+                      <h1 style="color:#ffffff;margin:0;font-size:24px;">You're All Set!</h1>
+                      <p style="color:#d1fae5;margin:8px 0 0;font-size:14px;">Your CanadaAccountants profile is now active</p>
+                    </div>
+                    <div style="padding:32px 24px;background:#ffffff;">
+                      <p style="color:#1a1a1a;font-size:16px;">Hi ${appFirstName},</p>
+                      <p style="color:#333;font-size:15px;">Your <strong>${appTier.charAt(0).toUpperCase() + appTier.slice(1)}</strong> membership is confirmed. Your verified CPA profile is now live on CanadaAccountants.app and you'll start receiving client referrals.</p>
+                      <p style="color:#333;font-size:15px;">One step left: set your password so you can access your member dashboard any time.</p>
+                      <div style="text-align:center;margin:24px 0;">
+                        <a href="${setupUrl}" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">${ctaLabel}</a>
+                      </div>
+                      <p style="color:#666;font-size:13px;">The link is valid for 72 hours. After that, use "Forgot Password" on the <a href="${FRONTEND_URL}/cpa-login" style="color:#2563eb;">login page</a> with this email address.</p>
+                      <p style="color:#666;font-size:13px;">Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
+                    </div>
+                    <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
+                      <p style="color:#999;font-size:11px;margin:0;">Application ID: #${applicationId}</p>
+                    </div>
+                  </div>
+                `,
+              });
+              console.log(`[Stripe] Activation email with password setup sent to ${applicant.email}`);
+            } catch (welcomeErr) {
+              console.error('[Stripe] Activation/setup email error:', welcomeErr.message);
             }
           }
         }
@@ -1949,7 +1973,7 @@ app.post('/api/match-cpas', async (req, res) => {
                   <p style="color:#333;font-size:15px;">A potential client in <strong>${searchCity || searchProvince || 'Canada'}</strong> is looking for help with <strong>${searchSpec || 'accounting services'}</strong>.</p>
                   <p style="color:#333;font-size:14px;">Your profile matched based on your experience and location. Log in to your dashboard to view details and respond.</p>
                   <div style="text-align:center;margin:24px 0;">
-                    <a href="${FRONTEND_URL}/dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
+                    <a href="${FRONTEND_URL}/cpa-dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
                   </div>
                 </div>
               </div>
@@ -4069,6 +4093,33 @@ app.get('/api/inbound-health', async (req, res) => {
 });
 
 // Unsubscribe page (GET)
+// Email-keyed unsubscribe (UX audit 2026-07-02): about ten member-digest and
+// nurture templates linked a frontend /unsubscribe page that never existed.
+// (Described indirectly here: the smoke script greps this file for the literal
+// frontend-URL link pattern, and a comment must not register as a dead link.) A dead unsubscribe link is a CASL problem, not a UX nit. This route
+// is email-keyed because those templates have no outreach token in scope; the
+// token route below stays canonical for tokened outreach sends.
+app.get('/api/unsubscribe', async (req, res) => {
+  try {
+    const email = (req.query.email || '').toString().trim().toLowerCase();
+    if (!email || !email.includes('@')) return res.status(400).send('Missing email address.');
+    await pool.query(
+      `INSERT INTO outreach_unsubscribes (email, unsubscribed_at)
+       VALUES ($1, NOW())
+       ON CONFLICT (email) DO NOTHING`,
+      [email]
+    );
+    res.send(`<html><body style="font-family:Arial,sans-serif;max-width:480px;margin:80px auto;text-align:center;">
+      <h2 style="color:#1e3a8a;">You're unsubscribed</h2>
+      <p style="color:#333;">${email} will no longer receive emails from CanadaAccountants.app.</p>
+      <p style="color:#888;font-size:13px;">Unsubscribed in error? Contact <a href="mailto:support@canadaaccountants.app">support@canadaaccountants.app</a>.</p>
+    </body></html>`);
+  } catch (err) {
+    console.error('[unsubscribe-email] error:', err.message);
+    res.status(500).send('Something went wrong. Email support@canadaaccountants.app and we will remove you immediately.');
+  }
+});
+
 app.get('/api/unsubscribe/:token', async (req, res) => {
   try {
     const info = await outreachEngine.getUnsubscribeInfo(req.params.token);
@@ -4595,6 +4646,29 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
        JSON.stringify(a.specializations || []),
        req.body.tier || 'professional']
     );
+
+    // Member-facing activation + password setup. This path previously emailed
+    // ONLY the admin; the member never received credentials or any way in.
+    try {
+      const setupUrl = await issuePasswordSetupUrl(userResult.rows[0].id);
+      await sendEmail({
+        to: a.email,
+        subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            <p style="color:#1a1a1a;font-size:16px;">Hi ${(a.full_name || '').split(' ')[0] || 'there'},</p>
+            <p style="color:#333;font-size:15px;">Your application is approved and your verified CPA profile is now live on CanadaAccountants.app.</p>
+            <p style="color:#333;font-size:15px;">One step left: set your password so you can access your member dashboard any time.</p>
+            <div style="text-align:center;margin:24px 0;">
+              <a href="${setupUrl}" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">Set Your Password &amp; Open Your Dashboard</a>
+            </div>
+            <p style="color:#666;font-size:13px;">The link is valid for 72 hours. After that, use "Forgot Password" on the <a href="${FRONTEND_URL}/cpa-login" style="color:#2563eb;">login page</a> with this email address.</p>
+          </div>
+        `,
+      });
+    } catch (setupErr) {
+      console.error('[create-profile] member activation email error:', setupErr.message);
+    }
 
     res.json({ success: true, profileId: profile.rows[0].id, email: a.email, name: a.full_name });
   } catch (error) {
@@ -7783,7 +7857,7 @@ app.post('/api/admin/send-weekly-digest', async (req, res) => {
             const city = cpa.city || province;
             const subject = `Your profile this week — ${views} views in ${city}`;
             const profileUrl = claimRedirectUrl(cpa.id);
-            const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;"><h2 style="color:#1e3a8a;">Weekly Profile Report</h2><p>Hi ${firstName},</p><div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;"><div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div><div style="color:#666;font-size:14px;">profile views this week</div></div><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Search appearances in ${city}</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${totalInCity}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Your ranking</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">#${rank} of ${totalInCity}</td></tr></table><div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;"><strong style="color:#92400e;">Tip to boost your profile:</strong><p style="margin:8px 0 0;color:#78350f;">${tip}</p></div><p style="text-align:center;margin:24px 0;"><a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p><p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p></div>`;
+            const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;"><h2 style="color:#1e3a8a;">Weekly Profile Report</h2><p>Hi ${firstName},</p><div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;"><div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div><div style="color:#666;font-size:14px;">profile views this week</div></div><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Search appearances in ${city}</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${totalInCity}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Your ranking</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">#${rank} of ${totalInCity}</td></tr></table><div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;"><strong style="color:#92400e;">Tip to boost your profile:</strong><p style="margin:8px 0 0;color:#78350f;">${tip}</p></div><p style="text-align:center;margin:24px 0;"><a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p><p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p></div>`;
             await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
             digestState.sent++;
           } catch (e) {
@@ -7848,7 +7922,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   <blockquote style="margin:16px 0;padding:16px;background:#f8fafc;border-left:4px solid #2563eb;border-radius:4px;font-style:italic;color:#334155;">${bio}</blockquote>
   <p>Claim your profile to customize it and make it live for prospective clients.</p>
   <p style="text-align:center;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim & Customize Your Bio</a></p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject: `${cpa.first_name || 'Hi'}, here's your AI-generated professional bio`, html, from: OUTREACH_FROM });
         counts.segmentA++;
@@ -7878,7 +7952,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   <p>Claimed profiles appear higher in search results and include verified badges, AI bios, and direct client contact — all at no cost.</p>
   <p>Don't let competitors in ${cpa.city || 'your city'} get ahead.</p>
   <p style="text-align:center;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject: `${claimed} CPAs in ${cpa.province || 'your province'} just claimed their profiles`, html, from: OUTREACH_FROM });
         counts.segmentB++;
@@ -7911,7 +7985,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   <p>We've created a <strong>one-click claim link</strong> just for you. No forms, no passwords — just click and your profile is claimed instantly:</p>
   <p style="text-align:center;margin:24px 0;"><a href="${magicLink}" style="display:inline-block;background:#2563eb;color:#fff;padding:16px 40px;border-radius:8px;text-decoration:none;font-weight:700;font-size:18px;">Claim in One Click</a></p>
   <p style="color:#888;font-size:13px;">This link expires in 7 days and is unique to you.</p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject: `${cpa.first_name || 'Hi'}, claim your profile in one click`, html, from: OUTREACH_FROM });
         counts.segmentC++;
@@ -7943,7 +8017,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   </div>
   <p>Keep your profile updated to maintain visibility. Consider adding new specializations or updating your bio.</p>
   <p style="text-align:center;"><a href="${FRONTEND_URL}/profile?id=${r.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">View Your Dashboard</a></p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.email, subject: `Activity update: ${visitCount} views on your CanadaAccountants profile`, html, from: OUTREACH_FROM });
         counts.segmentD++;
@@ -7976,7 +8050,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   </ul>
   <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/pricing" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">See Upgrade Options</a></p>
   <p style="color:#888;font-size:13px;">Plans start at $199/year. Cancel anytime.</p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.email, subject: `${r.first_name || 'Hi'}, unlock priority placement for your CPA profile`, html, from: OUTREACH_FROM });
         counts.segmentE++;
@@ -8062,7 +8136,7 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
   </div>
   <p>Someone in ${city} searched for a <strong>${specialty}</strong> CPA and visited your profile — but it's unclaimed so we can't make the introduction yet. Claim your profile to be connected.</p>
   <p style="text-align:center;margin:24px 0;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim & Get Introduced →</a></p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
 </div>`;
           enriched++;
         } else {
@@ -8078,7 +8152,7 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
   </div>
   <p>Potential clients in ${cpa.city || cpa.province || 'your area'} are actively looking at your credentials. Make sure your profile is complete and up to date.</p>
   <p style="text-align:center;margin:24px 0;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(cpa.email)}">Unsubscribe</a></p>
 </div>`;
         }
         await sendEmail({ to: cpa.email, subject, html, from: OUTREACH_FROM });
@@ -8153,7 +8227,7 @@ app.post('/api/admin/send-competitive-report', async (req, res) => {
     <p style="margin:8px 0 0;color:#334155;">Competition is growing. CPAs with claimed, complete profiles are capturing the majority of client inquiries. Make sure your profile stands out.</p>
   </div>
   <p style="text-align:center;margin:24px 0;"><a href="${claimRedirectUrl(r.id)}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Update Your Profile</a></p>
-  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
         sent++;
@@ -8229,7 +8303,7 @@ app.post('/api/admin/send-ai-briefs', async (req, res) => {
     <p style="color:#64748b;font-size:13px;">This brief was generated by AI based on current market data and trends. For personalized insights, visit your dashboard.</p>
     <p style="text-align:center;margin:24px 0;"><a href="${FRONTEND_URL}/profile?id=${r.id}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Dashboard</a></p>
   </div>
-  <p style="color:#999;font-size:11px;margin-top:16px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${FRONTEND_URL}/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
+  <p style="color:#999;font-size:11px;margin-top:16px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
 </div>`;
         await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
         sent++;
