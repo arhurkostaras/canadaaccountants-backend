@@ -7369,6 +7369,24 @@ const referralRail = createReferralModule({
 app.use(referralRail.networkRouter);       // HMAC server-to-server (spec 4.3)
 app.use(referralRail.professionalRouter);  // JWT dashboard API (spec 5)
 app.use(referralRail.adminRouter);         // /api/admin/* paths — inherits the admin umbrella at mount above
+
+// Daily-monitoring status route (spec 13.2). Path is inside /api/admin, so the
+// authenticateToken + requireAdmin umbrella gates it by prefix.
+app.get('/api/admin/status', async (req, res) => {
+  try {
+    const referrals = await referralRail.getStatusSummary();
+    res.json({
+      platform: 'ACC',
+      uptime_seconds: Math.round(process.uptime()),
+      notify_enabled: referralRail.config.NOTIFY_ENABLED,
+      referrals,
+      checked_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[admin/status] error:', err.message);
+    res.status(500).json({ error: 'status failed' });
+  }
+});
 (async () => {
   try {
     await referralRail.ensureSchema();     // new network_* tables only; cpa_profiles ALTER is gated
