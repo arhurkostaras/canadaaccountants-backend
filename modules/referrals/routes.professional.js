@@ -23,8 +23,8 @@ function buildProfessionalRoutes({ pool, config, service, deps, auth }) {
     return rows[0] || null;
   }
 
-  // POST /api/referrals - create an outbound referral (spec 5.1).
-  router.post('/api/referrals', authenticateToken, requireCPA, async (req, res) => {
+  // POST /api/rail/referrals - create an outbound referral (spec 5.1).
+  router.post('/api/rail/referrals', authenticateToken, requireCPA, async (req, res) => {
     try {
       const pro = await resolvePro(req);
       if (!pro) return res.status(403).json({ error: 'No claimed professional profile for this account.' });
@@ -49,8 +49,8 @@ function buildProfessionalRoutes({ pool, config, service, deps, auth }) {
     }
   });
 
-  // GET /api/referrals?direction=&status=&page= - list mine.
-  router.get('/api/referrals', authenticateToken, requireCPA, async (req, res) => {
+  // GET /api/rail/referrals?direction=&status=&page= - list mine.
+  router.get('/api/rail/referrals', authenticateToken, requireCPA, async (req, res) => {
     try {
       const pro = await resolvePro(req);
       if (!pro) return res.status(403).json({ error: 'No claimed professional profile.' });
@@ -108,17 +108,17 @@ function buildProfessionalRoutes({ pool, config, service, deps, auth }) {
     }
   };
 
-  router.post('/api/referrals/:id/accept', authenticateToken, requireCPA,
+  router.post('/api/rail/referrals/:id/accept', authenticateToken, requireCPA,
     proAction((id, pro) => service.acceptReferral(pool, config, id, pro.id, deps)));
 
-  router.post('/api/referrals/:id/decline', authenticateToken, requireCPA,
+  router.post('/api/rail/referrals/:id/decline', authenticateToken, requireCPA,
     proAction((id, pro, req) => service.declineReferral(pool, config, id, pro.id, (req.body || {}).reason, deps)));
 
-  router.post('/api/referrals/:id/connected', authenticateToken, requireCPA,
+  router.post('/api/rail/referrals/:id/connected', authenticateToken, requireCPA,
     proAction((id, pro) => service.markConnected(pool, config, id, pro.id, deps)));
 
-  // GET /api/referrals/stats
-  router.get('/api/referrals/stats', authenticateToken, requireCPA, async (req, res) => {
+  // GET /api/rail/referrals/stats
+  router.get('/api/rail/referrals/stats', authenticateToken, requireCPA, async (req, res) => {
     try {
       const pro = await resolvePro(req);
       if (!pro) return res.status(403).json({ error: 'No claimed professional profile.' });
@@ -146,8 +146,8 @@ function buildProfessionalRoutes({ pool, config, service, deps, auth }) {
     }
   });
 
-  // GET /api/referrals/link - referral code + shareable URL (lazily generated).
-  router.get('/api/referrals/link', authenticateToken, requireCPA, async (req, res) => {
+  // GET /api/rail/referrals/link - referral code + shareable URL (lazily generated).
+  router.get('/api/rail/referrals/link', authenticateToken, requireCPA, async (req, res) => {
     try {
       const pro = await resolvePro(req);
       if (!pro) return res.status(403).json({ error: 'No claimed professional profile.' });
