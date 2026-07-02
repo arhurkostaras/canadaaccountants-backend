@@ -37,9 +37,15 @@ for (const p of paths) {
 
 // Backend-origin template links (e.g. the email-keyed unsubscribe): the route
 // must exist (anything but 404/unreachable passes - parameterless probes may 400).
+// Paths ending in '/' are interpolated prefixes like /api/c/${token}. Probe the
+// bare prefix first; on 404 retry with a dummy segment so the param route can
+// match. (Bare-first matters for /api/unsubscribe/: an unknown token triggers a
+// legacy full-table LIKE fallback that runs 30s+, while the bare prefix resolves
+// against the email-keyed route via Express non-strict trailing-slash matching.)
 const bpaths = [...new Set([...src.matchAll(/\$\{BACKEND_URL\}(\/[a-z0-9\-\/]*)/gi)].map(m => m[1]))];
 for (const p of bpaths) {
-  const s = await status(BACKEND + p);
+  let s = await status(BACKEND + p);
+  if (s === 404 && p.endsWith('/')) s = await status(BACKEND + p + 'smoke-probe-invalid');
   console.log(`backend email link ${p}: ${s}`);
   if (s === 0 || s === 404) failures.push(`backend template link ${p} -> ${s}`);
 }

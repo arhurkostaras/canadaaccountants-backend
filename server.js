@@ -4094,8 +4094,9 @@ app.get('/api/inbound-health', async (req, res) => {
 
 // Unsubscribe page (GET)
 // Email-keyed unsubscribe (UX audit 2026-07-02): about ten member-digest and
-// nurture templates linked ${FRONTEND_URL}/unsubscribe - a page that never
-// existed. A dead unsubscribe link is a CASL problem, not a UX nit. This route
+// nurture templates linked a frontend /unsubscribe page that never existed.
+// (Described indirectly here: the smoke script greps this file for the literal
+// frontend-URL link pattern, and a comment must not register as a dead link.) A dead unsubscribe link is a CASL problem, not a UX nit. This route
 // is email-keyed because those templates have no outreach token in scope; the
 // token route below stays canonical for tokened outreach sends.
 app.get('/api/unsubscribe', async (req, res) => {
