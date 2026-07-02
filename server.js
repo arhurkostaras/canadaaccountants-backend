@@ -187,11 +187,11 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 const appData = appFull.rows[0] || {};
 
                 const newProfile = await pool.query(
-                  `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+                  `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
                     specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'active', true, 'verified')
                    RETURNING id`,
-                  [memberUserId, firstName, lastName, applicant.email, applicant.firm_name || '',
+                  [`app_${applicationId}_${Date.now()}`, memberUserId, firstName, lastName, applicant.email, applicant.firm_name || '',
                    appData.province || '',
                    JSON.stringify(appData.specializations || []),
                    appTier || 'professional']
@@ -4654,11 +4654,11 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
       );
     } else {
       profile = await pool.query(
-        `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+        `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
           specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'active', true, 'verified')
          RETURNING id`,
-        [memberUserId, firstName, lastName, a.email, a.firm_name || '',
+        [`app_${req.params.id}_${Date.now()}`, memberUserId, firstName, lastName, a.email, a.firm_name || '',
          a.province || '',
          JSON.stringify(a.specializations || []),
          req.body.tier || 'professional']
