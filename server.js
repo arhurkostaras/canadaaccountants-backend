@@ -864,6 +864,9 @@ const crmIntelligence = new CRMIntelligence({
       await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS outcome_notes TEXT`);
       await pool.query(`ALTER TABLE friction_matches ADD COLUMN IF NOT EXISTS professional_notified_at TIMESTAMPTZ`);
     } catch (e) { console.error('[Migration] Lead status columns:', e.message); }
+    try {
+      await pool.query(`ALTER TABLE client_profiles ADD COLUMN IF NOT EXISTS timeline VARCHAR(50)`);
+    } catch (e) { console.error('[Migration] client_profiles.timeline column:', e.message); }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS email_validations (
         id SERIAL PRIMARY KEY,
@@ -1813,7 +1816,7 @@ async function runCPAMatchingAlgorithm(clientProfile) {
 app.post('/api/match-cpas', async (req, res) => {
   try {
     const { province, city, specialization, email, name, phone, businessRequirements,
-            businessSize, budgetRange, feePreference, meetingPreference, serviceType } = req.body;
+            businessSize, budgetRange, feePreference, meetingPreference, serviceType, timeline } = req.body;
     const searchProvince = province || businessRequirements?.province || '';
     const searchCity = city || businessRequirements?.city || '';
     const searchSpec = specialization || serviceType || businessRequirements?.specialization || businessRequirements?.industry || '';
@@ -1821,12 +1824,13 @@ app.post('/api/match-cpas', async (req, res) => {
     const searchFeePreference = feePreference || businessRequirements?.feePreference || '';
     const searchMeetingPreference = meetingPreference || businessRequirements?.meetingPreference || '';
     const searchBudgetRange = budgetRange || businessRequirements?.budgetRange || '';
+    const searchTimeline = timeline || businessRequirements?.timeline || '';
 
     // Create client profile
     const clientResult = await pool.query(
-      `INSERT INTO client_profiles (service_type, business_size, budget_range, fee_preference, province, city, meeting_preference, contact_name, contact_email, contact_phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [searchSpec, searchBusinessSize, searchBudgetRange, searchFeePreference, searchProvince, searchCity, searchMeetingPreference, name || '', email || '', phone || '']
+      `INSERT INTO client_profiles (service_type, business_size, budget_range, fee_preference, province, city, meeting_preference, contact_name, contact_email, contact_phone, timeline)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [searchSpec, searchBusinessSize, searchBudgetRange, searchFeePreference, searchProvince, searchCity, searchMeetingPreference, name || '', email || '', phone || '', searchTimeline]
     );
 
     // Store in legacy table too (backwards compat)
@@ -1900,6 +1904,7 @@ app.post('/api/match-cpas', async (req, res) => {
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Phone</td><td style="padding:8px;border:1px solid #e2e8f0;">${phone || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Service Type</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchSpec || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Business Size</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchBusinessSize || '—'}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Timeline</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchTimeline || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Province</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchProvince || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Budget</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchBudgetRange || '—'}</td></tr>
             <tr><td style="padding:8px;border:1px solid #e2e8f0;font-weight:bold;background:#eff6ff;">Fee Preference</td><td style="padding:8px;border:1px solid #e2e8f0;">${searchFeePreference || '—'}</td></tr>
@@ -6516,6 +6521,16 @@ function cleanBio(bio) {
        .replace(/^[-*]\s+/gm, '').replace(/`([^`]+)`/g, '$1').replace(/#/g, '');
   return b.replace(/\n{3,}/g, '\n\n').trim();
 }
+
+// Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
+// '#'/'**' markdown and the Chartered->Certified wording fix never leak through bio_snippet
+// (the single point all directory consumers, incl. generate-directory-pages.js, read through).
+function withCleanSnippet(rows) {
+  return rows.map(({ generated_bio, ...rest }) => ({
+    ...rest,
+    bio_snippet: generated_bio ? cleanBio(generated_bio).slice(0, 160) : null,
+  }));
+}
 // GeoNames allowlist (21,672 Canadian municipalities by province) — replaces the old 35-city denylist,
 // which only caught known major cities in the wrong province and missed foreign / other-province cities.
 const CA_CITIES = require('./ca-cities.json');
@@ -6689,7 +6704,7 @@ app.get('/api/directory/city/:city', async (req, res) => {
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                LEFT(generated_bio, 160) AS bio_snippet, claim_status
+                generated_bio, claim_status
          FROM scraped_cpas
          WHERE city ILIKE $1
          ORDER BY claim_status DESC NULLS LAST, full_name ASC
@@ -6706,7 +6721,7 @@ app.get('/api/directory/city/:city', async (req, res) => {
     res.json({
       city,
       total: parseInt(countResult.rows[0].count),
-      professionals: professionalsResult.rows
+      professionals: withCleanSnippet(professionalsResult.rows)
     });
   } catch (err) {
     console.error('Directory city error:', err.message);
@@ -6727,7 +6742,7 @@ app.get('/api/directory/:province', async (req, res) => {
     const [professionalsResult, countResult, designationCounts] = await Promise.all([
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                LEFT(generated_bio, 160) AS bio_snippet
+                generated_bio
          FROM scraped_cpas WHERE UPPER(province) = $1
          ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
         [provinceCode, limit, offset]
@@ -6753,7 +6768,7 @@ app.get('/api/directory/:province', async (req, res) => {
       page,
       total_pages: Math.ceil(total / limit),
       designation_counts: designationCounts.rows,
-      professionals: professionalsResult.rows
+      professionals: withCleanSnippet(professionalsResult.rows)
     });
   } catch (err) {
     console.error('Directory province error:', err.message);
@@ -6775,7 +6790,7 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                LEFT(generated_bio, 160) AS bio_snippet
+                generated_bio
          FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
          ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
         [provinceCode, `%${designation.toUpperCase()}%`, limit, offset]
@@ -6795,7 +6810,7 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
       total,
       page,
       total_pages: Math.ceil(total / limit),
-      professionals: professionalsResult.rows
+      professionals: withCleanSnippet(professionalsResult.rows)
     });
   } catch (err) {
     console.error('Directory province/designation error:', err.message);
@@ -7322,6 +7337,67 @@ app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin
     res.status(500).json({ error: err.message });
   }
 });
+
+// =====================================================
+// CROSS-PLATFORM REFERRAL RAIL (modules/referrals) — Build Spec v1.2
+// Tables are network_-prefixed (network_referrals etc.) because a legacy
+// `referrals` table (users-keyed recruit-a-peer system, line ~912) already
+// exists; CREATE IF NOT EXISTS against it would silently schema-drift.
+// REFERRAL_NOTIFY_ENABLED defaults false: the rail runs dark (spec 11.0);
+// ACC additionally sits under the 2026-06-10 professional-contact moratorium.
+// =====================================================
+const createReferralModule = require('./modules/referrals');
+const referralRail = createReferralModule({
+  pool,
+  sendEmail,
+  stripe,
+  auth: { authenticateToken, requireCPA },
+  matcher: { runMatch: runCPAMatchingAlgorithm },
+  // Adapter over the existing ZB validator (30-day cache + circuit breaker).
+  validateEmail: async (email) => {
+    const zb = await outreachEngine._validateEmail(email);
+    if (zb.status === 'validation_unavailable') return { circuitOpen: true };
+    if (!zb.valid) return { blocked: true, status: zb.status };
+    return {};
+  },
+  captureError: (err, ctx) => {
+    if (process.env.SENTRY_DSN && typeof Sentry.captureException === 'function') {
+      Sentry.captureException(err, { extra: ctx });
+    }
+  },
+});
+app.use(referralRail.networkRouter);       // HMAC server-to-server (spec 4.3)
+app.use(referralRail.professionalRouter);  // JWT dashboard API (spec 5)
+app.use(referralRail.adminRouter);         // /api/admin/* paths — inherits the admin umbrella at mount above
+
+// Daily-monitoring status route (spec 13.2). Path is inside /api/admin, so the
+// authenticateToken + requireAdmin umbrella gates it by prefix.
+app.get('/api/admin/status', async (req, res) => {
+  try {
+    const referrals = await referralRail.getStatusSummary();
+    res.json({
+      platform: 'ACC',
+      uptime_seconds: Math.round(process.uptime()),
+      notify_enabled: referralRail.config.NOTIFY_ENABLED,
+      referrals,
+      checked_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[admin/status] error:', err.message);
+    res.status(500).json({ error: 'status failed' });
+  }
+});
+(async () => {
+  try {
+    await referralRail.ensureSchema();     // new network_* tables only; cpa_profiles ALTER is gated
+    referralRail.startWorkers();           // outbox flush (60s) + sweeper cron (15m)
+  } catch (err) {
+    console.error('[referrals] boot failed — rail inactive this process:', err.message);
+    if (process.env.SENTRY_DSN && typeof Sentry.captureException === 'function') {
+      Sentry.captureException(err, { extra: { context: 'referral rail boot' } });
+    }
+  }
+})();
 
 // Sentry error handler (must be before app.listen, after all routes)
 if (process.env.SENTRY_DSN && Sentry.Handlers) {

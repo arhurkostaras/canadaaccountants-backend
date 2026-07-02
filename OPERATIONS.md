@@ -379,3 +379,38 @@ safe action: remove the WS ACC backend service da3bd205 (service only, never the
 project). Banner committed d8c4ba8 (acc-directory-cleanbio-snippet), cherry-picked
 to main as 4d626ce via PR #1. No infra action taken; maglev, the scraper, and the
 project all remain.
+
+---
+
+## 2026-07-01 - Referral rail: NETWORK_SHARED_SECRET rotation runbook
+
+The cross-platform referral rail (Build Spec v1.2) authenticates server-to-server
+traffic between ACC, LAW, INV, and CBE with ONE shared HMAC secret,
+`NETWORK_SHARED_SECRET` (64 hex chars, identical on all four Railway services).
+One compromise exposes the whole rail; rotate on any suspicion of exposure, same
+policy as `RESEND_WEBHOOK_SECRET`.
+
+The receiver verifies against BOTH `NETWORK_SHARED_SECRET` and
+`NETWORK_SHARED_SECRET_NEXT` (modules/referrals/hmac.js), so rotation is staged
+and zero-downtime. Senders always sign with the primary only.
+
+Rotation procedure (four services: canadaaccountants-backend, canadalawyers
+backend, canadainvesting-backend, CBE backend - resolve each service name
+explicitly per the Railway deploy discipline; NEVER touch a postgres service):
+
+1. Generate the new secret locally: `openssl rand -hex 32`. Do not paste it into
+   any chat, log, or commit.
+2. Set `NETWORK_SHARED_SECRET_NEXT=<new>` on ALL FOUR services. Wait for each
+   service to restart and verify health. Receivers now accept old OR new;
+   senders still sign with old. Nothing breaks at any point in this window.
+3. Flip the primary: set `NETWORK_SHARED_SECRET=<new>` on ALL FOUR services.
+   Senders now sign with new; any not-yet-restarted receiver still accepts it
+   via `_NEXT`. Verify a signed round-trip (the referral-rail self-test or a
+   signed GET /api/network/health peer-to-peer).
+4. Remove `NETWORK_SHARED_SECRET_NEXT` from all four services once every
+   service is confirmed running the new primary.
+5. Log the rotation here (date, reason, operator). Old secret is dead; anything
+   still signing with it gets 401s, which is the desired loud failure.
+
+Order within each step does not matter; order BETWEEN steps does. Never set the
+new value as primary anywhere before step 2 has covered all four services.
