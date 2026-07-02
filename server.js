@@ -7338,6 +7338,49 @@ app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin
   }
 });
 
+// =====================================================
+// CROSS-PLATFORM REFERRAL RAIL (modules/referrals) — Build Spec v1.2
+// Tables are network_-prefixed (network_referrals etc.) because a legacy
+// `referrals` table (users-keyed recruit-a-peer system, line ~912) already
+// exists; CREATE IF NOT EXISTS against it would silently schema-drift.
+// REFERRAL_NOTIFY_ENABLED defaults false: the rail runs dark (spec 11.0);
+// ACC additionally sits under the 2026-06-10 professional-contact moratorium.
+// =====================================================
+const createReferralModule = require('./modules/referrals');
+const referralRail = createReferralModule({
+  pool,
+  sendEmail,
+  stripe,
+  auth: { authenticateToken, requireCPA },
+  matcher: { runMatch: runCPAMatchingAlgorithm },
+  // Adapter over the existing ZB validator (30-day cache + circuit breaker).
+  validateEmail: async (email) => {
+    const zb = await outreachEngine._validateEmail(email);
+    if (zb.status === 'validation_unavailable') return { circuitOpen: true };
+    if (!zb.valid) return { blocked: true, status: zb.status };
+    return {};
+  },
+  captureError: (err, ctx) => {
+    if (process.env.SENTRY_DSN && typeof Sentry.captureException === 'function') {
+      Sentry.captureException(err, { extra: ctx });
+    }
+  },
+});
+app.use(referralRail.networkRouter);       // HMAC server-to-server (spec 4.3)
+app.use(referralRail.professionalRouter);  // JWT dashboard API (spec 5)
+app.use(referralRail.adminRouter);         // /api/admin/* paths — inherits the admin umbrella at mount above
+(async () => {
+  try {
+    await referralRail.ensureSchema();     // new network_* tables only; cpa_profiles ALTER is gated
+    referralRail.startWorkers();           // outbox flush (60s) + sweeper cron (15m)
+  } catch (err) {
+    console.error('[referrals] boot failed — rail inactive this process:', err.message);
+    if (process.env.SENTRY_DSN && typeof Sentry.captureException === 'function') {
+      Sentry.captureException(err, { extra: { context: 'referral rail boot' } });
+    }
+  }
+})();
+
 // Sentry error handler (must be before app.listen, after all routes)
 if (process.env.SENTRY_DSN && Sentry.Handlers) {
   app.use(Sentry.Handlers.errorHandler());
