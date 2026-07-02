@@ -32,6 +32,7 @@ const buildNetworkRoutes = require('./routes.network');
 const buildProfessionalRoutes = require('./routes.professional');
 const buildAdminRoutes = require('./routes.admin');
 const accAdapter = require('./adapters/acc');
+const lawAdapter = require('./adapters/law');
 
 function createReferralModule(injected) {
   const { pool, sendEmail, stripe, auth, matcher, validateEmail, captureError } = injected;
@@ -40,10 +41,12 @@ function createReferralModule(injected) {
   const notify = buildNotify({ config, sendEmail, service, captureError });
   const incentives = buildIncentives({ config, stripe, service, captureError });
 
-  // Per-platform matcher adapter. ACC is implemented; LAW/INV/CBE supply their
-  // own adapter file when the module lands in those repos.
+  // Per-platform matcher adapter. ACC + LAW are implemented; INV/CBE supply
+  // their own adapter file when the module lands in those repos.
   const adapter = config.PLATFORM_ID === 'ACC'
     ? accAdapter.buildAdapter(matcher || {})
+    : config.PLATFORM_ID === 'LAW'
+    ? lawAdapter.buildAdapter(matcher || {})
     : {
         matchInbound: async () => {
           throw new Error(`[referrals] no matcher adapter for ${config.PLATFORM_ID} yet`);
