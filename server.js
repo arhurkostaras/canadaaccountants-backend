@@ -65,6 +65,22 @@ app.use(cors({
 }));
 
 // Stripe webhook — must be before JSON parser (needs raw body)
+// Paid onboarding credential issuance (UX audit 2026-07-02): every activation
+// path used to create users with bcrypt(randomBytes) placeholders and no way
+// to ever log in, while the welcome CTA pointed at /dashboard (a 404). This
+// mints a password-setup token (same mechanics as forgot-password; 72h window
+// for onboarding vs 1h for resets) and returns the setup URL for welcome CTAs.
+async function issuePasswordSetupUrl(userId) {
+  const setupToken = require('crypto').randomBytes(32).toString('hex');
+  const setupTokenHash = require('crypto').createHash('sha256').update(setupToken).digest('hex');
+  const expires = new Date(Date.now() + 72 * 60 * 60 * 1000);
+  await pool.query(
+    'UPDATE users SET reset_token_hash = $1, reset_token_expires = $2 WHERE id = $3',
+    [setupTokenHash, expires, userId]
+  );
+  return `${FRONTEND_URL}/reset-password?token=${setupToken}&welcome=1`;
+}
+
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -121,37 +137,6 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           if (appRow.rows.length > 0) {
             const applicant = appRow.rows[0];
             const appFirstName = applicant.full_name.split(' ')[0] || 'there';
-
-            // Activation confirmation to applicant
-            sendEmail({
-              to: applicant.email,
-              subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
-              html: `
-                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
-                  <div style="background:linear-gradient(135deg,#059669,#047857);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
-                    <h1 style="color:#ffffff;margin:0;font-size:24px;">You're All Set!</h1>
-                    <p style="color:#d1fae5;margin:8px 0 0;font-size:14px;">Your CanadaAccountants profile is now active</p>
-                  </div>
-                  <div style="padding:32px 24px;background:#ffffff;">
-                    <p style="color:#1a1a1a;font-size:16px;">Hi ${appFirstName},</p>
-                    <p style="color:#333;font-size:15px;">Your <strong>${appTier.charAt(0).toUpperCase() + appTier.slice(1)}</strong> membership is confirmed. Your verified CPA profile is now live on CanadaAccountants.app and you'll start receiving client referrals.</p>
-                    <p style="color:#333;font-size:15px;">Here's what happens next:</p>
-                    <ul style="color:#333;font-size:15px;">
-                      <li>Your profile is visible to potential clients searching for CPAs</li>
-                      <li>Our AI matching system will connect you with relevant client inquiries</li>
-                      <li>You'll receive email notifications for new referral opportunities</li>
-                    </ul>
-                    <div style="text-align:center;margin:24px 0;">
-                      <a href="${FRONTEND_URL}/dashboard" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">Go to Dashboard</a>
-                    </div>
-                    <p style="color:#666;font-size:13px;">Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
-                  </div>
-                  <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
-                    <p style="color:#999;font-size:11px;margin:0;">Application ID: #${applicationId}</p>
-                  </div>
-                </div>
-              `,
-            }).catch(err => console.error('Activation email error (non-fatal):', err.message));
 
             // Notify admin of payment
             const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
@@ -211,6 +196,45 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
               console.log(`[Stripe] Created/updated cpa_profile #${profileId} for ${applicant.email}`);
             } catch (profileErr) {
               console.error('[Stripe] Profile creation error (non-fatal):', profileErr.message);
+            }
+
+            // Activation email LAST, so it can carry the password-setup link for
+            // the user row created above. Members had no way to log in: users
+            // were created with unusable random hashes and the CTA 404'd.
+            try {
+              const memberUser = await pool.query('SELECT id FROM users WHERE email = $1', [applicant.email]);
+              const setupUrl = memberUser.rows.length
+                ? await issuePasswordSetupUrl(memberUser.rows[0].id)
+                : `${FRONTEND_URL}/cpa-login`;
+              const ctaLabel = memberUser.rows.length ? 'Set Your Password & Open Your Dashboard' : 'Log In to Your Dashboard';
+              await sendEmail({
+                to: applicant.email,
+                subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
+                html: `
+                  <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:0;">
+                    <div style="background:linear-gradient(135deg,#059669,#047857);padding:32px 24px;text-align:center;border-radius:8px 8px 0 0;">
+                      <h1 style="color:#ffffff;margin:0;font-size:24px;">You're All Set!</h1>
+                      <p style="color:#d1fae5;margin:8px 0 0;font-size:14px;">Your CanadaAccountants profile is now active</p>
+                    </div>
+                    <div style="padding:32px 24px;background:#ffffff;">
+                      <p style="color:#1a1a1a;font-size:16px;">Hi ${appFirstName},</p>
+                      <p style="color:#333;font-size:15px;">Your <strong>${appTier.charAt(0).toUpperCase() + appTier.slice(1)}</strong> membership is confirmed. Your verified CPA profile is now live on CanadaAccountants.app and you'll start receiving client referrals.</p>
+                      <p style="color:#333;font-size:15px;">One step left: set your password so you can access your member dashboard any time.</p>
+                      <div style="text-align:center;margin:24px 0;">
+                        <a href="${setupUrl}" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">${ctaLabel}</a>
+                      </div>
+                      <p style="color:#666;font-size:13px;">The link is valid for 72 hours. After that, use "Forgot Password" on the <a href="${FRONTEND_URL}/cpa-login" style="color:#2563eb;">login page</a> with this email address.</p>
+                      <p style="color:#666;font-size:13px;">Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
+                    </div>
+                    <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
+                      <p style="color:#999;font-size:11px;margin:0;">Application ID: #${applicationId}</p>
+                    </div>
+                  </div>
+                `,
+              });
+              console.log(`[Stripe] Activation email with password setup sent to ${applicant.email}`);
+            } catch (welcomeErr) {
+              console.error('[Stripe] Activation/setup email error:', welcomeErr.message);
             }
           }
         }
@@ -1949,7 +1973,7 @@ app.post('/api/match-cpas', async (req, res) => {
                   <p style="color:#333;font-size:15px;">A potential client in <strong>${searchCity || searchProvince || 'Canada'}</strong> is looking for help with <strong>${searchSpec || 'accounting services'}</strong>.</p>
                   <p style="color:#333;font-size:14px;">Your profile matched based on your experience and location. Log in to your dashboard to view details and respond.</p>
                   <div style="text-align:center;margin:24px 0;">
-                    <a href="${FRONTEND_URL}/dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
+                    <a href="${FRONTEND_URL}/cpa-dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
                   </div>
                 </div>
               </div>
@@ -4595,6 +4619,29 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
        JSON.stringify(a.specializations || []),
        req.body.tier || 'professional']
     );
+
+    // Member-facing activation + password setup. This path previously emailed
+    // ONLY the admin; the member never received credentials or any way in.
+    try {
+      const setupUrl = await issuePasswordSetupUrl(userResult.rows[0].id);
+      await sendEmail({
+        to: a.email,
+        subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+            <p style="color:#1a1a1a;font-size:16px;">Hi ${(a.full_name || '').split(' ')[0] || 'there'},</p>
+            <p style="color:#333;font-size:15px;">Your application is approved and your verified CPA profile is now live on CanadaAccountants.app.</p>
+            <p style="color:#333;font-size:15px;">One step left: set your password so you can access your member dashboard any time.</p>
+            <div style="text-align:center;margin:24px 0;">
+              <a href="${setupUrl}" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">Set Your Password &amp; Open Your Dashboard</a>
+            </div>
+            <p style="color:#666;font-size:13px;">The link is valid for 72 hours. After that, use "Forgot Password" on the <a href="${FRONTEND_URL}/cpa-login" style="color:#2563eb;">login page</a> with this email address.</p>
+          </div>
+        `,
+      });
+    } catch (setupErr) {
+      console.error('[create-profile] member activation email error:', setupErr.message);
+    }
 
     res.json({ success: true, profileId: profile.rows[0].id, email: a.email, name: a.full_name });
   } catch (error) {
