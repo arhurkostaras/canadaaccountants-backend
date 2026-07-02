@@ -145,7 +145,7 @@ function buildPage(data, id) {
                 <a href="why-we-win">Why We Win</a>
                 <a href="pricing">Pricing</a>
                 <a href="contact">Contact</a>
-                <a href="admin">Login</a>
+                <a href="cpa-login">Login</a>
                 <a href="join-as-cpa" class="nav-cta">Apply to Join</a>
             </div>
         </div>
