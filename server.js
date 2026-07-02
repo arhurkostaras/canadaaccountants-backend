@@ -172,11 +172,16 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 );
               } else {
                 const passwordHash = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), 10);
-                const userResult = await pool.query(
-                  `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA')
-                   ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
-                  [applicant.email, passwordHash]
-                );
+                // Select-then-insert: production users has no UNIQUE(email), so any
+                // ON CONFLICT (email) form fails outright ("no unique or exclusion
+                // constraint matching the ON CONFLICT specification", found live 2026-07-02).
+                const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [applicant.email]);
+                const memberUserId = existingUser.rows.length
+                  ? existingUser.rows[0].id
+                  : (await pool.query(
+                      `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA') RETURNING id`,
+                      [applicant.email, passwordHash]
+                    )).rows[0].id;
 
                 const appFull = await pool.query('SELECT * FROM cpa_applications WHERE id = $1', [applicationId]);
                 const appData = appFull.rows[0] || {};
@@ -186,7 +191,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                     specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
                    RETURNING id`,
-                  [userResult.rows[0].id, firstName, lastName, applicant.email, applicant.firm_name || '',
+                  [memberUserId, firstName, lastName, applicant.email, applicant.firm_name || '',
                    appData.province || '',
                    JSON.stringify(appData.specializations || []),
                    appTier || 'professional']
@@ -4627,30 +4632,43 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
     const lastName = nameParts.slice(1).join(' ') || '';
 
     const passwordHash = await bcrypt.hash(require('crypto').randomBytes(32).toString('hex'), 10);
-    const userResult = await pool.query(
-      `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA')
-       ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id`,
-      [a.email, passwordHash]
-    );
+    // Select-then-write on both tables: production users has no UNIQUE(email)
+    // ("no unique or exclusion constraint matching the ON CONFLICT specification",
+    // found live 2026-07-02), and this path must not bet on cpa_profiles having one.
+    const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [a.email]);
+    const memberUserId = existingUser.rows.length
+      ? existingUser.rows[0].id
+      : (await pool.query(
+          `INSERT INTO users (email, password_hash, user_type) VALUES ($1, $2, 'CPA') RETURNING id`,
+          [a.email, passwordHash]
+        )).rows[0].id;
 
-    const profile = await pool.query(
-      `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
-        specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
-       ON CONFLICT (email) DO UPDATE SET subscription_tier = EXCLUDED.subscription_tier,
-         subscription_status = 'active', profile_status = 'active', is_active = true, verification_status = 'verified',
-         updated_date = NOW()
-       RETURNING id`,
-      [userResult.rows[0].id, firstName, lastName, a.email, a.firm_name || '',
-       a.province || '',
-       JSON.stringify(a.specializations || []),
-       req.body.tier || 'professional']
-    );
+    const existingProfile = await pool.query('SELECT id FROM cpa_profiles WHERE email = $1', [a.email]);
+    let profile;
+    if (existingProfile.rows.length) {
+      profile = await pool.query(
+        `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active',
+           profile_status = 'active', is_active = true, verification_status = 'verified', updated_date = NOW()
+         WHERE id = $2 RETURNING id`,
+        [req.body.tier || 'professional', existingProfile.rows[0].id]
+      );
+    } else {
+      profile = await pool.query(
+        `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+          specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', 'active', true, 'verified')
+         RETURNING id`,
+        [memberUserId, firstName, lastName, a.email, a.firm_name || '',
+         a.province || '',
+         JSON.stringify(a.specializations || []),
+         req.body.tier || 'professional']
+      );
+    }
 
     // Member-facing activation + password setup. This path previously emailed
     // ONLY the admin; the member never received credentials or any way in.
     try {
-      const setupUrl = await issuePasswordSetupUrl(userResult.rows[0].id);
+      const setupUrl = await issuePasswordSetupUrl(memberUserId);
       await sendEmail({
         to: a.email,
         subject: 'Welcome to CanadaAccountants.app -- Your Profile is Active!',
