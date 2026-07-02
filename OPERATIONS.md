@@ -363,6 +363,25 @@ range 14671..27470 = 12,800 rows (no_email 12,281, no_firm 12,175, status invali
 
 ---
 
+## 2026-06-28 - Runbook quarantine: WS decommission Stages 5-7 blocked (maglev)
+
+2026-06-28 - Prepended a BLOCKED banner to RUNBOOK_ws_decommission.md after a
+read-only review found the runbook stale relative to the 2026-06-09 maglev
+correction. Service a2164d8c is maglev (the 2.4M-row scrape), not the switchback
+DB the runbook pairs it with; Stage 6 (delete a2164d8c) and Stage 7 (delete the
+wonderful-surprise project, which contains it) would destroy contraindicated data,
+and the TARGET LOCK would not stop it (maglev legitimately is that serviceId in
+that project, so every lock check passes; the flaw is in scope, not targeting).
+Stages 5-7 and stopping/deleting the WS SME scraper (2832c048) stay blocked until
+OPERATIONS records a real maglev-to-production reconciliation (a stable shared key;
+name_hash does not exist; plus a plan for the roughly 907K null-key rows). Only
+safe action: remove the WS ACC backend service da3bd205 (service only, never the
+project). Banner committed d8c4ba8 (acc-directory-cleanbio-snippet), cherry-picked
+to main as 4d626ce via PR #1. No infra action taken; maglev, the scraper, and the
+project all remain.
+
+---
+
 ## 2026-07-01 - Referral rail: NETWORK_SHARED_SECRET rotation runbook
 
 The cross-platform referral rail (Build Spec v1.2) authenticates server-to-server
