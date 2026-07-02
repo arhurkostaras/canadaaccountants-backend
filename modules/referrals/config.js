@@ -31,8 +31,8 @@ const PLATFORMS = {
     PLATFORM_NAME: 'CanadaLawyers',
     PLATFORM_DOMAIN: 'https://canadalawyers.app',
     PRO_NOUN: 'lawyer',
-    PRO_TABLE: 'TODO_verify_law_pro_table',       // verify in the LAW repo before migrating
-    CLIENT_TABLE: 'TODO_verify_law_client_table',
+    PRO_TABLE: 'lawyer_profiles',                 // verified LAW-1 2026-07-02 (schema.sql:23)
+    CLIENT_TABLE: 'client_profiles',              // verified LAW-1 (startup DDL server.js:1508; matcher input)
     SUPPRESSION_TABLE: 'outreach_unsubscribes',   // LAW prod confirmed to have outreach_unsubscribes (DB_MAP)
     SUPPRESSION_EMAIL_COL: 'email',
     ACCENT: '#2563eb',
