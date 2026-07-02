@@ -228,6 +228,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                       <div style="text-align:center;margin:24px 0;">
                         <a href="${setupUrl}" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">${ctaLabel}</a>
                       </div>
+                    <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the button doesn't work, copy and paste this link into your browser:<br><span style="color:#64748b;">${setupUrl}</span></p>
                       <p style="color:#666;font-size:13px;">The link is valid for 72 hours. After that, use "Forgot Password" on the <a href="${FRONTEND_URL}/cpa-login" style="color:#2563eb;">login page</a> with this email address.</p>
                       <p style="color:#666;font-size:13px;">Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
                     </div>
@@ -1980,6 +1981,7 @@ app.post('/api/match-cpas', async (req, res) => {
                   <div style="text-align:center;margin:24px 0;">
                     <a href="${FRONTEND_URL}/cpa-dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
                   </div>
+                  <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the button doesn't work, copy and paste this link into your browser:<br><span style="color:#64748b;">${FRONTEND_URL}/cpa-dashboard</span></p>
                 </div>
               </div>
             `,
@@ -2099,6 +2101,7 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
                   <div style="text-align:center;margin:24px 0;">
                     <a href="https://canadaaccountants.app/cpa-dashboard" style="display:inline-block;padding:12px 28px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">View Match Details</a>
                   </div>
+                  <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the button doesn't work, copy and paste this link into your browser:<br><span style="color:#64748b;">https://canadaaccountants.app/cpa-dashboard</span></p>
                 </div>
               </div>`,
             });
@@ -4434,6 +4437,8 @@ function sendApprovalEmail({ email, fullName, appId, sessions }) {
             </tr>
           </table>
 
+          <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the buttons don't work, copy and paste the link for your tier into your browser:<br>Associate: <span style="color:#64748b;">${sessions.associate}</span><br>Professional: <span style="color:#64748b;">${sessions.professional}</span><br>Enterprise: <span style="color:#64748b;">${sessions.enterprise}</span></p>
+
           <p style="color:#666;font-size:13px;text-align:center;">All plans include AI-powered client matching, a verified profile listing, and dedicated support.</p>
         </div>
         <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
@@ -4680,6 +4685,7 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
             <div style="text-align:center;margin:24px 0;">
               <a href="${setupUrl}" style="display:inline-block;padding:12px 32px;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#ffffff;text-decoration:none;border-radius:6px;font-size:16px;font-weight:600;">Set Your Password &amp; Open Your Dashboard</a>
             </div>
+            <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the button doesn't work, copy and paste this link into your browser:<br><span style="color:#64748b;">${setupUrl}</span></p>
             <p style="color:#666;font-size:13px;">The link is valid for 72 hours. After that, use "Forgot Password" on the <a href="${FRONTEND_URL}/cpa-login" style="color:#2563eb;">login page</a> with this email address.</p>
           </div>
         `,
@@ -6135,8 +6141,10 @@ app.post('/api/claim/instant', async (req, res) => {
       { key: 'professional', label: 'Professional', price: '$299/mo' },
       { key: 'enterprise', label: 'Enterprise', price: '$599/mo' },
     ];
+    const tierUrls = {};
     const tierButtonsHtml = tiers.map(t => {
       const url = `${BACKEND_URL}/api/checkout/${t.key}?email=${encodeURIComponent(email)}&name=${encodeURIComponent(claimName)}`;
+      tierUrls[t.key] = url;
       const isPrimary = t.key === 'professional';
       const bg = isPrimary ? 'background:linear-gradient(135deg,#059669 0%,#047857 100%);' : 'background:#1e3a8a;';
       const size = isPrimary ? 'font-size:16px;padding:14px 36px;' : 'font-size:14px;padding:10px 28px;';
@@ -6144,6 +6152,7 @@ app.post('/api/claim/instant', async (req, res) => {
         <a href="${url}" style="color:#fff;text-decoration:none;font-weight:600;">${t.label} — ${t.price}</a>
       </td></tr><tr><td style="height:10px;"></td></tr>`;
     }).join('');
+    const tierFallbackHtml = tiers.map(t => `${t.label}: <span style="color:#64748b;">${tierUrls[t.key]}</span>`).join('<br>');
 
     // Send magic link email — NO password, NO extra steps
     sendEmail({
@@ -6157,6 +6166,7 @@ app.post('/api/claim/instant', async (req, res) => {
           <p style="text-align: center; margin: 30px 0;">
             <a href="${magicLink}" style="display: inline-block; background: linear-gradient(135deg, #2563eb, #1e3a8a); color: white; padding: 16px 40px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 16px;">Access Your Dashboard &rarr;</a>
           </p>
+          <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the button doesn't work, copy and paste this link into your browser:<br><span style="color:#64748b;">${magicLink}</span></p>
           ${tierButtonsHtml ? `
           <div style="margin-top:32px;padding-top:24px;border-top:1px solid #e2e8f0;">
             <h3 style="color:#1e3a8a;margin:0 0 12px;">Upgrade Your Profile</h3>
@@ -6164,6 +6174,7 @@ app.post('/api/claim/instant', async (req, res) => {
             <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
               ${tierButtonsHtml}
             </table>
+            <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the buttons don't work, copy and paste the link for your tier into your browser:<br>${tierFallbackHtml}</p>
           </div>
           ` : ''}
           <p style="color: #666; font-size: 14px;">This link logs you in automatically — no password needed. It expires in 30 days.</p>
@@ -6193,6 +6204,7 @@ app.post('/api/claim/instant', async (req, res) => {
         <p style="margin:24px 0;text-align:center;">
           <a href="${checkoutUrl}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:14px 32px;border-radius:6px;font-weight:600;">Upgrade to Professional — $299/mo</a>
         </p>
+        <p style="color:#94a3b8;font-size:12px;line-height:1.5;word-break:break-all;margin-top:4px;">If the button doesn't work, copy and paste this link into your browser:<br><span style="color:#64748b;">${checkoutUrl}</span></p>
         <p>If you want to update your bio, add specializations, or have any questions at all, just reply to this email. It comes straight to me.</p>
         <p style="margin-top:28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
       </div>
