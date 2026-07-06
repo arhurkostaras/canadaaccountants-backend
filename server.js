@@ -166,7 +166,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 profileId = existingProfile.rows[0].id;
                 await pool.query(
                   `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active',
-                   profile_status = 'active', verification_status = 'verified', is_active = true, updated_date = NOW()
+                   profile_status = 'active', verification_status = 'registry_checked', is_active = true, updated_date = NOW()
                    WHERE id = $2`,
                   [appTier || 'professional', profileId]
                 );
@@ -189,7 +189,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 const newProfile = await pool.query(
                   `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
                     specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'active', true, 'verified')
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'active', true, 'registry_checked')
                    RETURNING id`,
                   [`app_${applicationId}_${Date.now()}`, memberUserId, firstName, lastName, applicant.email, applicant.firm_name || '',
                    appData.province || '',
@@ -4648,7 +4648,7 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
     if (existingProfile.rows.length) {
       profile = await pool.query(
         `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active',
-           profile_status = 'active', is_active = true, verification_status = 'verified', updated_date = NOW()
+           profile_status = 'active', is_active = true, verification_status = 'registry_checked', updated_date = NOW()
          WHERE id = $2 RETURNING id`,
         [req.body.tier || 'professional', existingProfile.rows[0].id]
       );
@@ -4656,7 +4656,7 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
       profile = await pool.query(
         `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
           specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'active', true, 'verified')
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 'active', true, 'registry_checked')
          RETURNING id`,
         [`app_${req.params.id}_${Date.now()}`, memberUserId, firstName, lastName, a.email, a.firm_name || '',
          a.province || '',
