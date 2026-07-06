@@ -2060,7 +2060,7 @@ app.post('/api/friction/sme-match-request', async (req, res) => {
       frictionScore: frictionScore,
       estimatedMatches: cpaMatches.length,
       nextSteps: {
-        matchingTimeframe: '24 hours',
+        matchingTimeframe: '1 business day',
         followUpMethod: 'email',
         expectedResults: `${cpaMatches.length} highly compatible CPAs identified`
       },
@@ -2185,7 +2185,7 @@ app.post('/api/friction/cpa-registration', async (req, res) => {
       winRateProjection: '25% → 70%+',
       potentialMatches: potentialClients.length,
       nextSteps: {
-        onboardingCall: 'Within 24 hours',
+        onboardingCall: 'Within 1 business day',
         firstClient: 'Within 72 hours',
         fullIntegration: 'Within 1 week'
       },
@@ -4981,7 +4981,7 @@ app.post('/api/admin/c2-click-recovery', async (req, res) => {
 <p style="margin:24px 0;text-align:center;">
   <a href="${url}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:14px 32px;border-radius:6px;font-weight:600;">Find My CPA Match &rarr;</a>
 </p>
-<p>Takes 90 seconds. You'll get matched with up to 5 CPAs in ${prov === 'ON' ? 'Ontario' : prov} within 24 hours.</p>
+<p>Takes 90 seconds. You'll get matched with up to 5 CPAs in ${prov === 'ON' ? 'Ontario' : prov} within 1 business day.</p>
 <p>Sorry about the friction.</p>
 <p style="margin-top:28px;">Arthur Kostaras<br>Founder, CanadaAccountants.app<br><a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a></p>
 <p style="color:#999;font-size:11px;margin-top:24px;">Reply STOP if you don't want any more emails from us.</p>
