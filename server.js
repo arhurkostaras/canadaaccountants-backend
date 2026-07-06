@@ -1783,7 +1783,12 @@ async function runCPAMatchingAlgorithm(clientProfile) {
       }
 
       // Factor 4: Regulatory Verification (pass/fail gate)
-      let regScore = cpa.verification_status === 'verified' ? 100 : (cpa.designation ? 70 : 30);
+      // registry_checked scores 70: paid profiles were stamped 'verified' (100) by the
+      // payment webhook before ruling B8; the weight is 0.00 so only the <50 gate below
+      // matters, and 70 keeps the gate open exactly as 100 did. Eligibility unchanged.
+      let regScore = cpa.verification_status === 'verified' ? 100
+        : cpa.verification_status === 'registry_checked' ? 70
+        : (cpa.designation ? 70 : 30);
 
       // Factor 5: Geographic Proximity (20%)
       let geoScore = 50;
