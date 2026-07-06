@@ -191,7 +191,7 @@ async function generateOutreachTemplate(profile, platform = 'investing') {
   };
   const p = platformMap[platform] || platformMap.investing;
 
-  const prompt = `Write a short, professional email that a Canadian ${p.title} can send to their ${p.audience} announcing that their verified profile is now live on ${p.name}.
+  const prompt = `Write a short, professional email that a Canadian ${p.title} can send to their ${p.audience} announcing that their professional profile is now live on ${p.name}.
 
 Details:
 Name: ${profile.first_name} ${profile.last_name}
@@ -204,7 +204,7 @@ Requirements:
 - Subject line first (on its own line, prefixed with "Subject: ")
 - Keep body under 120 words
 - Professional but personal tone
-- Mention the verified profile and what it means for them
+- Mention the profile and what it means for them; never call the profile "verified"
 - Include a subtle CTA to view the profile
 - Do NOT include placeholder URLs — just say "my profile on ${p.name}"
 - Sign off with just the first name
@@ -234,7 +234,7 @@ Write the email now:`;
     return { subject, body };
   } catch (err) {
     return {
-      subject: 'My verified profile is now live',
+      subject: 'My professional profile is now live',
       body: 'Your outreach template is being generated — check back in a few minutes.'
     };
   }

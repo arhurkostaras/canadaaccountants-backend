@@ -1808,7 +1808,7 @@ const CPA_ACQUISITION_TEMPLATE = buildClaimEmail({
     { bold: 'Control your listing', text: 'add your specializations, bio, and credentials' },
     { bold: 'Receive AI-matched leads', text: 'get introduced to businesses that fit your practice' },
     { bold: 'Appear in priority search results', text: 'claimed profiles rank higher than unclaimed ones' },
-    { bold: 'Build your verified trust profile', text: 'stand out from the {{total_cpas}}+ other CPAs listed' },
+    { bold: 'Build your registry-checked trust profile', text: 'stand out from the {{total_cpas}}+ other CPAs listed' },
   ],
   closingLine: "Claiming takes under 2 minutes. You'll verify your identity and can immediately update what business owners see when they find you.",
   ctaUrl: 'https://canadaaccountants.app/claim-profile',
@@ -1822,14 +1822,14 @@ const SME_ACQUISITION_TEMPLATE = {
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#333;">
       <h2 style="color:#1e293b;">Hi there,</h2>
       <p>Canadian businesses spend <strong>months</strong> searching for the right CPA. That's time and money you can't afford to lose.</p>
-      <p>CanadaAccountants is an AI-powered platform that matches {{industry}} businesses like {{business_name}} with pre-verified CPAs in <strong>under 24 hours</strong>.</p>
+      <p>CanadaAccountants is an AI-powered platform that matches {{industry}} businesses like {{business_name}} with registry-checked CPAs <strong>within 1 business day</strong>.</p>
       <p>We've already onboarded <strong>{{cpa_count}} qualified CPAs</strong> in {{province}} — covering tax planning, bookkeeping, advisory, and more.</p>
       <div style="background:#f8fafc;border-radius:8px;padding:20px;margin:20px 0;">
         <p style="margin:0 0 12px 0;font-weight:bold;">What makes us different:</p>
         <ul style="margin:0;padding-left:20px;">
           <li><strong>AI-powered matching</strong> — not a generic directory, a precision match to your industry and needs</li>
-          <li><strong>Pre-verified CPAs only</strong> — every professional is credential-checked</li>
-          <li><strong>24-hour turnaround</strong> — submit your needs, get matched tomorrow</li>
+          <li><strong>Registry-checked CPAs</strong> — every professional is cross-checked against provincial CPA registry records</li>
+          <li><strong>1-business-day turnaround</strong> — submit your needs, get matched the next business day</li>
           <li><strong>Built by a CPA</strong> — we understand what businesses actually need</li>
         </ul>
       </div>

@@ -9,7 +9,7 @@ const LIMIT = process.env.LIMIT ? parseInt(process.env.LIMIT) : IDS.length;
 const CONC = 12;
 
 const getInitials = n => String(n || '').split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2);
-const getScoreColor = s => s >= 80 ? '#059669' : s >= 60 ? '#2563eb' : s >= 40 ? '#f59e0b' : '#ef4444';
+const getScoreColor = s => s >= 80 ? 'var(--success)' : s >= 60 ? 'var(--gold)' : s >= 40 ? 'var(--gold-bright)' : 'var(--danger)';
 function fetchJSON(url) {
   return new Promise((res, rej) => {
     https.get(url, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => { try { res({ status: r.statusCode, json: JSON.parse(d) }); } catch (e) { rej(e); } }); }).on('error', rej);
@@ -25,7 +25,7 @@ function buildPage(data, id) {
     ? designations.map(d => `<span class="badge badge-designation"><i class="fas fa-award"></i> ${d}</span>`).join('')
     : '<span class="badge badge-designation"><i class="fas fa-user-tie"></i> CPA</span>';
   const claimBadge = p.claimed
-    ? '<span class="badge badge-claimed"><i class="fas fa-check-circle"></i> Verified Profile</span>'
+    ? '<span class="badge badge-claimed"><i class="fas fa-check-circle"></i> Claimed Profile</span>'
     : '<span class="badge badge-unclaimed"><i class="fas fa-info-circle"></i> Unclaimed &mdash; Basic Listing</span>';
   const firmDisplay = p.firm_name || `Listed in ${p.province || 'Canadian'} CPA directory`;
   const location = [p.city, p.province].filter(Boolean).join(', ');
@@ -49,7 +49,7 @@ function buildPage(data, id) {
                 <!-- Profile Hero -->
                 <section class="profile-hero">
                     <div class="profile-avatar">${getInitials(p.name)}</div>
-                    <h1 class="profile-name">${p.name}${p.founding_member ? '<span style="display:inline-block;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;margin-left:8px;text-transform:uppercase;letter-spacing:0.5px;">Founding Member</span>' : ''}</h1>
+                    <h1 class="profile-name">${p.name}${p.founding_member ? '<span style="display:inline-block;background:var(--gold);color:var(--ink);font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;margin-left:8px;text-transform:uppercase;letter-spacing:0.5px;">Founding Member</span>' : ''}</h1>
                     <p class="profile-firm">${firmDisplay}</p>
                     ${location ? `<p class="profile-location"><i class="fas fa-map-marker-alt"></i> ${location}</p>` : ''}
                     <div class="badges">
@@ -80,7 +80,7 @@ function buildPage(data, id) {
                         </div>
                         <div class="score-section">
                             <div class="score-circle-container">
-                                <div class="score-circle" style="--score: ${seo.score}; background: conic-gradient(${scoreColor} ${seo.score * 3.6}deg, rgba(255,255,255,0.08) 0deg);">
+                                <div class="score-circle" style="--score: ${seo.score}; background: conic-gradient(${scoreColor} ${seo.score * 3.6}deg, rgba(241,234,220,0.08) 0deg);">
                                     <div class="score-circle-inner">
                                         <div class="score-number" style="color: ${scoreColor};">${seo.score}</div>
                                         <div class="score-label">/ 100</div>
@@ -105,7 +105,7 @@ function buildPage(data, id) {
                         <h2>Take Control of Your Profile</h2>
                         <p>Edit your bio, add specializations, and manage what clients see.</p>
                         <a href="${claimUrl}" class="btn-cta">Take Control <i class="fas fa-arrow-right"></i></a>
-                        ${!p.claimed ? `<div style="margin-top:14px;"><button id="organicClaimBtn" data-pid="${p.id}" class="btn-cta" style="background:transparent;border:1px solid var(--primary-blue,#2563eb);color:var(--primary-blue,#2563eb);cursor:pointer;">Is this you? Claim this profile</button><div id="organicClaimMsg" style="display:none;margin-top:10px;font-size:14px;color:#10b981;"></div></div>` : ''}
+                        ${!p.claimed ? `<div style="margin-top:14px;"><button id="organicClaimBtn" data-pid="${p.id}" class="btn-cta" style="background:transparent;border:1px solid var(--gold);color:var(--gold);cursor:pointer;">Is this you? Claim this profile</button><div id="organicClaimMsg" style="display:none;margin-top:10px;font-size:14px;color:var(--success);"></div></div>` : ''}
                     </div>
                 </div>`;
   const title = `${p.name} — CPA Profile | CanadaAccountants.app`;
@@ -130,10 +130,12 @@ function buildPage(data, id) {
     <meta property="og:image" content="https://canadaaccountants.app/icon-512.png">
     <meta property="og:site_name" content="CanadaAccountants">
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/assets/phronisi-tokens.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="/assets/profile-page.css">
     <title>${title}</title>
+<style id="phronisi-type">body{font-family:var(--font-body)}h1,h2,h3,.section-title{font-family:var(--font-display)}</style>
 </head>
 <body>
     <nav class="nav">

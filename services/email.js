@@ -145,7 +145,7 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
       subject: `We've got your request — a CPA match in ${contactInfo.city || contactInfo.location || 'your area'}`,
       html: wrapInBrandTemplate(`
         <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${contactInfo.name || 'there'},</p>
-        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Thanks for reaching out${request.painPoint ? ' about ' + request.painPoint : ''}. Here's exactly what happens next: I'll match you with a CPA who fits &mdash; you'll have an introduction in your inbox within 24 hours. I personally review every request at this stage, so a real person (me) is reading yours. If you want to add anything, just reply to this email; it comes straight to me.</p>
+        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Thanks for reaching out${request.painPoint ? ' about ' + request.painPoint : ''}. Here's exactly what happens next: I'll match you with a CPA who fits &mdash; you'll have an introduction in your inbox within 1 business day. I personally review every request at this stage, so a real person (me) is reading yours. If you want to add anything, just reply to this email; it comes straight to me.</p>
         <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
         <p style="margin:18px 0 0;color:#888888;font-size:12px;line-height:1.6;">You're receiving this because you submitted a match request at canadaaccountants.app. We use your details only to match you with a CPA and follow up. <a href="https://canadaaccountants.app/privacy-policy" style="color:#2563eb;">Privacy policy</a> &middot; reply "unsubscribe" to opt out.</p>
       `),
@@ -168,7 +168,7 @@ async function sendCPAOnboardingEmail(registrationId, request, potentialClients)
       <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${contactInfo.name || 'there'},</p>
       <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Your friction elimination registration is complete. Here's what happens next:</p>
       <ol style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">
-        <li><strong>Onboarding call</strong> — within 24 hours</li>
+        <li><strong>Onboarding call</strong> — within 1 business day</li>
         <li><strong>First client match</strong> — within 72 hours</li>
         <li><strong>Full integration</strong> — within 1 week</li>
       </ol>
