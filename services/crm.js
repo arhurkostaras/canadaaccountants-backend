@@ -1168,7 +1168,7 @@ class SequenceEngine {
       checkout_enterprise_url: recipientEmail ? `${checkoutBase}/enterprise${checkoutQuery}` : `${baseUrl}/pricing`,
       pricing_url: `${baseUrl}/pricing`,
       // Featured professional for CAC Day 4 social proof (defaults to count if no permission yet)
-      featured_professional: 'Their profiles now appear in client search results with a verified badge.',
+      featured_professional: 'Their profiles now appear in client search results with a registry-checked badge.',
       // TODO: Replace with named professional once permission is granted
       // e.g., "Nicholas Hanna at Connor Clark & Lunn Private Capital claimed his profile on April 16."
       profile_url: `${baseUrl}/profile?id=${professional.recipient_id || professional.id}`,

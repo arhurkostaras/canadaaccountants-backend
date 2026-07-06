@@ -25,7 +25,7 @@ function buildPage(data, id) {
     ? designations.map(d => `<span class="badge badge-designation"><i class="fas fa-award"></i> ${d}</span>`).join('')
     : '<span class="badge badge-designation"><i class="fas fa-user-tie"></i> CPA</span>';
   const claimBadge = p.claimed
-    ? '<span class="badge badge-claimed"><i class="fas fa-check-circle"></i> Verified Profile</span>'
+    ? '<span class="badge badge-claimed"><i class="fas fa-check-circle"></i> Claimed Profile</span>'
     : '<span class="badge badge-unclaimed"><i class="fas fa-info-circle"></i> Unclaimed &mdash; Basic Listing</span>';
   const firmDisplay = p.firm_name || `Listed in ${p.province || 'Canadian'} CPA directory`;
   const location = [p.city, p.province].filter(Boolean).join(', ');
