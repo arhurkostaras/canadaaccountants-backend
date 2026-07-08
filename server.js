@@ -166,7 +166,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 profileId = existingProfile.rows[0].id;
                 await pool.query(
                   `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active',
-                   profile_status = 'active', verification_status = 'registry_checked', is_active = true, updated_date = NOW()
+                   profile_status = 'active', verification_status = CASE WHEN cpa_profiles.verification_status = 'verified' THEN 'verified' ELSE 'registry_checked' END, is_active = true, updated_date = NOW()
                    WHERE id = $2`,
                   [appTier || 'professional', profileId]
                 );
@@ -644,7 +644,7 @@ DO UPDATE SET
     industries_served = EXCLUDED.industries_served,
     hourly_rate_min = EXCLUDED.hourly_rate_min,
     profile_status = EXCLUDED.profile_status,
-    verification_status = EXCLUDED.verification_status,
+    verification_status = CASE WHEN cpa_profiles.verification_status = 'verified' THEN 'verified' ELSE EXCLUDED.verification_status END,
     updated_date = NOW()
 RETURNING *;
     `;
@@ -4653,7 +4653,7 @@ app.post('/api/admin/applications/:id/create-profile', async (req, res) => {
     if (existingProfile.rows.length) {
       profile = await pool.query(
         `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active',
-           profile_status = 'active', is_active = true, verification_status = 'registry_checked', updated_date = NOW()
+           profile_status = 'active', is_active = true, verification_status = CASE WHEN cpa_profiles.verification_status = 'verified' THEN 'verified' ELSE 'registry_checked' END, updated_date = NOW()
          WHERE id = $2 RETURNING id`,
         [req.body.tier || 'professional', existingProfile.rows[0].id]
       );
