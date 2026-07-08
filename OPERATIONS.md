@@ -363,7 +363,16 @@ range 14671..27470 = 12,800 rows (no_email 12,281, no_firm 12,175, status invali
 
 ---
 
+## 2026-06-24 - Email-auth workstream pointer
+
+2026-06-24 - Email-auth (DMARC/SPF/DKIM) work paused mid-Phase-1. Canonical
+runbook: canadabusinessexits-backend/ops/dmarc-email-auth-runbook.md
+
+---
+
 ## 2026-06-28 - Runbook quarantine: WS decommission Stages 5-7 blocked (maglev)
+
+> Do not remove this section without an explicit ledger entry.
 
 2026-06-28 - Prepended a BLOCKED banner to RUNBOOK_ws_decommission.md after a
 read-only review found the runbook stale relative to the 2026-06-09 maglev
