@@ -1422,7 +1422,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <ul style="margin:16px 0;">
 <li><strong>AI Bio Generator</strong> — creates a polished professional bio from your credentials in seconds</li>
 <li><strong>Profile SEO Score</strong> — shows how you rank and what to improve</li>
-<li><strong>Client Match Notifications</strong> — get notified when someone in your area submits a request</li>
+<li><strong>Client Matching</strong> — claiming makes you matchable to client requests in your area</li>
 </ul>
 <p>Takes 30 seconds:</p>
 <p style="margin:20px 0;text-align:center;">
@@ -1439,7 +1439,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p>Hi {{first_name}},</p>
 <p>{{social_proof_line}} have already claimed their profiles on CanadaAccountants.</p>
 <p>{{featured_professional}}</p>
-<p>Claimed profiles receive direct client match notifications and carry a registry-checked badge that clients look for when choosing a CPA.</p>
+<p>Claimed profiles are matchable to client requests and carry a registry-checked badge that clients look for when choosing a CPA.</p>
 <p>The difference between claimed and unclaimed is who controls what clients see when they search your name.</p>
 <p style="margin:20px 0;text-align:center;">
   <a href="{{claim_url}}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Claim Your Profile &rarr;</a>
@@ -4438,7 +4438,7 @@ function sendApprovalEmail({ email, fullName, appId, sessions }) {
             </tr>
           </table>
 
-          <p style="color:#666;font-size:13px;text-align:center;">All plans include AI-powered client matching, a registry-checked profile listing, and dedicated support.</p>
+          <p style="color:#666;font-size:13px;text-align:center;">All plans include AI-powered client matching and a registry-checked profile listing.</p>
         </div>
         <div style="padding:16px 24px;background:#f8fafc;border-radius:0 0 8px 8px;text-align:center;">
           <p style="color:#999;font-size:11px;margin:0;">Application ID: #${appId} | Questions? Contact <a href="mailto:support@canadaaccountants.app" style="color:#2563eb;">support@canadaaccountants.app</a></p>
