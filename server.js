@@ -1367,7 +1367,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 </td></tr>
 <tr><td style="padding:28px 24px;font-family:Arial,sans-serif;color:#111;line-height:1.6;font-size:15px;">
 <p>Hi {{first_name}},</p>
-<p><strong>{{social_proof_line}}</strong> have already claimed their profiles on CanadaAccountants. Momentum is building — and claimed profiles are the ones showing up first when businesses search.</p>
+<p><strong>{{social_proof_line}}</strong> have already claimed their profiles on CanadaAccountants. Momentum is building.</p>
 <p>Don't be the one who misses out while peers in your market get the visibility.</p>
 <p style="text-align:center;margin:28px 0;"><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:6px;text-decoration:none;font-weight:600;font-size:15px;">Claim Before More Do</a></p>
 <p style="color:#888;font-size:13px;">Two minutes. Free. Yours to control.</p>
@@ -1439,7 +1439,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p>Hi {{first_name}},</p>
 <p>{{social_proof_line}} have already claimed their profiles on CanadaAccountants.</p>
 <p>{{featured_professional}}</p>
-<p>Claimed profiles appear higher in search results, receive direct client match notifications, and carry a registry-checked badge that clients look for when choosing a CPA.</p>
+<p>Claimed profiles receive direct client match notifications and carry a registry-checked badge that clients look for when choosing a CPA.</p>
 <p>The difference between claimed and unclaimed is who controls what clients see when they search your name.</p>
 <p style="margin:20px 0;text-align:center;">
   <a href="{{claim_url}}" style="display:inline-block;background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;">Claim Your Profile &rarr;</a>
@@ -1488,7 +1488,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p>Your professional profile is now listed on <strong>CanadaAccountants</strong> — Canada's new platform connecting businesses with qualified accountants and CPAs.</p>
 <p>We pulled your details from public CPA directory records. Here's what claiming your profile gets you:</p>
 <ul>
-<li><strong>Registry-checked badge</strong> — shows clients your listing is cross-checked against provincial CPA registry records</li>
+<li><strong>Claimed badge</strong> — shows clients you're actively engaged</li>
 <li><strong>Full profile control</strong> — add your photo, bio, specialties, and designations</li>
 <li><strong>Client inquiries</strong> — receive contact requests directly through the platform</li>
 </ul>
@@ -1501,7 +1501,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
             subject_line: 'Businesses in {{city}} are searching — is your profile ready?',
             body_template: `<p>Hi {{first_name}},</p>
 <p>We wanted to follow up — your profile on CanadaAccountants is live but unclaimed.</p>
-<p>Claimed profiles appear higher in search results and include a registry-checked badge that prospective clients look for when choosing an accountant.</p>
+<p>Claimed profiles include a registry-checked badge that prospective clients look for when choosing an accountant.</p>
 <p>It takes less than 2 minutes:</p>
 <p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
@@ -1512,7 +1512,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
             subject_line: '{{total_professionals}}+ CPAs are already listed on CanadaAccountants',
             body_template: `<p>Hi {{first_name}},</p>
 <p>Over <strong>{{total_professionals}} accountants and CPAs</strong> across Canada are already listed on CanadaAccountants — and many have claimed their profiles to stand out to prospective clients.</p>
-<p>Your {{city}} listing is still unclaimed. Registry-checked accountants get priority placement in local search results and a trust badge that businesses look for.</p>
+<p>Your {{city}} listing is still unclaimed. Claimed profiles display a claimed badge that businesses look for.</p>
 <p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
 <p style="color:#888;font-size:13px;">No cost. Takes under 2 minutes.</p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
@@ -1534,7 +1534,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
             subject_line: 'Last note about your CanadaAccountants profile',
             body_template: `<p>Hi {{first_name}},</p>
 <p>This is our last email about your unclaimed profile on CanadaAccountants.</p>
-<p>If you'd like to claim it and get your registry-checked badge, the link below will always work. If not, no worries — your basic listing stays as-is and we won't email you about this again.</p>
+<p>If you'd like to claim it, the link below will always work. If not, no worries — your basic listing stays as-is and we won't email you about this again.</p>
 <p><a href="{{claim_url}}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Claim Your Profile</a></p>
 <p>All the best,<br>The CanadaAccountants Team</p>
 <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}">Unsubscribe</a></p>`,
@@ -1560,7 +1560,7 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
             delay_days: 0,
             subject_line: 'Welcome to CanadaAccountants, {{first_name}}!',
             body_template: `<p>Hi {{first_name}},</p>
-<p>Congratulations — your profile on <strong>CanadaAccountants</strong> is now claimed and live!</p>
+<p>Congratulations — your profile on <strong>CanadaAccountants</strong> is now live!</p>
 <p>CPAs typically spend hundreds of hours a year on client development — networking, referrals, word of mouth. Your CanadaAccountants profile puts you in front of businesses that are already searching for a CPA in {{city}}. That's time back in your week.</p>
 <p>Here are 3 things you can do right now to start attracting clients:</p>
 <ol>
@@ -1628,13 +1628,12 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Priority in search results</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
 <tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Direct client match notifications</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
 <tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Featured profile placement in {{city}}</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
-<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;"><strong>Registry-checked badge</strong></td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;border-bottom:1px solid #e2e8f0;color:#059669;background:#fafcff;">✓</td></tr>
 <tr><td style="padding:10px 12px;">Analytics &amp; profile views</td><td style="text-align:center;padding:10px 12px;color:#9ca3af;">—</td><td style="text-align:center;padding:10px 12px;color:#059669;background:#fafcff;">✓</td></tr>
 </table>
 </td></tr>
 
 <tr><td style="padding:18px 32px 8px;color:#111;line-height:1.65;font-size:15px;">
-<p>The honest version: <strong>your free profile shows up in the directory</strong>. That is meaningful — clients searching CanadaAccountants can find you. But you're not at the top of {{city}} results, you don't get notified when a client matches your specialty, and you don't carry the registry-checked badge that signals "this CPA is actively engaged."</p>
+<p>The honest version: <strong>your free profile shows up in the directory</strong>. That is meaningful — clients searching CanadaAccountants can find you. But you're not at the top of {{city}} results, you don't get notified when a client matches your specialty.</p>
 <p>Here's the math: at $150/hour, five hours of networking costs $750. Your CanadaAccountants subscription starts at $199/month. Clients who find you through the platform skip the networking entirely — they're already searching for a CPA in {{city}}. One new client covers your subscription many times over.</p>
 <p>If that math works for your practice, pick a tier:</p>
 </td></tr>
@@ -7972,7 +7971,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
   <p>Hi ${cpa.first_name || 'there'},</p>
   <p><strong>${claimed} CPAs in ${cpa.province || 'your province'}</strong> have already claimed their profiles on CanadaAccountants this month.</p>
-  <p>Claimed profiles appear higher in search results and include registry-checked badges, AI bios, and direct client contact — all at no cost.</p>
+  <p>Claimed profiles include registry-checked badges, AI bios, and direct client contact — all at no cost.</p>
   <p>Don't let competitors in ${cpa.city || 'your city'} get ahead.</p>
   <p style="text-align:center;"><a href="${claimRedirectUrl(cpa.id)}" style="display:inline-block;background:#059669;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">Claim Your Profile Now</a></p>
   <p style="color:#999;font-size:11px;">CanadaAccountants.app | Toronto, ON, Canada<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p>
@@ -8067,7 +8066,6 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
   <p>Upgraded members get:</p>
   <ul style="color:#334155;">
     <li><strong>Priority placement</strong> in ${r.city || r.province || 'local'} search results</li>
-    <li><strong>Registry-checked badge</strong> that builds instant trust</li>
     <li><strong>AI-powered client matching</strong> based on specialization</li>
     <li><strong>Monthly analytics report</strong> with competitor benchmarks</li>
   </ul>
