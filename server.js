@@ -995,6 +995,22 @@ const crmIntelligence = new CRMIntelligence({
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cbe_referrals_cpa_user_id ON cbe_referrals(cpa_user_id)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cbe_referrals_client_email ON cbe_referrals(client_email)`);
+    // Evidence log for the webinar-invite message class (dark; see services/webinar-invite.js).
+    // Every real send of webinar_invite_ai_for_cpas_v1 writes one row: CASL basis + evidence
+    // pointer + template hash + Resend id. Dry runs log to console only, never here.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS webinar_invite_log (
+        id BIGSERIAL PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        message_class VARCHAR(64) NOT NULL,
+        casl_basis VARCHAR(16) NOT NULL CHECK (casl_basis IN ('express', 'ebr')),
+        evidence_ref TEXT NOT NULL,
+        template_hash VARCHAR(16) NOT NULL,
+        resend_email_id VARCHAR(64),
+        sent_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_webinar_invite_log_email ON webinar_invite_log(email)`);
     // Lightweight CRM — unified Leads admin view (mirrors INV/CBE pattern)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS manual_leads (
@@ -7278,6 +7294,48 @@ app.post('/api/admin/founder-outreach/auto-send', authenticateToken, requireAdmi
   } catch (err) {
     console.error('[FounderOutreach] auto-send error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Webinar invite (message class webinar_invite_ai_for_cpas_v1, DARK) ──────
+// Spec: ~/phronisi-ops/docs/webinar-invite-ai-for-cpas-2026-07-13.md
+// Both routes sit behind the blanket /api/admin auth. No cron calls these.
+// Preview renders the message; emailPreview=true additionally mails it to
+// ADMIN_EMAIL only (hardcoded recipient, never body-supplied).
+app.post('/api/admin/webinar-invite/preview', async (req, res) => {
+  try {
+    const { renderWebinarInvite } = require('./services/webinar-invite');
+    const { sendEmail } = require('./services/email');
+    const { dateLine, registrationUrl, firstName, emailPreview } = req.body || {};
+    const rendered = renderWebinarInvite({ firstName: firstName || 'Preview', dateLine, registrationUrl });
+    let previewSend = null;
+    if (emailPreview === true) {
+      const adminEmail = process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com';
+      previewSend = await sendEmail({
+        to: adminEmail,
+        subject: `[PREVIEW] ${rendered.subject}`,
+        html: rendered.html,
+        text: rendered.text,
+        from: 'Arthur Kostaras <arthur@canadaaccountants.app>',
+        replyTo: 'arthur@canadaaccountants.app',
+      });
+    }
+    res.json({ success: true, templateHash: rendered.templateHash, subject: rendered.subject, text: rendered.text, html: rendered.html, previewSend });
+  } catch (err) {
+    console.error('[WebinarInvite] preview error:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/webinar-invite/send', async (req, res) => {
+  try {
+    const { sendWebinarInvites } = require('./services/webinar-invite');
+    const { cohort, dateLine, registrationUrl } = req.body || {};
+    const results = await sendWebinarInvites(pool, { cohort, dateLine, registrationUrl });
+    res.json({ success: true, ...results });
+  } catch (err) {
+    console.error('[WebinarInvite] send error:', err.message);
+    res.status(400).json({ error: err.message });
   }
 });
 
