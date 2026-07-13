@@ -8,6 +8,18 @@ const IDS = fs.readFileSync(process.env.IDS_FILE || '/tmp/tier1/ids.txt', 'utf8'
 const LIMIT = process.env.LIMIT ? parseInt(process.env.LIMIT) : IDS.length;
 const CONC = 12;
 
+// Phronisi provenance footer (Lane B, 2026-07-13). PHRONISI_ENTITY must hold the
+// confirmed legal entity name before any generation run; the CLI path below refuses
+// to run while it is null so a placeholder can never reach a public page. buildPage
+// stays callable for previews (preview-claimed.js) with a visible pending marker.
+const PHRONISI_ENTITY = null; // set to the confirmed entity name (awaiting Arthur's confirmation)
+const entityDisplay = PHRONISI_ENTITY ? `${PHRONISI_ENTITY}${/\.$/.test(PHRONISI_ENTITY) ? '' : '.'}` : '[entity name pending].';
+const provenanceFooter = `
+    <footer style="padding:32px 24px;text-align:center;border-top:1px solid rgba(241,234,220,0.08);">
+        <p style="color:var(--text-secondary);font-size:12px;max-width:720px;margin:0 auto 10px;">CanadaAccountants.app is part of the Phronisi network of Canadian professional platforms: CanadaAccountants, CanadaLawyers, CanadaInvesting, and Canada Business Exits. Operated by ${entityDisplay}</p>
+        <p style="font-size:12px;margin:0;"><a href="https://phronisi.app" rel="noopener" style="color:var(--text-secondary);text-decoration:none;">Built by Phronisi</a></p>
+    </footer>`;
+
 const getInitials = n => String(n || '').split(' ').filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2);
 const getScoreColor = s => s >= 80 ? 'var(--success)' : s >= 60 ? 'var(--gold)' : s >= 40 ? 'var(--gold-bright)' : 'var(--danger)';
 function fetchJSON(url) {
@@ -152,7 +164,7 @@ function buildPage(data, id) {
             </div>
         </div>
     </nav>
-    <div id="page-content">${pageContent}</div>
+    <div id="page-content">${pageContent}</div>${provenanceFooter}
     <script id="jsonld-script" type="application/ld+json">${jsonld}</script>
     <script src="/assets/profile-page.js"></script>
 </body>
@@ -162,6 +174,10 @@ function buildPage(data, id) {
 module.exports = { buildPage };
 if (require.main !== module) return;
 (async () => {
+  if (!PHRONISI_ENTITY) {
+    console.error('REFUSED: PHRONISI_ENTITY is not set. Expected the confirmed legal entity name for the "Operated by" network disclosure; got null. Fix: set PHRONISI_ENTITY at the top of this file once Arthur confirms the entity name, then re-run. No pages were generated.');
+    process.exit(1);
+  }
   const ids = IDS.slice(0, LIMIT);
   let ok = 0, fail = 0, gone = 0;
   for (let i = 0; i < ids.length; i += CONC) {
