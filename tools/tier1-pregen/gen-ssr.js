@@ -12,7 +12,7 @@ const CONC = 12;
 // confirmed legal entity name before any generation run; the CLI path below refuses
 // to run while it is null so a placeholder can never reach a public page. buildPage
 // stays callable for previews (preview-claimed.js) with a visible pending marker.
-const PHRONISI_ENTITY = null; // set to the confirmed entity name (awaiting Arthur's confirmation)
+const PHRONISI_ENTITY = 'Phronisi'; // confirmed by Arthur 2026-07-13: brand name as operator, no legal suffix
 const entityDisplay = PHRONISI_ENTITY ? `${PHRONISI_ENTITY}${/\.$/.test(PHRONISI_ENTITY) ? '' : '.'}` : '[entity name pending].';
 const provenanceFooter = `
     <footer style="padding:32px 24px;text-align:center;border-top:1px solid rgba(241,234,220,0.08);">
