@@ -354,6 +354,7 @@ async function sendReferralEmail({ referrerName, refereeName, refereeEmail, refe
 
 module.exports = {
   sendEmail,
+  wrapInBrandTemplate,
   sendFrictionMatchNotification,
   sendCPAOnboardingEmail,
   sendCPARegistrationConfirmation,
