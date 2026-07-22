@@ -702,6 +702,17 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// An idle pooled client dropped by the server emits 'error' on the Pool; with no
+// listener Node treats it as fatal and the process dies, taking every in-memory
+// cron with it (Sentry NODE-F, 2026-07-19). The pool discards the dead client and
+// hands out a fresh one on the next query, so log-and-continue is the correct scope.
+pool.on('error', (err) => {
+  console.error('[pg pool] idle client error:', err.message);
+  if (process.env.SENTRY_DSN && typeof Sentry.captureException === 'function') {
+    Sentry.captureException(err, { extra: { context: 'pg pool idle client' } });
+  }
+});
+
 // Resend webhook health check: unauthenticated, mounted before any auth middleware.
 // NOT the receiver. Returns freshness of the events table so a probe can tell
 // whether real signed events are landing. The receiver still rejects unsigned POSTs.
