@@ -1384,6 +1384,29 @@ class OutreachEngine {
   // RESEND WEBHOOK HANDLER
   // =====================================================
 
+  // Founder-outreach sends log to founder_outreach_log, not the campaign
+  // tables, so the lookup above misses them and their bounce/complaint events
+  // used to drop silently. Route those into the same suppression list the
+  // batch-send gate reads, and stamp the log row's status so the outcome is
+  // visible next to the send.
+  async _handleFounderOutreachEvent(type, emailId) {
+    const statusMap = { 'email.bounced': 'bounced', 'email.complained': 'complained' };
+    const newStatus = statusMap[type];
+    if (!newStatus) return;
+    const row = await this.pool.query(
+      `SELECT id, recipient_email FROM founder_outreach_log WHERE resend_id = $1 LIMIT 1`,
+      [emailId]
+    );
+    if (row.rows.length === 0) return;
+    const rec = row.rows[0];
+    await this.pool.query(`UPDATE founder_outreach_log SET status = $2 WHERE id = $1`, [rec.id, newStatus]);
+    await this.pool.query(
+      `INSERT INTO outreach_unsubscribes (email, reason, unsubscribed_at) VALUES ($1, $2, NOW()) ON CONFLICT (email) DO NOTHING`,
+      [rec.recipient_email.toLowerCase(), newStatus]
+    );
+    console.log(`[Outreach] Founder-outreach ${newStatus}: ${rec.recipient_email} added to outreach_unsubscribes`);
+  }
+
   async handleResendWebhook(event) {
     const { type, data } = event;
     const emailId = data?.email_id;
@@ -1398,7 +1421,10 @@ class OutreachEngine {
       [emailId]
     );
 
-    if (emailResult.rows.length === 0) return;
+    if (emailResult.rows.length === 0) {
+      await this._handleFounderOutreachEvent(type, emailId);
+      return;
+    }
 
     const outreachEmail = emailResult.rows[0];
     const campaignId = outreachEmail.campaign_id;
