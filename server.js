@@ -353,6 +353,17 @@ const requireCPA = (req, res, next) => {
   next();
 };
 
+// Founder-outreach batch send (Monday Cowork hand-off). Registered ABOVE the
+// /api/admin umbrella because it authenticates with a static X-Admin-Token
+// (FOUNDER_OUTREACH_TOKEN) instead of the admin JWT; the handler is the auth
+// gate. Replaces the old single-recipient /founder-outreach/send route.
+const { createFounderOutreachSendHandler } = require('./routes/founder-outreach-send');
+app.post('/api/admin/founder-outreach/send', createFounderOutreachSendHandler({
+  getPool: () => pool,
+  sendEmail,
+  getOutreachEngine: () => outreachEngine,
+}));
+
 // Admin namespace umbrella — applies authenticateToken + requireAdmin to ALL /api/admin/* routes.
 // Defense-in-depth against the "developer forgot to add middleware on new admin route" failure mode.
 // Per-route middleware on individual admin routes is still load-bearing; the umbrella backstops it.
@@ -1173,6 +1184,9 @@ const crmIntelligence = new CRMIntelligence({
       )
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_founder_outreach_log_email ON founder_outreach_log (recipient_email, sent_at)`);
+    // Batch send endpoint (routes/founder-outreach-send.js) logs subject + status
+    await pool.query(`ALTER TABLE founder_outreach_log ADD COLUMN IF NOT EXISTS subject TEXT`);
+    await pool.query(`ALTER TABLE founder_outreach_log ADD COLUMN IF NOT EXISTS status VARCHAR(30)`);
 
     // Inbound mail ingestion (Section 4.0 of campaign brief v1.7)
     await pool.query(`
@@ -7174,55 +7188,10 @@ arthur@negotiateandwin.com`;
   return { subject, html, text };
 }
 
-// POST /api/admin/founder-outreach/send
-// Sends founder email to a single recipient (API, not link-triggered)
-app.post('/api/admin/founder-outreach/send', async (req, res) => {
-  try {
-    const { email, firstName, platform } = req.body || {};
-    if (!email) return res.status(400).json({ error: 'email required' });
-
-    // 90-day dedupe
-    const recent = await pool.query(
-      `SELECT id FROM founder_outreach_log WHERE recipient_email = $1 AND sent_at > NOW() - INTERVAL '90 days' LIMIT 1`,
-      [email]
-    );
-    if (recent.rows.length > 0) {
-      return res.status(409).json({ error: 'already sent within 90 days' });
-    }
-
-    const platformMap = {
-      accountants: { domain: 'canadaaccountants.app', from: 'Arthur Kostaras <arthur@canadaaccountants.app>', replyTo: 'arthur@canadaaccountants.app' },
-      lawyers: { domain: 'canadalawyers.app', from: 'Arthur Kostaras <arthur@canadalawyers.app>', replyTo: 'arthur@canadalawyers.app' },
-      investing: { domain: 'canadainvesting.app', from: 'Arthur Kostaras <arthur@canadainvesting.app>', replyTo: 'arthur@canadainvesting.app' }
-    };
-    const platformKey = platform || 'accountants';
-    const pconf = platformMap[platformKey] || platformMap.accountants;
-    const { subject, html, text } = buildFounderEmail({ firstName, platformDomain: pconf.domain });
-
-    const result = await sendEmail({
-      to: email,
-      subject,
-      html,
-      text,
-      from: pconf.from,
-      replyTo: pconf.replyTo
-    });
-
-    if (!result || result.success === false) {
-      return res.status(500).json({ error: 'send failed', detail: result });
-    }
-
-    await pool.query(
-      `INSERT INTO founder_outreach_log (recipient_email, recipient_name, platform, resend_id) VALUES ($1, $2, $3, $4)`,
-      [email, firstName || null, platformKey, result.id || null]
-    );
-
-    res.json({ success: true, id: result.id });
-  } catch (err) {
-    console.error('[FounderOutreach] send error:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+// POST /api/admin/founder-outreach/send now lives in routes/founder-outreach-send.js
+// (batch endpoint, X-Admin-Token auth), mounted above the /api/admin umbrella.
+// The old single-recipient handler was removed 2026-08-11; its path is fully
+// shadowed by the batch route, which is registered earlier in the stack.
 
 // Build the Monday founder digest email (HTML body) from 3 platforms' candidate lists
 async function buildFounderDigestHTML() {
