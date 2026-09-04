@@ -423,3 +423,24 @@ explicitly per the Railway deploy discipline; NEVER touch a postgres service):
 
 Order within each step does not matter; order BETWEEN steps does. Never set the
 new value as primary anywhere before step 2 has covered all four services.
+
+## 2026-09-04 - Privacy removal batch on LAW touches ACC's scraped_smes (item #6)
+
+Pointer entry: the removal work itself is LAW-scoped and lives in
+canadalawyers-backend (branch claude/new-session-y0bec6, docs/removals/). It is
+recorded here only because one item crosses into ACC data.
+
+- Five CanadaLawyers.app profiles are being hard-deleted at the individuals'
+  request, with a DB-trigger suppression list so the LIB registry sync cannot
+  re-create them. LAW-only; no ACC tables involved.
+- Item #6 (a named contact on the "GE Renewable Energy Canada Inc." company
+  record) is a scraped_smes contact, and ACC production (turntable:13986) is the
+  SOURCE the LAW and INV backends import from via /api/admin/sme/export.
+  Clearing it on LAW alone would be undone by the next import. Action: run
+  `node scripts/profile-removal.js sme-contact --update` from the LAW repo with
+  ACC_DATABASE_URL and INV_DATABASE_URL set, so the contact columns are cleared
+  in all three copies (company row kept). ACC-side result to be pasted into
+  canadalawyers-backend/docs/removals/2026-09-04-removal-log.md.
+- Fleet note (BACKPRESSURE candidate): there is no cross-platform
+  do-not-contact / suppression propagation. An address suppressed on LAW is not
+  suppressed on ACC or INV. Not fixed here; flagged for the next ledger review.
