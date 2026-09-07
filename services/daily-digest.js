@@ -387,11 +387,13 @@ async function collectDigestData(deps) {
   else if (c.gate_paused === false) quietByPlatform.ACC.push('deliverability gate clear');
 
   // 2. Peer feeds (LAW, INV)
+  const feedOk = {};
   for (const peer of PEER_FEEDS) {
     const feed = await peerFeed(peer, sinceISO);
     const before = actions.failures.length;
     mergePeerFeed({ ...feed, platform: peer.platform }, actions, quietByPlatform[peer.platform]);
     if (actions.failures.length > before) healthy[peer.platform] = false;
+    feedOk[peer.platform] = !feed.error && !feed.notDeployed;
   }
 
   // 3. Inbound counts from the peers' /api/inbound-summary (existing HMAC contract)
@@ -423,9 +425,14 @@ async function collectDigestData(deps) {
         if (!quietByPlatform[b.name]) return;
         quietByPlatform[b.name].push(b.ok ? `health ok (sent ${b.sent}, queued ${b.queued}, active ${b.active})` : 'health endpoint unreachable');
       });
-      (p.lawRequests || []).forEach(r => actions.clientRequests.push({
-        platform: 'LAW', name: null, province: null, service: r.pain_point, createdAt: r.created_at, source: 'friction form (demand-attribution)'
-      }));
+      // Fallback only while the LAW digest feed is not serving: once it is, the
+      // same friction requests arrive with name and province and this would
+      // list them twice.
+      if (!feedOk.LAW) {
+        (p.lawRequests || []).forEach(r => actions.clientRequests.push({
+          platform: 'LAW', name: null, province: null, service: r.pain_point, createdAt: r.created_at, source: 'friction form (demand-attribution)'
+        }));
+      }
     } catch (err) {
       console.error('[DailyDigest] pipeline collection failed:', err.message);
       flag('ACC', `pipeline monitor collection failed: ${err.message}`);

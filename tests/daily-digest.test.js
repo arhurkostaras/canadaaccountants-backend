@@ -224,7 +224,8 @@ test('collectDigestData on a Monday: peers merged, real failures flagged, founde
   });
 
   assert.strictEqual(data.dateLabel, '2026-09-07');
-  assert.deepStrictEqual(data.actions.clientRequests.map(c => [c.platform, c.name]), [['LAW', 'Lee'], ['LAW', null]]);
+  // The LAW feed answered, so the demand-attribution fallback (name-less rows) is skipped.
+  assert.deepStrictEqual(data.actions.clientRequests.map(c => [c.platform, c.name]), [['LAW', 'Lee']]);
   assert.ok(data.actions.inboundNeedingHuman.some(m => m.platform === 'LAW' && m.reason === 'breakdown pending approval'));
   const failures = data.actions.failures.map(f => `${f.platform}: ${f.message}`);
   assert.ok(failures.some(f => f.startsWith('ACC: deliverability gate has the platform PAUSED')), failures.join(' | '));
@@ -242,6 +243,20 @@ test('collectDigestData on a Monday: peers merged, real failures flagged, founde
   const out = digest.buildDigest(data);
   assert.match(out.subject, /^Platforms daily — 2026-09-07 — \d+ actions required$/);
   assert.match(out.html, /Monday: founder-outreach candidates \(20\)/);
+});
+
+test('LAW demand-attribution fallback is used only while the LAW feed is not deployed', async () => {
+  const h = (hours) => new Date(WEDNESDAY.getTime() - hours * 3600 * 1000).toISOString();
+  const base = {
+    pool: mockPool({}),
+    now: WEDNESDAY,
+    fetchPeerSummary: async (p) => ({ platform: p.platform, error: 'off' }),
+    collectPipeline: async () => ({ html: NUMBERS_HTML, notes: [], failures: [], backends: [], lawRequests: [{ request_id: 'r1', pain_point: 'tax', created_at: h(5) }] })
+  };
+  const notDeployed = await digest.collectDigestData({ ...base, fetchPeerFeed: async (p) => ({ platform: p.platform, notDeployed: true }) });
+  assert.deepStrictEqual(notDeployed.actions.clientRequests.map(c => [c.platform, c.service, c.source]), [['LAW', 'tax', 'friction form (demand-attribution)']]);
+  const deployed = await digest.collectDigestData({ ...base, fetchPeerFeed: async (p) => ({ platform: p.platform, client_requests: [], crons: {} }) });
+  assert.deepStrictEqual(deployed.actions.clientRequests, []);
 });
 
 test('sendDailyDigest and sendRemovalAlert address arthur@negotiateandwin.com through the injected sender', async () => {
