@@ -423,3 +423,42 @@ explicitly per the Railway deploy discipline; NEVER touch a postgres service):
 
 Order within each step does not matter; order BETWEEN steps does. Never set the
 new value as primary anywhere before step 2 has covered all four services.
+
+---
+
+## 2026-09-07 - Strategy reset: five founder rulings (D1 to D5)
+
+Recorded from the 7 September 2026 triage of the three platforms. Cross-platform
+in effect (ACC, LAW, INV) but logged here, next to the ledger, as the founder's
+written ruling. Each is a "yes" unless marked otherwise.
+
+- D1 - Moratorium lift, narrow form. The 2026-06-10 ACC professional-contact
+  moratorium is lifted ONLY for lead-triggered messages: one message to a
+  professional, sent because a specific client request matched them, with the
+  CASL basis recorded per send (conspicuously published business address,
+  message relevant to the recipient's role, CASL s.10(9)(b)) and the
+  email-keyed unsubscribe in every footer. Cold sequences, founder auto-send
+  and any message not tied to a specific client request stay OFF. Every
+  notify leg that ships under this ruling carries its own flag, default off,
+  separate from FRICTION_NOTIFY_ENABLED, and logs loud when it skips.
+- D2 - Founding Member pricing replaces the $199 / $299 / $599 listing tiers on
+  ACC and LAW: $99 per month, price locked 24 months, capped at 50 per
+  platform, driven by founding_cohort_config. A free claim shows that leads
+  exist; payment reveals them. Existing subscribers are grandfathered and told
+  personally that they now receive leads first. Copy must pass the copy-ban
+  gate (BP-009); no quantified claim the code does not deliver.
+- D3 - Apollo cancelled before the next renewal; Resend Transactional Scale
+  downgraded to the entry tier until send volume justifies more. Neither is
+  re-subscribed without a campaign that needs it.
+- D4 - Every profile removal or correction request is honoured within three
+  business days, without debate. Removal is a hard delete plus a hash-only
+  tombstone (first implemented in canadalawyers-backend, 2026-09-07; ACC and
+  INV get the same shape when their next backend change lands). Requests are
+  never left to the shared inbox: they get a dedicated high-priority alert.
+- D5 - CanadaInvesting is HELD, not sunset: subscriber served, lead loop ported
+  when it exists, no outreach. Day 60 review (early November 2026) uses a hard
+  threshold: fewer than five client requests in 60 days means freeze at zero
+  spend; otherwise it stays on the loop.
+
+Sequencing: D4 first (the lawyers removal backlog), then D3, then D1/D2
+together in the lead-to-claim loop, then D5 on its date.
