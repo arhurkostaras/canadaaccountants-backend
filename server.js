@@ -6219,14 +6219,19 @@ app.post('/api/claim/instant', async (req, res) => {
       [userId, recipient_id]
     );
 
-    // Create cpa_profiles row so dashboard endpoints work
+    // Create cpa_profiles row so dashboard endpoints work.
+    // Conflict target is email: production cpa_profiles is unique on id, cpa_id,
+    // email and referral_code only (pg_indexes, 2026-09-07). ON CONFLICT (user_id)
+    // raised "no unique or exclusion constraint matching the ON CONFLICT
+    // specification" on every call into the catch below, so instant claimants
+    // got no profile row. Same defect and fix as LAW PR #15 (ledger BP-013).
     const scraped = profile.rows[0];
     try {
       await pool.query(
         `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
          specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'free', 'active', 'active', true, 'pending')
-         ON CONFLICT (user_id) DO NOTHING`,
+         ON CONFLICT (email) DO NOTHING`,
         [userId, scraped.first_name, scraped.last_name, email,
          scraped.firm_name, scraped.province || scraped.city,
          scraped.specializations || '[]']
