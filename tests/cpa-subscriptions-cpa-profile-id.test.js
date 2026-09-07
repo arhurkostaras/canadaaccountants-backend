@@ -12,11 +12,14 @@
 // adopts the column's type.
 //
 // The convention is a text compare on both sides (`cs.cpa_profile_id::text =
-// cp.id::text`, `cpa_profile_id::text IN (SELECT id::text ...)`) so the query holds
-// before and after the flag-gated retype migration in server.js
-// (CPA_SUBS_CPA_PROFILE_ID_RETYPE). Once the column is INTEGER in production and
-// the migration block is removed, the casts can go and this test's rule flips to
-// "no cast needed".
+// cp.id::text`, `cpa_profile_id::text IN (SELECT id::text ...)`), which holds under
+// either column type.
+//
+// 2026-09-07 21:24Z: the flag-gated retype (CPA_SUBS_CPA_PROFILE_ID_RETYPE, PR #37)
+// ran in production; the column is INTEGER now and the flag block is removed. The
+// casts and this rule stay as regression insurance: any environment restored from an
+// older dump, or a future column added the same way, would hit the same error, and
+// the text compare costs nothing on a table this size.
 //
 // Note: `cpa_profile_id` is also a column on matches and client_requests, where it
 // is INTEGER and compared to integer params; those never appear beside cp.id or a
