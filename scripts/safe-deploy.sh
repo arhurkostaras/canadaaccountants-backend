@@ -20,4 +20,11 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 echo "Base check passed: HEAD contains origin/main ($(git rev-parse --short origin/main))."
 railway status
-railway up --service "$SERVICE" --detach
+# Upload THIS checkout. Without --path-as-root, railway up archives the "project
+# directory" (the main checkout the Railway link was made in), so a deploy run
+# from a git worktree silently ships a different tree than the one the base
+# check above just approved (observed 2026-09-07 on canadalawyers-backend: two
+# worktree deploys reported SUCCESS and shipped the parent checkout's branch).
+TREE="$(git rev-parse --show-toplevel)"
+echo "Uploading tree: $TREE ($(git rev-parse --short HEAD))"
+railway up --path-as-root --service "$SERVICE" --detach "$TREE"

@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const { Resend } = require('resend');
 const { sendEmail } = require('./email');
 const { buildClaimEmail } = require('../utils/email-template');
+const profileDisputes = require('./profile-disputes');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://canadaaccountants.app';
 const BACKEND_URL = process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app';
@@ -1263,6 +1264,12 @@ class OutreachEngine {
       vars.unsubscribe_url = `${BACKEND_URL}/api/unsubscribe/${unsubToken}`;
     } else {
       vars.unsubscribe_url = `${FRONTEND_URL}/unsubscribe`;
+    }
+
+    // "Correct or remove this profile" footer link ({{dispute_url}}); only a
+    // professional recipient has a profile to dispute.
+    if (emailRecord.recipient_type === 'cpa' && emailRecord.recipient_id) {
+      vars.dispute_url = profileDisputes.disputeUrl(emailRecord.recipient_id);
     }
 
     if (campaign.type === 'cpa' && emailRecord.recipient_type === 'cpa') {
