@@ -144,3 +144,32 @@ test('no query compares cpa_subscriptions.cpa_profile_id to a profile id or inte
   assert.ok(castSites >= 4,
     `expected at least 4 cast comparison sites (found ${castSites}); if sites were removed on purpose, lower this floor in the same PR`);
 });
+
+// Production cpa_subscriptions columns (information_schema, 2026-09-07): id, email,
+// cpa_profile_id, stripe_customer_id, stripe_subscription_id, tier, billing_interval,
+// status, current_period_start, current_period_end, created_at, updated_at. The plan
+// column is `tier`. schema.sql declares `plan_type`, which production never had; five
+// queries named it (webhook upsert, seo-score, pipeline MRR, dashboard/matches) and
+// each raised "column cs.plan_type does not exist" (found 2026-09-07 by the live
+// end-to-end check after the cast fix landed). Same class as BP-012.
+function cpaSubscriptionStatements(src) {
+  // Each match is one template literal that mentions cpa_subscriptions.
+  return (src.match(/`[^`]*\bcpa_subscriptions\b[^`]*`/g) || []);
+}
+
+test('no SQL touching cpa_subscriptions names plan_type (production column is tier)', () => {
+  const offenders = [];
+  for (const file of listJsFiles(ROOT)) {
+    const src = fs.readFileSync(file, 'utf8');
+    if (!src.includes('cpa_subscriptions')) continue;
+    const rel = path.relative(ROOT, file);
+    for (const stmt of cpaSubscriptionStatements(src)) {
+      if (/\bplan_type\b/.test(stmt)) {
+        offenders.push(`${rel}:${lineOf(src, src.indexOf(stmt))} "${stmt.replace(/\s+/g, ' ').slice(0, 120)}"` +
+          `\n    Postgres raises: column plan_type does not exist (production cpa_subscriptions has tier, not plan_type)` +
+          `\n    Expected: tier`);
+      }
+    }
+  }
+  assert.deepStrictEqual(offenders, [], 'cpa_subscriptions statement(s) naming plan_type:');
+});
