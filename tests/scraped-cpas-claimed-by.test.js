@@ -61,7 +61,11 @@ test('no SQL that touches scraped_cpas references claimed_at', () => {
       }
     }
   }
-  assert.ok(scanned >= 50, `expected at least 50 SQL literals naming scraped_cpas, found ${scanned}; the scanner regex is broken`);
+  // Sanity floor for the scanner, not a scope pin: server.js alone carries 49
+  // scraped_cpas literals (2026-09-07), the rest come from services/, tools/,
+  // utils/ and scripts/. 40 trips on a broken regex without tripping on a
+  // narrower scan.
+  assert.ok(scanned >= 40, `expected at least 40 SQL literals naming scraped_cpas, found ${scanned}; the scanner regex is broken`);
   assert.deepStrictEqual(
     offenders,
     [],
