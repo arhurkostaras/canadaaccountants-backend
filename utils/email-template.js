@@ -8,6 +8,10 @@
  *   const template = buildClaimEmail({ platformName, tagline, ... });
  *   // template.subject — email subject line
  *   // template.body   — full HTML body with {{variable}} placeholders
+ *
+ * Footer placeholders the sender must fill: {{unsubscribe_url}},
+ * {{dispute_url}} (services/profile-disputes.js disputeUrl(profileId): the
+ * "Correct or remove this profile" link), {{current_year}}.
  */
 
 function buildClaimEmail(config) {
@@ -103,6 +107,8 @@ function buildClaimEmail(config) {
   </p>
   <p style="margin:0;color:#999999;font-size:11px;text-align:center;">
     <a href="{{unsubscribe_url}}" style="color:#999999;text-decoration:underline;">Unsubscribe</a>
+    &nbsp;&middot;&nbsp;
+    <a href="{{dispute_url}}" style="color:#999999;text-decoration:underline;">Correct or remove this profile</a>
     &nbsp;&middot;&nbsp;
     <a href="${privacyUrl}" style="color:#999999;text-decoration:underline;">Privacy Policy</a>
     &nbsp;&middot;&nbsp;

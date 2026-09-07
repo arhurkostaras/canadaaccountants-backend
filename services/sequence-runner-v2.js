@@ -173,7 +173,8 @@ async function renderTouch(pool, enrollment, stepNumber) {
   const ctx = {
     state,
     recipient,
-    unsubscribeEmail: recipient.resolved_email
+    unsubscribeEmail: recipient.resolved_email,
+    profileId: recipient.id   // fills {{dispute_url}} in the shared footer
   };
 
   const subjChoice = foundingCohort.chooseSubject({

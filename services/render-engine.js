@@ -8,7 +8,7 @@
 //   1. founding-cohort tags ({{founding_filled}}, {{founding_cap}}, etc.)
 //   2. personalization ({{first_name}}, {{province}})
 //   3. profile tags ({{firm_name_or_designation}}, {{practice_area}}, etc.)
-//   4. unsubscribe URL ({{unsubscribe_url}})
+//   4. unsubscribe URL ({{unsubscribe_url}}); 4b. dispute URL ({{dispute_url}})
 //   5. caller-supplied async handlers (e.g., LAW's {{province_specific_backlog}})
 //
 // Strict mode (default): after all handlers run, any remaining `{{...}}` is
@@ -19,6 +19,7 @@
 const foundingCohort = require('./founding-cohort');
 const profileTags = require('./profile-tags');
 const unsubscribeToken = require('./unsubscribe-token');
+const profileDisputes = require('./profile-disputes');
 
 class RenderOrphanError extends Error {
   constructor(orphans, contextLabel) {
@@ -56,6 +57,12 @@ async function renderMergeTags(input, context, options = {}) {
   // 4. Unsubscribe URL
   if (context.unsubscribeEmail) {
     out = out.replace(/\{\{unsubscribe_url\}\}/g, unsubscribeToken.makeUrl(context.unsubscribeEmail));
+  }
+
+  // 4b. "Correct or remove this profile" URL ({{dispute_url}}), when the
+  // recipient is a professional with a profile id.
+  if (context.profileId) {
+    out = out.replace(/\{\{dispute_url\}\}/g, profileDisputes.disputeUrl(context.profileId));
   }
 
   // 5. Caller-supplied async handlers (e.g., LAW's province-specific backlog)

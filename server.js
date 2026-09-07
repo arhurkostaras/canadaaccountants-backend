@@ -20,6 +20,8 @@ const dailyDigest = require('./services/daily-digest');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
+const profileDisputes = require('./services/profile-disputes');
+const { createProfileDisputeRoutes } = require('./routes/profile-disputes');
 const crypto = require('crypto');
 const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
@@ -369,6 +371,15 @@ app.post('/api/admin/founder-outreach/send', createFounderOutreachSendHandler({
 // Defense-in-depth against the "developer forgot to add middleware on new admin route" failure mode.
 // Per-route middleware on individual admin routes is still load-bearing; the umbrella backstops it.
 app.use('/api/admin', authenticateToken, requireAdmin);
+
+// Profile disputes: public GET/POST /api/profiles/:id/dispute and the admin
+// list/resolve routes. Mounted below the umbrella and given the admin
+// middlewares explicitly, so its /api/admin/disputes* routes are guarded twice.
+app.use(createProfileDisputeRoutes({
+  getPool: () => pool,
+  sendEmail,
+  adminAuth: [authenticateToken, requireAdmin],
+}));
 
 // Login endpoint
 app.post('/api/auth/login', async (req, res) => {
@@ -1369,6 +1380,17 @@ const crmIntelligence = new CRMIntelligence({
     console.log('[Migration] generated_bio + profile_visits + ab_test_results + founder_outreach_log + inbound_messages + inbound_poll_status + breakdown_replies + founding_cohort_config + email_template + sequence_pause + sequence_closure_log + founding_cohort_joiners + v2_supply_enrollments verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
+  }
+
+  // Profile disputes (migrations/005-profile-disputes.sql): dispute_pending +
+  // removed_at on scraped_cpas and the profile_disputes table. The public
+  // profile, sitemap, directory, and search queries all reference these two
+  // columns, so a failure here is loud: every one of those routes would 500.
+  try {
+    await profileDisputes.ensureSchema(pool);
+    console.log('[Migration] profile_disputes + scraped_cpas.dispute_pending/removed_at verified');
+  } catch (err) {
+    console.error('[Migration] profile_disputes migration FAILED (public profile routes will error until fixed):', err.message);
   }
 
   // Seed core sequences (creates new or updates existing with new steps)
@@ -5448,7 +5470,7 @@ app.get('/api/professionals/search', async (req, res) => {
     const { name, city, province } = req.query;
     if (!name || name.length < 2) return res.status(400).json({ error: 'Name must be at least 2 characters' });
 
-    let query = `SELECT id, first_name, last_name, firm_name, city, province, designation, claim_status FROM scraped_cpas WHERE (first_name || ' ' || last_name) ILIKE $1`;
+    let query = `SELECT id, first_name, last_name, firm_name, city, province, designation, claim_status FROM scraped_cpas WHERE (first_name || ' ' || last_name) ILIKE $1 AND NOT ${GATED_SQL}`;
     const params = [`%${name}%`];
     if (city) { params.push(`%${city}%`); query += ` AND city ILIKE $${params.length}`; }
     if (province) { params.push(province); query += ` AND province = $${params.length}`; }
@@ -5765,7 +5787,7 @@ app.post('/api/admin/direct-send', async (req, res) => {
         const subject = (subjectTemplate || '').replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
 
         const unsubUrl = `${process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app'}/api/unsubscribe/${emailRow.unsubscribe_token}`;
-        let html = template.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl).replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
+        let html = template.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl).replace(/\{\{dispute_url\}\}/g, profileDisputes.disputeUrl(emailRow.recipient_id)).replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
 
         const result = await sendEmail({ to: emailRow.recipient_email, subject, html, from: process.env.FROM_EMAIL });
         if (result && result.success) {
@@ -5901,15 +5923,18 @@ app.post('/api/admin/monitor/fire', async (req, res) => {
 
 // Profile sitemap generator — returns XML sitemap of all public profile URLs.
 // Used to generate static sitemap files for the frontend GitHub Pages repo.
+// Filter = INDEXABLE_SQL (utils/profile-indexability.js), the same predicate the static page
+// generator (tools/tier1-pregen/gen-db.js) uses, so the sitemap can only ever list ids that
+// have a /profile/{id}/ page. URL form is the static path, never the legacy ?id= SPA form.
+// The served file is written by gen-db.js in the same run that writes the pages; this route
+// is the on-demand equivalent (parity check, drift read, manual regen).
 app.get('/api/sitemap-profiles.xml', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const perPage = 45000; // Under Google's 50K limit
     const offset = (page - 1) * perPage;
 
-    const countQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid'`
-    );
+    const countQ = await pool.query(`SELECT COUNT(*) AS n FROM scraped_cpas WHERE ${INDEXABLE_SQL}`);
     const total = parseInt(countQ.rows[0].n, 10);
     const totalPages = Math.ceil(total / perPage);
 
@@ -5926,20 +5951,67 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
     }
 
     const rows = await pool.query(
-      `SELECT id FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid' ORDER BY id LIMIT $1 OFFSET $2`,
+      `SELECT id FROM scraped_cpas WHERE ${INDEXABLE_SQL} ORDER BY id LIMIT $1 OFFSET $2`,
       [perPage, offset]
     );
 
     let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
     xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
     for (const row of rows.rows) {
-      xml += `  <url><loc>https://canadaaccountants.app/profile?id=${row.id}</loc><changefreq>monthly</changefreq></url>\n`;
+      xml += `  <url><loc>${profileUrl(row.id)}</loc><changefreq>monthly</changefreq></url>\n`;
     }
     xml += '</urlset>';
 
     res.set('Content-Type', 'application/xml');
+    res.set('X-Profile-Count', String(total));
     res.send(xml);
   } catch (err) {
+    console.error('[Sitemap] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Drift read for the served profile corpus: compares the live sitemap-profiles-*.xml on
+// canadaaccountants.app against INDEXABLE_SQL right now. "listed_not_indexable" are pages the
+// site still serves 200 for profiles that should be gone or held (regen + prune fixes them);
+// "indexable_not_listed" are admissions the next regen would add. Read-only; admin umbrella.
+app.get('/api/admin/profile-index-drift', async (req, res) => {
+  try {
+    const liveIds = [];
+    for (let shard = 1; shard <= 3; shard++) {
+      const r = await fetch(`https://canadaaccountants.app/sitemap-profiles-${shard}.xml`);
+      if (!r.ok) break;
+      const xml = await r.text();
+      for (const m of xml.matchAll(/\/profile\/(\d+)\//g)) liveIds.push(parseInt(m[1], 10));
+    }
+    const [listedNot, notListed] = await Promise.all([
+      pool.query(
+        `SELECT u.id, s.id IS NULL AS missing, ${INDEXABILITY_COLUMNS}
+         FROM unnest($1::int[]) u(id) LEFT JOIN scraped_cpas s ON s.id = u.id
+         WHERE s.id IS NULL OR NOT ${INDEXABLE_SQL}`,
+        [liveIds]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS n FROM scraped_cpas WHERE ${INDEXABLE_SQL} AND NOT (id = ANY($1::int[]))`,
+        [liveIds]
+      ),
+    ]);
+    const listed = listedNot.rows.map(r => ({
+      id: r.id,
+      ...(r.missing ? { http_status: 404, reason: 'not_found' } : classifyProfile(r)),
+    }));
+    const byStatus = {};
+    for (const l of listed) byStatus[l.http_status] = (byStatus[l.http_status] || 0) + 1;
+    res.json({
+      live_sitemap_count: liveIds.length,
+      listed_not_indexable: listed.length,
+      listed_not_indexable_by_status: byStatus,
+      listed_not_indexable_ids: listed.slice(0, 200),
+      indexable_not_listed: notListed.rows[0].n,
+      read_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[ProfileIndexDrift] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -6000,12 +6072,16 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
 
     // Fetch scraped CPA profile
     const profile = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason, has_enrichment_collision, is_generic_inbox, collision_count FROM scraped_cpas WHERE id = $1`,
+      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason, has_enrichment_collision, is_generic_inbox, collision_count, dispute_pending, removed_at FROM scraped_cpas WHERE id = $1`,
       [recipient_id]
     );
     if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
 
     const p = profile.rows[0];
+
+    // Dispute gate (2026-09-07): hidden at the person's request. Same
+    // chokepoint as /api/profiles/:id; body carries no personal data.
+    if (profileDisputes.hiddenReason(p)) return profileDisputes.sendGone(res, 'Claim Profile', p);
 
     // Pool-contamination gate: ACC pool came back clean in the 2026-05-11
     // audit (0 records flagged) but the gate is shipped for symmetry +
@@ -6695,13 +6771,25 @@ function cleanBio(bio) {
   return b.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// Profile indexability rule: one predicate shared by the profile API, the sitemap generator,
+// the static page generator, directory listings and related links (see utils/profile-indexability.js).
+const {
+  INDEXABLE_SQL, GATED_SQL, INDEXABILITY_COLUMNS, classifyProfile, profilePath, profileUrl, withPublicIndexFields,
+} = require('./utils/profile-indexability');
+// Leading "Name, CPA, CA" header line inside stored bios: stripped at render time, shared with the
+// static page generator so the SPA, the static pages and the directory snippets agree.
+const { stripBioHeader } = require('./tools/tier1-pregen/normalize');
+const nameForms = r => [r.full_name, `${r.first_name || ''} ${r.last_name || ''}`.trim()];
+
 // Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
 // '#'/'**' markdown and the Chartered->Certified wording fix never leak through bio_snippet
 // (the single point all directory consumers, incl. generate-directory-pages.js, read through).
+// Also attaches `indexable` + `profile_url` (null when the profile has no public page) and
+// strips the private columns that decision needs, so consumers link only to pages that exist.
 function withCleanSnippet(rows) {
-  return rows.map(({ generated_bio, ...rest }) => ({
-    ...rest,
-    bio_snippet: generated_bio ? cleanBio(generated_bio).slice(0, 160) : null,
+  return rows.map(row => ({
+    ...withPublicIndexFields(row),
+    bio_snippet: row.generated_bio ? stripBioHeader(cleanBio(row.generated_bio), nameForms(row)).slice(0, 160) : null,
   }));
 }
 // GeoNames allowlist (21,672 Canadian municipalities by province) — replaces the old 35-city denylist,
@@ -6725,9 +6813,8 @@ function resolveLocation(city, province) {
 app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation,
-              phone, generated_bio, claim_status, founding_member, is_misclassified, misclassified_reason,
-              has_enrichment_collision, is_generic_inbox, collision_count
+      `SELECT id, first_name, last_name, full_name, province, phone, claim_status, founding_member,
+              collision_count, ${INDEXABILITY_COLUMNS}
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
@@ -6736,7 +6823,12 @@ app.get('/api/profiles/:id', async (req, res) => {
     // Pool-contamination gate (see /api/claim/profile/:refToken for context).
     // Extended 2026-05-13 (Phase A WS B): also gate on has_enrichment_collision
     // and is_generic_inbox; same recovery path for all three flag types.
-    if (rows[0].is_misclassified === true || rows[0].has_enrichment_collision === true || rows[0].is_generic_inbox === true) {
+    // Extended 2026-09-07: also gate on dispute_pending / removed_at (the
+    // person asked for a correction or removal). That case answers with no
+    // personal data at all, so it takes its own body from the service.
+    const hidden = profileDisputes.hiddenReason(rows[0]);
+    if (hidden || rows[0].is_misclassified === true || rows[0].has_enrichment_collision === true || rows[0].is_generic_inbox === true) {
+      if (hidden) return profileDisputes.sendGone(res, 'Public Profile', rows[0]);
       const gateReason = rows[0].is_misclassified ? (rows[0].misclassified_reason || 'misclassified')
                        : rows[0].has_enrichment_collision ? `enrichment_collision(x${rows[0].collision_count})`
                        : 'generic_inbox';
@@ -6753,6 +6845,10 @@ app.get('/api/profiles/:id', async (req, res) => {
     }
 
     const p = rows[0];
+    // Page-level index status (item A): the SPA turns indexable=false into a noindex meta, and
+    // the static /profile/{id}/ page exists iff indexable. Computed on the stored row, before
+    // any on-the-fly bio generation, so it matches the sitemap/generator predicate exactly.
+    const indexability = classifyProfile(p);
 
     // Flip "Last, First" to "First Last" if needed
     let firstName = p.first_name || '';
@@ -6776,7 +6872,7 @@ app.get('/api/profiles/:id', async (req, res) => {
         bio = null;
       }
     }
-    bio = cleanBio(bio);
+    bio = stripBioHeader(cleanBio(bio), [fullName, ...nameForms(p)]);
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
@@ -6804,30 +6900,32 @@ app.get('/api/profiles/:id', async (req, res) => {
       ...(p.firm_name && { worksFor: { '@type': 'Organization', name: p.firm_name } }),
       ...(location && { address: { '@type': 'PostalAddress', addressLocality: loc.city || '', addressRegion: loc.province || '', addressCountry: 'CA' } }),
       ...(bio && { description: bio }),
-      url: `https://canadaaccountants.app/profile?id=${p.id}`
+      url: indexability.indexable ? profileUrl(p.id) : `https://canadaaccountants.app/profile?id=${p.id}`
     };
 
-    // Related profiles for internal SEO linking
+    // Related profiles for internal SEO linking (item D): only indexable rows, linked at their
+    // static path, so no profile page ever links to a gated or below-threshold profile.
     let related = [];
     try {
         const relatedQuery = await pool.query(
             `SELECT id, first_name, last_name, firm_name, city, province, designation
              FROM scraped_cpas
              WHERE province = $1 AND id != $2
-               AND COALESCE(enriched_email, email) IS NOT NULL
+               AND ${INDEXABLE_SQL}
              ORDER BY claim_status DESC NULLS LAST, RANDOM()
              LIMIT 6`,
             [p.province, p.id]
         );
         related = relatedQuery.rows.map(r => ({
             id: r.id,
+            url: profilePath(r.id),
             name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
             firm: r.firm_name,
             city: r.city,
             province: r.province,
             designation: r.designation
         }));
-    } catch (relErr) { /* non-fatal */ }
+    } catch (relErr) { console.error(`[Profile] Related query failed for id=${p.id}:`, relErr.message); }
 
     res.json({
       profile: {
@@ -6844,6 +6942,8 @@ app.get('/api/profiles/:id', async (req, res) => {
         claimed: p.claim_status === 'claimed',
         founding_member: p.founding_member || false
       },
+      indexable: indexability.indexable,
+      index_reason: indexability.reason,
       seo_score: seoScore,
       structured_data: jsonLd,
       related
@@ -6874,18 +6974,18 @@ app.get('/api/directory/city/:city', async (req, res) => {
     const city = req.params.city;
     const limit = Math.min(parseInt(req.query.limit) || 10, 20);
 
+    // Gated profiles (under review, 410 at their page) never appear in public listings (item D).
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                generated_bio, claim_status
+        `SELECT id, full_name, first_name, last_name, province, claim_status, ${INDEXABILITY_COLUMNS}
          FROM scraped_cpas
-         WHERE city ILIKE $1
+         WHERE city ILIKE $1 AND NOT ${GATED_SQL}
          ORDER BY claim_status DESC NULLS LAST, full_name ASC
          LIMIT $2`,
         [`%${city}%`, limit]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1 AND NOT ${GATED_SQL}`,
         [`%${city}%`]
       )
     ]);
@@ -6914,19 +7014,18 @@ app.get('/api/directory/:province', async (req, res) => {
 
     const [professionalsResult, countResult, designationCounts] = await Promise.all([
       pool.query(
-        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                generated_bio
-         FROM scraped_cpas WHERE UPPER(province) = $1
+        `SELECT id, full_name, first_name, last_name, province, ${INDEXABILITY_COLUMNS}
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND NOT ${GATED_SQL}
          ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
         [provinceCode, limit, offset]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND NOT ${GATED_SQL}`,
         [provinceCode]
       ),
       pool.query(
         `SELECT designation, COUNT(*) AS count FROM scraped_cpas
-         WHERE UPPER(province) = $1 AND designation IS NOT NULL AND designation != ''
+         WHERE UPPER(province) = $1 AND designation IS NOT NULL AND designation != '' AND NOT ${GATED_SQL}
          GROUP BY designation ORDER BY count DESC`,
         [provinceCode]
       )
@@ -6962,14 +7061,13 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
 
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                generated_bio
-         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
+        `SELECT id, full_name, first_name, last_name, province, ${INDEXABILITY_COLUMNS}
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2 AND NOT ${GATED_SQL}
          ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
         [provinceCode, `%${designation.toUpperCase()}%`, limit, offset]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2 AND NOT ${GATED_SQL}`,
         [provinceCode, `%${designation.toUpperCase()}%`]
       )
     ]);
