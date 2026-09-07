@@ -125,6 +125,7 @@ function buildPage(data, id) {
                         <p>Edit your bio, add specializations, and manage what clients see.</p>
                         <a href="${claimUrl}" class="btn-cta">Take Control <i class="fas fa-arrow-right"></i></a>
                         ${!p.claimed ? `<div style="margin-top:14px;"><button id="organicClaimBtn" data-pid="${p.id}" class="btn-cta" style="background:transparent;border:1px solid var(--gold);color:var(--gold);cursor:pointer;">Is this you? Claim this profile</button><div id="organicClaimMsg" style="display:none;margin-top:10px;font-size:14px;color:var(--success);"></div></div>` : ''}
+                        <p style="margin:14px 0 0;font-size:13px;color:var(--text-3);">Is this your profile and something is wrong? <a href="${API}/api/profiles/${p.id}/dispute" rel="nofollow" style="color:var(--text-3);text-decoration:underline;">Correct or remove this profile</a></p>
                     </div>
                 </div>`;
   const title = `${p.name} — CPA Profile | CanadaAccountants.app`;
