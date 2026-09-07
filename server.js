@@ -5901,15 +5901,18 @@ app.post('/api/admin/monitor/fire', async (req, res) => {
 
 // Profile sitemap generator — returns XML sitemap of all public profile URLs.
 // Used to generate static sitemap files for the frontend GitHub Pages repo.
+// Filter = INDEXABLE_SQL (utils/profile-indexability.js), the same predicate the static page
+// generator (tools/tier1-pregen/gen-db.js) uses, so the sitemap can only ever list ids that
+// have a /profile/{id}/ page. URL form is the static path, never the legacy ?id= SPA form.
+// The served file is written by gen-db.js in the same run that writes the pages; this route
+// is the on-demand equivalent (parity check, drift read, manual regen).
 app.get('/api/sitemap-profiles.xml', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const perPage = 45000; // Under Google's 50K limit
     const offset = (page - 1) * perPage;
 
-    const countQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid'`
-    );
+    const countQ = await pool.query(`SELECT COUNT(*) AS n FROM scraped_cpas WHERE ${INDEXABLE_SQL}`);
     const total = parseInt(countQ.rows[0].n, 10);
     const totalPages = Math.ceil(total / perPage);
 
@@ -5926,20 +5929,67 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
     }
 
     const rows = await pool.query(
-      `SELECT id FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid' ORDER BY id LIMIT $1 OFFSET $2`,
+      `SELECT id FROM scraped_cpas WHERE ${INDEXABLE_SQL} ORDER BY id LIMIT $1 OFFSET $2`,
       [perPage, offset]
     );
 
     let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
     xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
     for (const row of rows.rows) {
-      xml += `  <url><loc>https://canadaaccountants.app/profile?id=${row.id}</loc><changefreq>monthly</changefreq></url>\n`;
+      xml += `  <url><loc>${profileUrl(row.id)}</loc><changefreq>monthly</changefreq></url>\n`;
     }
     xml += '</urlset>';
 
     res.set('Content-Type', 'application/xml');
+    res.set('X-Profile-Count', String(total));
     res.send(xml);
   } catch (err) {
+    console.error('[Sitemap] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Drift read for the served profile corpus: compares the live sitemap-profiles-*.xml on
+// canadaaccountants.app against INDEXABLE_SQL right now. "listed_not_indexable" are pages the
+// site still serves 200 for profiles that should be gone or held (regen + prune fixes them);
+// "indexable_not_listed" are admissions the next regen would add. Read-only; admin umbrella.
+app.get('/api/admin/profile-index-drift', async (req, res) => {
+  try {
+    const liveIds = [];
+    for (let shard = 1; shard <= 3; shard++) {
+      const r = await fetch(`https://canadaaccountants.app/sitemap-profiles-${shard}.xml`);
+      if (!r.ok) break;
+      const xml = await r.text();
+      for (const m of xml.matchAll(/\/profile\/(\d+)\//g)) liveIds.push(parseInt(m[1], 10));
+    }
+    const [listedNot, notListed] = await Promise.all([
+      pool.query(
+        `SELECT u.id, s.id IS NULL AS missing, ${INDEXABILITY_COLUMNS}
+         FROM unnest($1::int[]) u(id) LEFT JOIN scraped_cpas s ON s.id = u.id
+         WHERE s.id IS NULL OR NOT ${INDEXABLE_SQL}`,
+        [liveIds]
+      ),
+      pool.query(
+        `SELECT COUNT(*)::int AS n FROM scraped_cpas WHERE ${INDEXABLE_SQL} AND NOT (id = ANY($1::int[]))`,
+        [liveIds]
+      ),
+    ]);
+    const listed = listedNot.rows.map(r => ({
+      id: r.id,
+      ...(r.missing ? { http_status: 404, reason: 'not_found' } : classifyProfile(r)),
+    }));
+    const byStatus = {};
+    for (const l of listed) byStatus[l.http_status] = (byStatus[l.http_status] || 0) + 1;
+    res.json({
+      live_sitemap_count: liveIds.length,
+      listed_not_indexable: listed.length,
+      listed_not_indexable_by_status: byStatus,
+      listed_not_indexable_ids: listed.slice(0, 200),
+      indexable_not_listed: notListed.rows[0].n,
+      read_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('[ProfileIndexDrift] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -6695,13 +6745,25 @@ function cleanBio(bio) {
   return b.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// Profile indexability rule: one predicate shared by the profile API, the sitemap generator,
+// the static page generator, directory listings and related links (see utils/profile-indexability.js).
+const {
+  INDEXABLE_SQL, GATED_SQL, INDEXABILITY_COLUMNS, classifyProfile, profilePath, profileUrl, withPublicIndexFields,
+} = require('./utils/profile-indexability');
+// Leading "Name, CPA, CA" header line inside stored bios: stripped at render time, shared with the
+// static page generator so the SPA, the static pages and the directory snippets agree.
+const { stripBioHeader } = require('./tools/tier1-pregen/normalize');
+const nameForms = r => [r.full_name, `${r.first_name || ''} ${r.last_name || ''}`.trim()];
+
 // Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
 // '#'/'**' markdown and the Chartered->Certified wording fix never leak through bio_snippet
 // (the single point all directory consumers, incl. generate-directory-pages.js, read through).
+// Also attaches `indexable` + `profile_url` (null when the profile has no public page) and
+// strips the private columns that decision needs, so consumers link only to pages that exist.
 function withCleanSnippet(rows) {
-  return rows.map(({ generated_bio, ...rest }) => ({
-    ...rest,
-    bio_snippet: generated_bio ? cleanBio(generated_bio).slice(0, 160) : null,
+  return rows.map(row => ({
+    ...withPublicIndexFields(row),
+    bio_snippet: row.generated_bio ? stripBioHeader(cleanBio(row.generated_bio), nameForms(row)).slice(0, 160) : null,
   }));
 }
 // GeoNames allowlist (21,672 Canadian municipalities by province) — replaces the old 35-city denylist,
@@ -6725,9 +6787,8 @@ function resolveLocation(city, province) {
 app.get('/api/profiles/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation,
-              phone, generated_bio, claim_status, founding_member, is_misclassified, misclassified_reason,
-              has_enrichment_collision, is_generic_inbox, collision_count
+      `SELECT id, first_name, last_name, full_name, province, phone, claim_status, founding_member,
+              collision_count, ${INDEXABILITY_COLUMNS}
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
@@ -6753,6 +6814,10 @@ app.get('/api/profiles/:id', async (req, res) => {
     }
 
     const p = rows[0];
+    // Page-level index status (item A): the SPA turns indexable=false into a noindex meta, and
+    // the static /profile/{id}/ page exists iff indexable. Computed on the stored row, before
+    // any on-the-fly bio generation, so it matches the sitemap/generator predicate exactly.
+    const indexability = classifyProfile(p);
 
     // Flip "Last, First" to "First Last" if needed
     let firstName = p.first_name || '';
@@ -6776,7 +6841,7 @@ app.get('/api/profiles/:id', async (req, res) => {
         bio = null;
       }
     }
-    bio = cleanBio(bio);
+    bio = stripBioHeader(cleanBio(bio), [fullName, ...nameForms(p)]);
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
@@ -6804,30 +6869,32 @@ app.get('/api/profiles/:id', async (req, res) => {
       ...(p.firm_name && { worksFor: { '@type': 'Organization', name: p.firm_name } }),
       ...(location && { address: { '@type': 'PostalAddress', addressLocality: loc.city || '', addressRegion: loc.province || '', addressCountry: 'CA' } }),
       ...(bio && { description: bio }),
-      url: `https://canadaaccountants.app/profile?id=${p.id}`
+      url: indexability.indexable ? profileUrl(p.id) : `https://canadaaccountants.app/profile?id=${p.id}`
     };
 
-    // Related profiles for internal SEO linking
+    // Related profiles for internal SEO linking (item D): only indexable rows, linked at their
+    // static path, so no profile page ever links to a gated or below-threshold profile.
     let related = [];
     try {
         const relatedQuery = await pool.query(
             `SELECT id, first_name, last_name, firm_name, city, province, designation
              FROM scraped_cpas
              WHERE province = $1 AND id != $2
-               AND COALESCE(enriched_email, email) IS NOT NULL
+               AND ${INDEXABLE_SQL}
              ORDER BY claim_status DESC NULLS LAST, RANDOM()
              LIMIT 6`,
             [p.province, p.id]
         );
         related = relatedQuery.rows.map(r => ({
             id: r.id,
+            url: profilePath(r.id),
             name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
             firm: r.firm_name,
             city: r.city,
             province: r.province,
             designation: r.designation
         }));
-    } catch (relErr) { /* non-fatal */ }
+    } catch (relErr) { console.error(`[Profile] Related query failed for id=${p.id}:`, relErr.message); }
 
     res.json({
       profile: {
@@ -6844,6 +6911,8 @@ app.get('/api/profiles/:id', async (req, res) => {
         claimed: p.claim_status === 'claimed',
         founding_member: p.founding_member || false
       },
+      indexable: indexability.indexable,
+      index_reason: indexability.reason,
       seo_score: seoScore,
       structured_data: jsonLd,
       related
@@ -6874,18 +6943,18 @@ app.get('/api/directory/city/:city', async (req, res) => {
     const city = req.params.city;
     const limit = Math.min(parseInt(req.query.limit) || 10, 20);
 
+    // Gated profiles (under review, 410 at their page) never appear in public listings (item D).
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                generated_bio, claim_status
+        `SELECT id, full_name, first_name, last_name, province, claim_status, ${INDEXABILITY_COLUMNS}
          FROM scraped_cpas
-         WHERE city ILIKE $1
+         WHERE city ILIKE $1 AND NOT ${GATED_SQL}
          ORDER BY claim_status DESC NULLS LAST, full_name ASC
          LIMIT $2`,
         [`%${city}%`, limit]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1 AND NOT ${GATED_SQL}`,
         [`%${city}%`]
       )
     ]);
@@ -6914,14 +6983,13 @@ app.get('/api/directory/:province', async (req, res) => {
 
     const [professionalsResult, countResult, designationCounts] = await Promise.all([
       pool.query(
-        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                generated_bio
-         FROM scraped_cpas WHERE UPPER(province) = $1
+        `SELECT id, full_name, first_name, last_name, province, ${INDEXABILITY_COLUMNS}
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND NOT ${GATED_SQL}
          ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
         [provinceCode, limit, offset]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND NOT ${GATED_SQL}`,
         [provinceCode]
       ),
       pool.query(
@@ -6962,14 +7030,13 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
 
     const [professionalsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
-                generated_bio
-         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
+        `SELECT id, full_name, first_name, last_name, province, ${INDEXABILITY_COLUMNS}
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2 AND NOT ${GATED_SQL}
          ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
         [provinceCode, `%${designation.toUpperCase()}%`, limit, offset]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2 AND NOT ${GATED_SQL}`,
         [provinceCode, `%${designation.toUpperCase()}%`]
       )
     ]);
