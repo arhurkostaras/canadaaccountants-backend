@@ -16,6 +16,7 @@ const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
 const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail } = require('./services/email');
+const dailyDigest = require('./services/daily-digest');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
@@ -4032,6 +4033,35 @@ app.get('/api/inbound-summary', async (req, res) => {
   }
 });
 
+// Daily digest feed. Same HMAC contract as /api/inbound-summary. ACC reads its
+// own feed in-process; this route exists so the LAW/INV ports serve the same
+// shape to the ACC-hosted collector (services/daily-digest.js fetchPeerFeed).
+app.get('/api/daily-digest/feed', async (req, res) => {
+  try {
+    const queryString = req.url.includes('?') ? req.url.substring(req.url.indexOf('?') + 1) : '';
+    const canonical = `GET ${req.path}?${queryString}`;
+    const verify = _verifyInboundSignature(
+      process.env.INBOUND_WEBHOOK_SECRET,
+      req.headers['x-inbound-timestamp'],
+      req.headers['x-inbound-signature'],
+      canonical
+    );
+    if (!verify.ok) {
+      console.error('[DailyDigestFeed] auth failure:', verify.reason);
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    const since = req.query.since;
+    if (!since || isNaN(Date.parse(since))) {
+      return res.status(400).json({ error: 'missing or invalid `since` parameter (ISO 8601)' });
+    }
+    const feed = await dailyDigest.collectLocalFeed(pool, new Date(since).toISOString());
+    res.json(feed);
+  } catch (error) {
+    console.error('[DailyDigestFeed] error:', error);
+    res.status(500).json({ error: 'feed failed' });
+  }
+});
+
 // Breakdown test endpoint (Section 4.1 of campaign brief v1.7).
 // HMAC-protected. Given a recipient_id, returns the would-be breakdown payload
 // WITHOUT sending. Used to populate the 20-profile rubric review file before
@@ -5297,6 +5327,9 @@ app.post('/api/admin/outreach/validate-queued', async (req, res) => {
 app.get('/api/outreach/health', async (req, res) => {
   try {
     const today = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE sent_at >= (NOW() AT TIME ZONE 'America/Toronto')::date`);
+    // Full Toronto calendar day before today. The 07:00 daily digest reads this
+    // because sent_today is always near zero when it fires.
+    const yesterday = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE sent_at >= (NOW() AT TIME ZONE 'America/Toronto')::date - INTERVAL '1 day' AND sent_at < (NOW() AT TIME ZONE 'America/Toronto')::date`);
     const queued = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'queued'`);
     const bounced7d = await pool.query(`SELECT COUNT(*) FROM outreach_emails WHERE status = 'bounced' AND sent_at > NOW() - INTERVAL '7 days'`);
     const unsub7d = await pool.query(`SELECT COUNT(*) FROM outreach_unsubscribes WHERE unsubscribed_at > NOW() - INTERVAL '7 days'`);
@@ -5317,6 +5350,7 @@ app.get('/api/outreach/health', async (req, res) => {
     const contacts7d = await pool.query(`SELECT COUNT(*) FROM contact_submissions WHERE created_at > NOW() - INTERVAL '7 days'`).catch(() => ({ rows: [{ count: 0 }] }));
     res.json({
       sent_today: parseInt(today.rows[0].count),
+      sent_yesterday: parseInt(yesterday.rows[0].count),
       queued: parseInt(queued.rows[0].count),
       bounced_7d: parseInt(bounced7d.rows[0].count),
       unsubscribed_7d: parseInt(unsub7d.rows[0].count),
@@ -5853,11 +5887,13 @@ app.post('/api/admin/trigger-queue', async (req, res) => {
   }
 });
 
+// Fires the daily digest now (same collector and renderer as the 07:00 cron).
+// Used for the end-to-end check after a deploy.
 app.post('/api/admin/monitor/fire', async (req, res) => {
   try {
     const label = req.query.label || 'ad-hoc';
-    await runPipelineMonitor(label);
-    res.json({ success: true, message: `Monitor sent: ${label}` });
+    const digest = await runDailyDigest(label);
+    res.json({ success: true, message: `Daily digest sent: ${label}`, subject: digest.subject, actionCount: digest.actionCount, sendResult: digest.sendResult });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -7386,40 +7422,11 @@ async function runFounderAutoSend() {
   return { sent, skipped, failed, errors: errors.length > 0 ? errors : undefined };
 }
 
-// Cron: Monday 9:00 AM America/Toronto — send digest to admin
-// Cron: Monday 9:05 AM America/Toronto — auto-send founder emails to all candidates
-cron.schedule('0 9 * * 1', async () => {
-  try {
-    const { html, total } = await buildFounderDigestHTML();
-    await sendEmail({
-      to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
-      subject: `ACC Weekly Founder Outreach Digest (${total} candidates)`,
-      html,
-      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
-    });
-    console.log(`[FounderOutreach] Monday digest sent: ${total} candidates`);
-  } catch (err) {
-    console.error('[FounderOutreach] digest cron error:', err.message);
-  }
-}, { timezone: 'America/Toronto' });
-
-cron.schedule('5 9 * * 1', async () => {
-  try {
-    const results = await runFounderAutoSend();
-    // Send summary to admin
-    await sendEmail({
-      to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
-      subject: `ACC Founder Auto-Send Complete: ${results.sent} sent, ${results.skipped} deduped, ${results.failed} failed`,
-      html: `<p>Auto-send results: ${results.sent} sent, ${results.skipped} skipped (90-day dedup), ${results.failed} failed.</p>${results.errors ? '<pre>' + JSON.stringify(results.errors, null, 2) + '</pre>' : ''}`,
-      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
-    });
-    console.log(`[FounderOutreach] Monday auto-send complete: ${results.sent} sent`);
-  } catch (err) {
-    console.error('[FounderOutreach] auto-send cron error:', err.message);
-  }
-}, { timezone: 'America/Toronto' });
-
-console.log('[FounderOutreach] Monday 9:00 AM digest + 9:05 AM auto-send scheduled');
+// The Monday 9:00 digest mail and the 9:05 auto-send report mail were folded into
+// the Monday edition of the 07:00 daily digest (services/daily-digest.js), which
+// embeds buildFounderDigestHTML() as a collapsed list. The auto-send itself no
+// longer runs on a schedule (it was paused via FOUNDER_AUTO_SEND_PAUSED since
+// 2026-05-24); POST /api/admin/founder-outreach/auto-send still runs it on demand.
 
 // ==================== PROFILE BACKFILL ====================
 app.post('/api/admin/backfill-claimed-profiles', authenticateToken, requireAdmin, async (req, res) => {
@@ -9185,9 +9192,10 @@ cron.schedule('0 18 28 4 *', async () => {
 }, { timezone: 'America/Toronto' });
 
 // =====================================================
-// PIPELINE MONITOR — Cross-platform health reports
-// Fires at 9:05 AM, 10:05 AM, and 2:05 PM ET on send days (Tue-Thu)
-// Emails consolidated report to admin
+// PIPELINE MONITOR — Cross-platform numbers
+// collectPipelineMonitor() is the data source for the Numbers block of the
+// 07:00 daily digest (services/daily-digest.js). It no longer emails on its own;
+// the nine-a-day monitor schedule was retired 2026-09-07.
 // =====================================================
 
 const MONITOR_BACKENDS = [
@@ -9198,7 +9206,7 @@ const MONITOR_BACKENDS = [
 
 const HOLIDAYS = ['2026-04-03', '2026-04-04', '2026-04-06'];
 
-async function runPipelineMonitor(label) {
+async function collectPipelineMonitor() {
   const https = require('https');
   const fetchJSON = (url) => new Promise((resolve) => {
     const req = https.get(url, { timeout: 10000 }, (res) => {
@@ -9211,35 +9219,39 @@ async function runPipelineMonitor(label) {
   });
 
   const now = new Date();
-  const day = now.getDay();
-  const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-
-  // Weekend skip removed 2026-04-17 — campaigns run 7 days/week,
-  // monitor should too. Weekend schedule is 10am/1pm/4pm via separate crons.
-
-  const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'America/Toronto', hour: '2-digit', minute: '2-digit' });
   const dateStr = now.toLocaleDateString('en-US', { timeZone: 'America/Toronto', month: 'long', day: 'numeric', year: 'numeric' });
 
   let rows = '';
   let totalSent = 0, totalQueued = 0, totalConv = 0;
   let claimsParts = [];
-  let totalClaimed = 0, totalOutreachConv = 0;
+  let totalClaimed = 0;
   let totalPaid = 0, totalMRR = 0, totalDemand = 0, totalMatched = 0, totalContacts7d = 0;
   const paidParts = [];
-  const alerts = [];
+  // notes: heuristics that describe a known state (the deliberate dark state
+  // reads as "0 active with N queued" every day). failures: a backend that
+  // could not be read at all. Only failures reach the digest's Action block.
+  const notes = [];
+  const failures = [];
+  const backends = [];
+  let sentIsYesterday = true;
 
   for (const backend of MONITOR_BACKENDS) {
     try {
       const health = await fetchJSON(`${backend.url}/api/outreach/health`);
+      if (!health) throw new Error('health endpoint unreachable or non-JSON');
       const camps = Array.isArray(health?.active_campaigns) ? health.active_campaigns : [];
 
-      const sent = health?.sent_today || 0;
+      // The digest fires at 07:00, so "today so far" is always ~0. Backends that
+      // expose sent_yesterday (ACC now; LAW/INV after the port) report that.
+      const sent = health?.sent_yesterday ?? health?.sent_today ?? 0;
+      if (health?.sent_yesterday == null) sentIsYesterday = false;
       const queued = health?.queued || 0;
       const bnc7d = health?.bounced_7d || 0;
       const active = camps.length;
       const conv = health?.outreach_converted || 0;
 
       const claimed = health?.total_claimed || 0;
+      backends.push({ name: backend.name, ok: true, sent, queued, active });
 
       totalSent += sent;
       totalQueued += queued;
@@ -9255,9 +9267,8 @@ async function runPipelineMonitor(label) {
       totalMatched += health?.matched_leads || 0;
       totalContacts7d += health?.contacts_7d || 0;
 
-      // Check for alerts
-      if (active === 0 && queued > 0) alerts.push(`${backend.name}: 0 active campaigns with ${queued} queued — possible circuit breaker`);
-      if (sent === 0 && label !== '9:05 AM' && queued > 0) alerts.push(`${backend.name}: 0 sent today at ${label} with ${queued} queued`);
+      if (active === 0 && queued > 0) notes.push(`${backend.name}: 0 active campaigns with ${queued} queued (dark state unless a campaign is meant to be live)`);
+      else if (sent === 0 && queued > 0) notes.push(`${backend.name}: 0 sent with ${queued} queued and ${active} active campaign(s)`);
 
       rows += `<tr>
         <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;">${backend.name}</td>
@@ -9269,12 +9280,14 @@ async function runPipelineMonitor(label) {
       </tr>`;
     } catch (e) {
       rows += `<tr><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;" colspan="6">${backend.name}: ERROR — ${e.message}</td></tr>`;
-      alerts.push(`${backend.name}: health check failed — ${e.message}`);
+      failures.push({ platform: backend.name, message: `health check failed: ${e.message}` });
+      backends.push({ name: backend.name, ok: false, sent: 0, queued: 0, active: 0 });
     }
   }
 
   // Demand-side metrics (LAW only for now)
   let demandHtml = '';
+  let lawRequests = [];
   try {
     const lawDemand = await fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/demand-attribution');
     const lawLeads = await fetchJSON('https://canadalawyers-backend-production.up.railway.app/api/admin/leads/funnel');
@@ -9283,6 +9296,9 @@ async function runPipelineMonitor(label) {
       const now48h = new Date(Date.now() - 48 * 60 * 60 * 1000);
       const yesterday = lawDemand.requests.filter(r => new Date(r.created_at) > now24h);
       const dayBefore = lawDemand.requests.filter(r => new Date(r.created_at) > now48h && new Date(r.created_at) <= now24h);
+      // Surfaced in the digest's Action block as LAW client requests until the
+      // LAW digest feed (with name and province) is ported.
+      lawRequests = yesterday.map(r => ({ request_id: r.request_id, pain_point: r.pain_point, created_at: r.created_at }));
 
       const bySource = {};
       for (const r of yesterday) {
@@ -9322,7 +9338,7 @@ async function runPipelineMonitor(label) {
         }
         const allZero = lastTwoWeekdays.every(k => !dayBuckets[k]);
         if (allZero) {
-          alerts.push(`LAW DEMAND: zero submissions on last 2 weekdays (${lastTwoWeekdays.join(', ')})`);
+          notes.push(`LAW demand: zero submissions on last 2 weekdays (${lastTwoWeekdays.join(', ')})`);
         }
       }
 
@@ -9345,20 +9361,15 @@ async function runPipelineMonitor(label) {
     }
   } catch (e) { console.error('[Monitor] Failed to fetch digest status:', e.message); }
 
-  const alertsHtml = alerts.length > 0
-    ? `<div style="margin:16px 0;padding:12px 16px;background:#fef2f2;border-left:4px solid #dc2626;border-radius:0 6px 6px 0;"><strong style="color:#991b1b;">Alerts:</strong><ul style="margin:8px 0 0;padding-left:20px;color:#991b1b;font-size:13px;">${alerts.map(a => `<li>${a}</li>`).join('')}</ul></div>`
-    : '';
+  const sentHeader = sentIsYesterday ? 'Sent yday' : 'Sent*';
+  const sentFootnote = sentIsYesterday ? '' : `<p style="margin:0 0 12px;font-size:11px;color:#94a3b8;">* a backend without sent_yesterday reports today-so-far (07:00 fire), so this reads low until its digest feed is ported.</p>`;
 
-  const html = `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;">
-    <div style="background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;padding:20px 24px;border-radius:8px 8px 0 0;">
-      <h2 style="margin:0;font-size:18px;">Pipeline Monitor — ${label}</h2>
-      <p style="margin:4px 0 0;opacity:0.85;font-size:13px;">${dateStr}</p>
-    </div>
-    <div style="padding:20px 24px;background:#fff;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px;">
+  const html = `<div style="font-size:13px;">
+      <p style="margin:0 0 8px;color:#64748b;">Pipeline numbers as of ${dateStr}</p>
       <table style="width:100%;border-collapse:collapse;margin-bottom:16px;">
         <tr style="background:#f1f5f9;">
           <th style="padding:8px 12px;text-align:left;font-size:12px;color:#475569;">Platform</th>
-          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Sent</th>
+          <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">${sentHeader}</th>
           <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Queued</th>
           <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Active</th>
           <th style="padding:8px 12px;text-align:right;font-size:12px;color:#475569;">Bnc 7d</th>
@@ -9379,43 +9390,34 @@ async function runPipelineMonitor(label) {
       <div style="margin:0 0 16px;padding:14px 16px;background:#eff6ff;border-left:4px solid #2563eb;border-radius:0 6px 6px 0;font-size:14px;color:#1e40af;">
         <strong>Revenue:</strong> ${paidParts.join(' | ')} → ${totalPaid} paid | $${totalMRR} MRR | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d)
       </div>
+      ${sentFootnote}
       ${demandHtml}
       ${digestInfo}
-      ${alertsHtml}
-      <p style="margin:16px 0 0;font-size:11px;color:#94a3b8;">Auto-generated by ACC pipeline monitor</p>
-    </div>
   </div>`;
 
-  try {
-    await sendEmail({
-      to: 'arthur@negotiateandwin.com',
-      subject: `Pipeline ${label} — ${totalSent} sent, ${totalConv} conv — ${dateStr}`,
-      html,
-      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app'
-    });
-    console.log(`[Monitor] ${label} report sent — sent=${totalSent}, conv=${totalConv}, alerts=${alerts.length}`);
-  } catch (e) {
-    console.error(`[Monitor] Failed to send report: ${e.message}`);
-  }
+  console.log(`[Monitor] collected — sent=${totalSent}, conv=${totalConv}, notes=${notes.length}, failures=${failures.length}`);
+  return { html, notes, failures, backends, lawRequests, totals: { sent: totalSent, queued: totalQueued, conv: totalConv, claimed: totalClaimed, paid: totalPaid, mrr: totalMRR } };
 }
 
-// 9:05 AM — post-cron check
-// Pipeline monitor — consistent schedule across all send days (Tue-Fri)
-// Updated 2026-04-10: Friday now includes cold sends, so Friday gets the same monitors.
+// The one scheduled email: 07:00 America/Toronto, every day. Action block first,
+// Numbers once, Quiet lines per platform; Monday edition adds the founder list.
+// runWebhookHealthCheck is defined below (function hoisting makes it callable).
+async function runDailyDigest(label) {
+  console.log(`[DailyDigest] firing (${label}) at ${new Date().toISOString()}`);
+  return dailyDigest.sendDailyDigest({
+    pool,
+    collectPipeline: collectPipelineMonitor,
+    webhookCheck: runWebhookHealthCheck,
+    founderDigest: buildFounderDigestHTML,
+    breakerState: () => ({ zbConsecutiveErrors: outreachEngine.zbConsecutiveErrors })
+  });
+}
+
 const monitorCronFire = (label) => {
-  console.log(`[Monitor] Cron firing: ${label} at ${new Date().toISOString()}`);
-  runPipelineMonitor(label).catch(e => console.error(`[Monitor] ${label} error:`, e.message));
+  runDailyDigest(label).catch(e => console.error(`[DailyDigest] ${label} error:`, e.message));
 };
 
-cron.schedule('5 9 * * 1-5', () => monitorCronFire('9:05 AM'), { timezone: 'America/Toronto' });
-cron.schedule('30 9 * * 1-5', () => monitorCronFire('9:30 AM Resend check'), { timezone: 'America/Toronto' });
-cron.schedule('5 10 * * 1-5', () => monitorCronFire('10:05 AM'), { timezone: 'America/Toronto' });
-cron.schedule('5 11 * * 1-5', () => monitorCronFire('11:05 AM'), { timezone: 'America/Toronto' });
-cron.schedule('5 14 * * 1-5', () => monitorCronFire('2:05 PM'), { timezone: 'America/Toronto' });
-cron.schedule('0 15 * * *', () => monitorCronFire('3 PM ET'), { timezone: 'America/Toronto' });
-cron.schedule('0 10 * * 0,6', () => monitorCronFire('10 AM ET (weekend)'), { timezone: 'America/Toronto' });
-cron.schedule('0 13 * * 0,6', () => monitorCronFire('1 PM ET (weekend)'), { timezone: 'America/Toronto' });
-cron.schedule('0 16 * * 0,6', () => monitorCronFire('4 PM ET (weekend)'), { timezone: 'America/Toronto' });
+cron.schedule('0 7 * * *', () => monitorCronFire('07:00 daily'), { timezone: 'America/Toronto' });
 
 // Inbound mail polling cron (Section 4.0 of campaign brief v1.7). Polls
 // arthur@negotiateandwin.com via IMAP every 5 minutes, dispatches platform-routed
@@ -9448,16 +9450,8 @@ cron.schedule('*/5 * * * *', () => {
   sequenceRunnerV2.runOnce(pool).catch(e => console.error('[SequenceRunnerV2] uncaught:', e.message));
 }, { timezone: 'America/Toronto' });
 
-// Twice-daily inbound activity summary (Section 4.0 of campaign brief v1.7).
-// 10:00 ET and 15:00 ET, every day. Aggregates across all four backends and emails
-// arthur@negotiateandwin.com.
-const inboundSummary = require('./services/inbound-summary');
-cron.schedule('0 10 * * *', () => {
-  inboundSummary.sendSummary({ pool, slot: '10am' }).catch(e => console.error('[InboundSummary] uncaught:', e.message));
-}, { timezone: 'America/New_York' });
-cron.schedule('0 15 * * *', () => {
-  inboundSummary.sendSummary({ pool, slot: '3pm' }).catch(e => console.error('[InboundSummary] uncaught:', e.message));
-}, { timezone: 'America/New_York' });
+// The 10:00 / 15:00 ET [INBOUND-SUMMARY] mails were folded into the 07:00 daily
+// digest, which reads the same per-backend /api/inbound-summary feeds.
 
 // Webhook endpoint health: hourly dual-check probe across all 4 backends.
 // Why: a silent webhook regression (route changed, handler crashed, deploy stripped
@@ -9527,6 +9521,9 @@ async function _checkBackend(backend) {
   return { failures, critical };
 }
 
+// Returns { failures, critical }. The hourly cron only logs; the 07:00 daily
+// digest runs a fresh probe and lists any failure in its Action block (the
+// former per-hour alert mail was one of the ~70 weekly platform emails).
 async function runWebhookHealthCheck() {
   const allFailures = [];
   let anyCritical = false;
@@ -9537,136 +9534,22 @@ async function runWebhookHealthCheck() {
   }
   if (allFailures.length === 0) {
     console.log(`[WebhookHealth] all 4 backends healthy at ${new Date().toISOString()}`);
-    return;
+  } else {
+    console.error(`[WebhookHealth] ${allFailures.length} issue(s)${anyCritical ? ' (CRITICAL)' : ''}: ${allFailures.join(' | ')}`);
   }
-  console.error(`[WebhookHealth] ${allFailures.length} issue(s)${anyCritical ? ' (CRITICAL)' : ''}: ${allFailures.join(' | ')}`);
-  try {
-    const subject = anyCritical
-      ? `WEBHOOK HEALTH CRITICAL: signature guard broken, forged events possible`
-      : `WEBHOOK HEALTH: ${allFailures.length} issue(s) detected`;
-    await sendEmail({
-      to: 'arthur@negotiateandwin.com',
-      subject,
-      html: `<div style="font-family:Arial,sans-serif;max-width:600px;">
-        <h3 style="color:${anyCritical ? '#991b1b' : '#b45309'};">Resend webhook health check</h3>
-        <p>Two checks per backend: (a) GET <code>/api/webhooks/resend/health</code> expects 200 + status healthy/warn/unknown; (b) unsigned POST to <code>/api/webhooks/resend</code> expects 401.</p>
-        <ul>${allFailures.map(f => `<li><code>${f}</code></li>`).join('')}</ul>
-        <p style="font-size:12px;color:#64748b;">Time: ${new Date().toISOString()} ET. Resend retries via Svix for ~24h on failure, so brief blips self-heal. A CRITICAL flag (unsigned POST returning 200) means anyone can forge events and must be fixed immediately.</p>
-      </div>`,
-      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
-    });
-  } catch (e) { console.error('[WebhookHealth] alert send failed:', e.message); }
+  return { failures: allFailures, critical: anyCritical };
 }
 
 cron.schedule('15 * * * *', () => {
   runWebhookHealthCheck().catch(e => console.error('[WebhookHealth] cron error:', e.message));
 }, { timezone: 'America/Toronto' });
 
-// One-time Monday May 4, 2026 7:00 AM ET reminder cron — fires the v2 identity audit
-// spec to Arthur's inbox so he can paste it into a fresh Claude session. Set up
-// 2026-05-02 evening. Expires after one fire by date-guarding on '2026-05-04'; subsequent
-// Mondays no-op.
-cron.schedule('0 7 * * 1', async () => {
-  const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Toronto' });
-  if (todayET !== '2026-05-04') return;
-  console.log('[IdentityAuditReminder] firing at', new Date().toISOString());
-
-  const promptBody = `SCHEDULED CRON — Monday May 4, 2026, 7:00 AM ET — Identity reconciliation + parallel-session audit (read-only Tasks 1+2; Task 3 conditional on Arthur go/no-go).
-
-Read /Users/arthurkostaras/.claude/projects/-Users-arthurkostaras/96af4ae8-e1fb-43ff-a73b-2ce224173217.jsonl for the May 1-2 prior session — full v2 spec captured in the exchange between Arthur's spec and my 6-point pre-flight review. Below is the compiled v2.
-
-CRITICAL CONSTRAINTS
-1. Tasks 1+2 READ-ONLY. No code/schema/env-var/cron changes until both audits report and Arthur reviews.
-2. Task 2 MUST finish before 9:30 AM ET — that's the CBE banker-send cron. If you can't finish in time, STOP and email Arthur to manually pause the cron.
-3. Task 3 (UNION view migration) only runs if Task 1 returns "structurally invisible." Wait for explicit go-ahead.
-4. No "while I'm in the code" fixes. Note them, ask separately.
-5. Don't generalize Path 3 beyond the referral widget.
-
-TASK 1 — Widget render-condition audit (~15 min, read-only)
-- grep -rn "ReferralWidget|referral_code|referralCode|/api/referrals" /Users/arthurkostaras/projects/canada{accountants,lawyers,investing}-backend/public/
-- Trace gating logic. Are there gates beyond users.referral_code? (subscription tier, claim_status, profile_complete, etc.)
-- For ACC's 2 users with codes (Arthur id=2, David Mark id=4), trace whether each gate is satisfied. Query DB if needed.
-- Email arthur@negotiateandwin.com: subject "Identity audit Task 1 — widget render diagnosis", body with copy-pasted render conditions, whether ACC's 2 users see widget, explicit "structurally invisible" or "renders fine, adoption gap" call.
-- Wait for Arthur's go/no-go before Task 3.
-
-TASK 2 — Parallel-session reconciliation (~30 min, read-only)
-Repos: /Users/arthurkostaras/projects/canada{accountants,lawyers,investing,businessexits}-backend, /Users/arthurkostaras/projects/{lawyer,sme}-intelligence-backend.
-Steps:
-- For each repo: git -C <path> log --since="2026-04-28" --pretty=format:"%H|%an|%s|%b" main
-- Read EVERY commit since 2026-04-28. Do not filter by Author — all show as arhurkostaras. Differentiator is Co-Authored-By line: Claude Opus 4.7 = this session's prior work, Claude Opus 4.6 = parallel session, audit carefully.
-- For each commit: git -C <path> show <hash>, read full diff.
-- Classify: Safe (comments/docs/tests, no behavior change) / Needs review (app logic but not cron/auth/deliverability) / Blocking (cron schedules, send limits, daily_limit env vars, auth/session, webhook handlers, DB migrations, suppression).
-- Email arthur@: subject "Identity audit Task 2 — parallel-session reconciliation", body with table (hash|repo|co-author|files|classification|one-liner) and explicit "safe to fire 9:30 cron" or "blocking issues found, recommend pausing cron."
-- Blocking commit found → STOP, do NOT revert unilaterally.
-
-TASK 3 — UNION view migration (CONDITIONAL, half-day)
-ONLY IF Task 1 returns "structurally invisible" AND Arthur explicitly says go.
-
-a) PRE-DDL CODE MIGRATION (FIRST): grep all backends for INSERT/UPDATE/DELETE against \`users\`, migrate every callsite to write \`users_session\` directly. UNION views aren't updatable in Postgres without INSTEAD OF triggers — without this step, the rename breaks every existing write.
-
-b) Generate per-platform REFERRAL_SECRET (32-byte random hex, distinct per platform). Set on each Railway backend via mcp__railway-mcp-server__set-variables with skipDeploys=true. Do this BEFORE the view definition references the env var.
-
-c) Rename users → users_session.
-
-d) Create view \`users\` as UNION ALL over (SELECT * FROM users_session) and (SELECT <derived> FROM scraped_<platform> WHERE claim_status='claimed' AND email NOT IN (SELECT email FROM users_session)).
-   - Compute referral_code in app code (not Postgres GUC) via crypto.createHmac('sha256', process.env.REFERRAL_SECRET).update(email).digest('hex'). Full 32 hex chars. Existing format example: ea5dd43de1958c4bbc920f9699b998cb. Do NOT truncate to 8 chars.
-   - Per-platform view definition with column-mapping comment header. ACC=scraped_cpas, LAW=scraped_lawyers, INV=scraped_advisors. Schema asymmetry means per-platform, not template.
-
-e) CBE EXCLUDED. CBE has bankers/intakes/smes — no scraped_* with claim_status. Different problem, separate ticket.
-
-Migration order with explicit gate per platform:
-1. ACC first. EXPLAIN ANALYZE on SELECT referral_code FROM users WHERE email = $1. >50ms = STOP, may need materialized view. Capture EXPLAIN in commit message.
-2. Verify: existing 2 ACC users (Arthur, David Mark) resolve to existing codes (regression baseline). New claimer not in users_session resolves to deterministic code. Same email twice → same code.
-3. Replace 24h soak with 5 confirmed widget renders against new view.
-4. Email Arthur, wait for go-ahead.
-5. LAW second (~127K scraped_lawyers — real perf test). Re-run EXPLAIN ANALYZE.
-6. INV third.
-
-Rollback: DROP VIEW users; ALTER TABLE users_session RENAME TO users;
-
-STOP CONDITIONS
-- Task 2 Blocking commit → STOP, flag, do not revert.
-- View 50-200ms on LAW → STOP, flag with EXPLAIN, don't ship.
-- Task 1 ambiguous → STOP, do not proceed to Task 3.
-- Tempted to fix [X] in passing → NO. Note + ask separately.
-- Generalize UNION view → NO. Widget is the test case.
-
-REPORTING
-After Task 1: email + await go/no-go on Task 3.
-After Task 2: email summary + explicit safe/blocking call.
-After EACH platform in Task 3: separate email with EXPLAIN ANALYZE + verification + go-ahead before next.
-
-Begin Task 1 immediately. Begin Task 2 in parallel.`;
-
-  const escaped = promptBody.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  try {
-    await sendEmail({
-      to: 'arthur@negotiateandwin.com',
-      subject: 'Identity audit — paste into Claude now (Mon May 4, 9:30 cron deadline)',
-      html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:900px;color:#0F1629;">
-        <p style="font-size:15px;">Good morning. The identity reconciliation + parallel-session audit is queued.</p>
-        <p style="font-size:15px;">Open a fresh Claude session and paste the entire block below. The audit runs Tasks 1 and 2 in parallel; you'll get two emails roughly 15 and 30 minutes after start.</p>
-        <p style="font-size:15px;"><strong style="color:#8C3A2C;">Hard deadline: Task 2 must complete before 9:30 AM ET</strong> when the CBE banker-send cron fires. That gives ~2.5h of margin from 7 AM start.</p>
-        <hr style="border:none;border-top:1px solid #C9BFA8;margin:20px 0;">
-        <p style="font-size:13px;color:#5A6478;">Copy everything between the lines:</p>
-        <pre style="background:#0F1629;color:#F5F1E8;padding:24px;border-radius:6px;white-space:pre-wrap;font-size:12px;line-height:1.55;font-family:Consolas,Monaco,monospace;">${escaped}</pre>
-        <p style="font-size:12px;color:#5A6478;margin-top:24px;">Auto-generated by ACC reminder cron at 7:00 AM ET, May 4. One-shot — won't fire again.</p>
-      </div>`,
-      from: process.env.FROM_EMAIL || 'noreply@canadaaccountants.app',
-    });
-    console.log('[IdentityAuditReminder] email sent successfully');
-  } catch (e) {
-    console.error('[IdentityAuditReminder] send failed:', e.message);
-  }
-}, { timezone: 'America/Toronto' });
-console.log('[IdentityAuditReminder] one-time reminder cron scheduled for Mon May 4 7:00 AM ET');
-
 // Heartbeat: log every hour to confirm process is alive and crons are registered
 setInterval(() => {
   console.log(`[Heartbeat] ACC alive at ${new Date().toISOString()}, uptime=${process.uptime().toFixed(0)}s`);
 }, 60 * 60 * 1000);
 
-console.log('[Monitor] Pipeline monitor scheduled: 9:05/9:30/10:05/11:05/14:05 Mon-Fri + 15:00 daily + weekend 10/13/16');
+console.log('[DailyDigest] scheduled: 07:00 America/Toronto daily (Monday edition carries the founder-outreach list)');
 
 // CRM Intelligence — nightly at 3 AM ET (use setInterval every 24h with initial delay)
 setTimeout(() => {

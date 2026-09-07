@@ -1,6 +1,7 @@
-// Twice-daily inbound activity summary email (Section 4.0 of campaign brief v1.7).
-// Fires at 10:00 ET and 15:00 ET. Aggregates inbound counts across all four backends
-// and sends a plain-text summary to arthur@negotiateandwin.com.
+// Inbound activity summary (Section 4.0 of campaign brief v1.7).
+// The 10:00 / 15:00 ET summary crons were folded into the 07:00 daily digest
+// (services/daily-digest.js), which reuses the peer-fetch and poller-health helpers
+// exported below. sendSummary() stays callable for an ad-hoc run.
 //
 // Window logic:
 //   10am summary covers the prior 19 hours (since 3pm yesterday)
@@ -175,4 +176,4 @@ async function sendSummary({ pool, slot }) {
   }
 }
 
-module.exports = { sendSummary };
+module.exports = { sendSummary, PEER_BACKENDS, _fetchPeerSummary, _fetchLocalSummary, _fetchPollerHealth };
