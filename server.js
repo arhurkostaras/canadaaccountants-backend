@@ -109,7 +109,12 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         const userId = session.metadata?.userId;
         const tier = session.metadata?.tier || planType;
         if (cpaProfileId && session.subscription) {
-          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(() => {});
+          // The upsert below needs this unique index; production does not have it
+          // (pg_indexes, 2026-09-07). If this CREATE fails the ON CONFLICT raises
+          // "no unique or exclusion constraint" and the subscription row is never written.
+          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(err => {
+            console.error('[Stripe Webhook] cpa_subscriptions unique index create failed (upsert will fail):', err.message);
+          });
           await pool.query(
             `INSERT INTO cpa_subscriptions (cpa_profile_id, plan_type, status, stripe_subscription_id, stripe_customer_id, current_period_start)
              VALUES ($3, $4, 'active', $1, $2, NOW())
@@ -1391,6 +1396,29 @@ const crmIntelligence = new CRMIntelligence({
     console.log('[Migration] profile_disputes + scraped_cpas.dispute_pending/removed_at verified');
   } catch (err) {
     console.error('[Migration] profile_disputes migration FAILED (public profile routes will error until fixed):', err.message);
+  }
+
+  // cpa_subscriptions.cpa_profile_id is VARCHAR(255) in production (information_schema,
+  // verified 2026-09-07; 2 canceled rows, both NULL) while cpa_profiles.id is SERIAL. Every
+  // comparison against a profile id is written as a text compare on both sides so the code
+  // holds under either type (tests/cpa-subscriptions-cpa-profile-id.test.js). This block
+  // retypes the column to INTEGER. It is a production schema change, so it runs only when
+  // CPA_SUBS_CPA_PROFILE_ID_RETYPE=true is set (default off); it is idempotent and refuses
+  // if any value is not a plain integer string. Remove the flag and this block once it has run.
+  if (process.env.CPA_SUBS_CPA_PROFILE_ID_RETYPE === 'true') {
+    try {
+      const col = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_name = 'cpa_subscriptions' AND column_name = 'cpa_profile_id'`);
+      const dataType = col.rows[0]?.data_type;
+      if (dataType && dataType !== 'integer') {
+        const bad = await pool.query(`SELECT COUNT(*)::int AS n FROM cpa_subscriptions WHERE cpa_profile_id IS NOT NULL AND cpa_profile_id !~ '^[0-9]+$'`);
+        if (bad.rows[0].n > 0) {
+          console.error(`[Migration] cpa_subscriptions.cpa_profile_id retype refused: ${bad.rows[0].n} row(s) hold a non-integer value; expected only cpa_profiles.id strings. Fix those rows, then reboot with the flag set.`);
+        } else {
+          await pool.query(`ALTER TABLE cpa_subscriptions ALTER COLUMN cpa_profile_id TYPE INTEGER USING cpa_profile_id::integer`);
+          console.log(`[Migration] cpa_subscriptions.cpa_profile_id retyped ${dataType} -> integer`);
+        }
+      }
+    } catch (err) { console.error('[Migration] cpa_subscriptions.cpa_profile_id retype:', err.message); }
   }
 
   // Seed core sequences (creates new or updates existing with new steps)
@@ -2973,7 +3001,7 @@ app.get('/api/cpa/seo-score', authenticateToken, requireCPA, async (req, res) =>
     const result = await pool.query(
       `SELECT cp.*, cs.plan_type as subscription_tier, sc.claim_status, sc.designation
        FROM cpa_profiles cp
-       LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
+       LEFT JOIN cpa_subscriptions cs ON cs.cpa_profile_id::text = cp.id::text
        LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
        WHERE cp.user_id = $1
        LIMIT 1`, [req.user.userId]
@@ -5574,7 +5602,7 @@ app.get('/api/checkout/:tier', async (req, res) => {
 app.get('/api/stripe/subscription-status', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT cs.* FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1`,
+      `SELECT cs.* FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id::text = cp.id::text WHERE cp.user_id = $1`,
       [req.user.userId]
     );
     res.json({ success: true, subscription: result.rows[0] || null });
@@ -5586,7 +5614,7 @@ app.get('/api/stripe/subscription-status', authenticateToken, async (req, res) =
 app.post('/api/stripe/create-portal-session', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT cs.stripe_customer_id FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1`,
+      `SELECT cs.stripe_customer_id FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id::text = cp.id::text WHERE cp.user_id = $1`,
       [req.user.userId]
     );
     if (!result.rows[0]?.stripe_customer_id) return res.status(400).json({ error: 'No Stripe customer found' });
@@ -6525,7 +6553,7 @@ app.get('/api/dashboard/matches', authenticateToken, requireCPA, async (req, res
   try {
     // Get user subscription status
     const subResult = await pool.query(
-      `SELECT cs.status, cs.plan_type FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1 AND cs.status = 'active'`,
+      `SELECT cs.status, cs.plan_type FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id::text = cp.id::text WHERE cp.user_id = $1 AND cs.status = 'active'`,
       [req.user.userId]
     );
     // Also check users table for subscription_status
