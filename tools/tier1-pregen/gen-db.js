@@ -20,7 +20,7 @@ const { Pool } = require('pg');
 const fs = require('fs'), path = require('path');
 const { calculateSEOScore } = require('../../services/ai');
 const { buildPage } = require('./gen-ssr');
-const { dedupeName, cleanBio, resolveLocation } = require('./normalize');
+const { dedupeName, cleanBio, stripBioHeader, resolveLocation } = require('./normalize');
 const { INDEXABLE_SQL, INDEXABILITY_COLUMNS, classifyProfile, profileUrl } = require('../../utils/profile-indexability');
 
 const argv = process.argv.slice(2);
@@ -39,7 +39,7 @@ function assemble(p) {
   let firstName = p.first_name || '', lastName = p.last_name || '';
   if (firstName.includes(',') && !lastName) { const parts = firstName.split(',').map(s => s.trim()); lastName = parts[0]; firstName = parts[1] || ''; }
   const fullName = dedupeName(`${firstName} ${lastName}`.trim());
-  const bio = cleanBio(p.generated_bio) || null;
+  const bio = stripBioHeader(cleanBio(p.generated_bio), [fullName, p.full_name, `${p.first_name || ''} ${p.last_name || ''}`.trim()]) || null;
   const seoScore = calculateSEOScore({ bio, phone: p.phone, specializations: p.specializations, firm_name: p.firm_name, designation: p.designation, city: p.city, province: p.province, years_experience: p.years_experience, claim_status: p.claim_status, subscription_tier: p.subscription_tier });
   const loc = resolveLocation(p.city, p.province);
   const location = [loc.city, loc.province].filter(Boolean).join(', ');

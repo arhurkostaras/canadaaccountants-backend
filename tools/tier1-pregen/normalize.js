@@ -17,6 +17,22 @@ function cleanBio(bio) {
        .replace(/^[-*]\s+/gm, '').replace(/`([^`]+)`/g, '$1').replace(/#/g, '');
   return b.replace(/\n{3,}/g, '\n\n').trim();
 }
+// Stored bios often open with a header line the page already renders as the H1 ("Jane Doe, CPA, CA"
+// or just "Jane Doe") followed by a blank line. Strip it when the first line starts with one of the
+// person's name forms, is short, and is not a sentence. Render-time only; stored bios are untouched.
+// Found by the 2026-09-07 10-random spot-check (1,669 of 1,715 admitted bios, 1,113 of 6,111 live).
+function stripBioHeader(bio, names) {
+  if (!bio) return bio;
+  const list = (Array.isArray(names) ? names : [names]).filter(n => typeof n === 'string' && n.trim());
+  if (!list.length) return bio;
+  const nl = bio.indexOf('\n');
+  if (nl === -1) return bio;
+  const first = bio.slice(0, nl).trim();
+  if (first.length > 120 || /[.!?]$/.test(first)) return bio;
+  const firstL = first.toLowerCase();
+  if (!list.some(n => firstL.startsWith(n.trim().toLowerCase()))) return bio;
+  return bio.slice(nl).replace(/^\s+/, '');
+}
 // GeoNames allowlist (bundled at the backend root) — same as server.js resolveLocation.
 const CA_CITIES = require('../../ca-cities.json');
 const CA_CITY_SET = {};
@@ -29,4 +45,4 @@ function resolveLocation(city, province) {
   }
   return { city: outCity, province: province || null };
 }
-module.exports = { dedupeName, cleanBio, resolveLocation };
+module.exports = { dedupeName, cleanBio, stripBioHeader, resolveLocation };

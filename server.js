@@ -6714,6 +6714,10 @@ function cleanBio(bio) {
 const {
   INDEXABLE_SQL, GATED_SQL, INDEXABILITY_COLUMNS, classifyProfile, profilePath, profileUrl, withPublicIndexFields,
 } = require('./utils/profile-indexability');
+// Leading "Name, CPA, CA" header line inside stored bios: stripped at render time, shared with the
+// static page generator so the SPA, the static pages and the directory snippets agree.
+const { stripBioHeader } = require('./tools/tier1-pregen/normalize');
+const nameForms = r => [r.full_name, `${r.first_name || ''} ${r.last_name || ''}`.trim()];
 
 // Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
 // '#'/'**' markdown and the Chartered->Certified wording fix never leak through bio_snippet
@@ -6723,7 +6727,7 @@ const {
 function withCleanSnippet(rows) {
   return rows.map(row => ({
     ...withPublicIndexFields(row),
-    bio_snippet: row.generated_bio ? cleanBio(row.generated_bio).slice(0, 160) : null,
+    bio_snippet: row.generated_bio ? stripBioHeader(cleanBio(row.generated_bio), nameForms(row)).slice(0, 160) : null,
   }));
 }
 // GeoNames allowlist (21,672 Canadian municipalities by province) — replaces the old 35-city denylist,
@@ -6801,7 +6805,7 @@ app.get('/api/profiles/:id', async (req, res) => {
         bio = null;
       }
     }
-    bio = cleanBio(bio);
+    bio = stripBioHeader(cleanBio(bio), [fullName, ...nameForms(p)]);
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
