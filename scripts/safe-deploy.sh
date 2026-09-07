@@ -19,6 +19,24 @@ if [ -n "$(git status --porcelain)" ]; then
   git status --porcelain | head -10 >&2
 fi
 echo "Base check passed: HEAD contains origin/main ($(git rev-parse --short origin/main))."
+
+# BP-015 tree guard. On 2026-09-07 a LAW deploy shipped a server.js that still
+# held a "<<<<<<< HEAD" merge marker; the process crashed at boot and production
+# answered 502 for four minutes. The tree that is about to be uploaded must
+# parse and must carry no conflict markers, checked here, not remembered.
+if grep -rIl --exclude-dir=node_modules --exclude-dir=.git --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.json' --include='*.sql' --include='*.sh' -E '^(<<<<<<<|=======|>>>>>>>)( |$)' . >/dev/null 2>&1; then
+  echo "REFUSED: merge conflict markers in the tree (BP-015)." >&2
+  grep -rIn --exclude-dir=node_modules --exclude-dir=.git --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.json' --include='*.sql' --include='*.sh' -E '^(<<<<<<<|=======|>>>>>>>)( |$)' . | head -10 >&2
+  echo "Expected: no line starting with <<<<<<<, =======, or >>>>>>>." >&2
+  echo "Fix: resolve the merge, run node --check server.js, commit, re-run." >&2
+  exit 1
+fi
+if ! node --check server.js; then
+  echo "REFUSED: server.js does not parse (BP-015); the deploy would crash at boot." >&2
+  echo "Fix: run node --check server.js, repair, commit, re-run." >&2
+  exit 1
+fi
+echo "Tree check passed: no conflict markers, server.js parses."
 railway status
 # Upload THIS checkout. Without --path-as-root, railway up archives the "project
 # directory" (the main checkout the Railway link was made in), so a deploy run
