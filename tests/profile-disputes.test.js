@@ -122,7 +122,7 @@ test('server.js wires the gate, sitemap, listings, boot migration, and routes', 
   const gateIdx = src.indexOf('profileDisputes.hiddenReason(rows[0])', routeIdx);
   const oldGateIdx = src.indexOf('rows[0].is_misclassified === true', routeIdx);
   assert.ok(routeIdx > 0 && selectIdx > routeIdx && gateIdx > selectIdx && gateIdx < oldGateIdx, '/api/profiles/:id dispute gate sits at the existing 410 gate');
-  assert.match(src.slice(routeIdx, selectIdx), /collision_count, dispute_pending, removed_at/);
+  assert.match(src.slice(routeIdx, selectIdx), /collision_count, \$\{INDEXABILITY_COLUMNS\}/, 'profile SELECT reads the indexability columns (which carry the dispute flags)');
 
   // claim-by-token route
   const claimIdx = src.indexOf("app.get('/api/claim/profile/:refToken'");
@@ -132,17 +132,25 @@ test('server.js wires the gate, sitemap, listings, boot migration, and routes', 
   // sitemap and listings
   const sitemapIdx = src.indexOf("app.get('/api/sitemap-profiles.xml'");
   const sitemapEnd = src.indexOf('</urlset>', sitemapIdx);
-  assert.match(src.slice(sitemapIdx, sitemapEnd), /AND \$\{profileDisputes\.VISIBLE_SQL\}/, 'sitemap excludes hidden rows');
-  // sitemap count + rows (2), directory city (2), province (3), designation (2), search (1), related (1)
-  const listingUses = (src.match(/AND \$\{profileDisputes\.VISIBLE_SQL\}/g) || []).length;
-  assert.strictEqual(listingUses, 11, `every public listing query carries the dispute predicate (found ${listingUses})`);
+  // On ACC the dispute flags are folded into the single indexability chokepoint
+  // (utils/profile-indexability.js): GATED_SQL / INDEXABLE_SQL carry them, so the
+  // sitemap, directory, search, and related queries exclude hidden rows through it.
+  const idx = require('../utils/profile-indexability');
+  assert.match(idx.GATED_SQL, /dispute_pending IS TRUE/);
+  assert.match(idx.GATED_SQL, /removed_at IS NOT NULL/);
+  assert.ok(idx.INDEXABLE_SQL.includes(`NOT ${idx.GATED_SQL}`), 'INDEXABLE_SQL excludes gated (hidden) rows');
+  for (const col of ['dispute_pending', 'removed_at']) assert.ok(idx.INDEXABILITY_COLUMNS.split(', ').includes(col), `INDEXABILITY_COLUMNS carries ${col}`);
+  assert.strictEqual(idx.classifyProfile({ dispute_pending: true }).http_status, 410);
+  assert.deepStrictEqual(idx.classifyProfile({ removed_at: new Date(), is_misclassified: true }).reason, 'removed', 'removal outranks contamination flags');
+  assert.strictEqual(src.indexOf('${profileDisputes.VISIBLE_SQL}'), -1, 'no ACC query carries a second copy of the predicate');
+  assert.match(src.slice(sitemapIdx, sitemapEnd), /WHERE \$\{INDEXABLE_SQL\}/, 'sitemap filters through INDEXABLE_SQL');
   for (const route of ["app.get('/api/directory/city/:city'", "app.get('/api/directory/:province'", "app.get('/api/directory/:province/:designation'", "app.get('/api/professionals/search'"]) {
     const at = src.indexOf(route);
     assert.ok(at > 0, `${route} exists`);
-    assert.ok(src.slice(at, at + 2500).includes('${profileDisputes.VISIBLE_SQL}'), `${route} filters hidden rows`);
+    assert.ok(src.slice(at, at + 2500).includes('NOT ${GATED_SQL}'), `${route} filters gated (hidden) rows`);
   }
   const relatedIdx = src.indexOf('Related profiles for internal SEO linking');
-  assert.match(src.slice(relatedIdx, relatedIdx + 600), /AND \$\{profileDisputes\.VISIBLE_SQL\}/, 'related profiles exclude hidden rows');
+  assert.match(src.slice(relatedIdx, relatedIdx + 800), /AND \$\{INDEXABLE_SQL\}/, 'related profiles exclude hidden rows');
 });
 
 test('every professional-facing footer carries the dispute link and every send path fills it', () => {
@@ -201,16 +209,10 @@ describe('against Postgres', { skip: DB_URL ? false : 'set DISPUTE_TEST_DATABASE
     return (await pool.query(`SELECT id, dispute_pending, removed_at FROM ${TABLE} WHERE id = $1`, [id])).rows[0];
   }
 
-  // Mirrors the sitemap query in server.js (same flags, same predicate).
+  // Mirrors the sitemap query in server.js: the shared INDEXABLE_SQL predicate.
+  const { INDEXABLE_SQL, GATED_SQL } = require('../utils/profile-indexability');
   async function inSitemap(id) {
-    const r = await pool.query(
-      `SELECT id FROM ${TABLE}
-        WHERE status != 'invalid'
-          AND COALESCE(is_misclassified, false) = false
-          AND COALESCE(has_enrichment_collision, false) = false
-          AND COALESCE(is_generic_inbox, false) = false
-          AND ${disputes.VISIBLE_SQL}
-          AND id = $1`, [id]);
+    const r = await pool.query(`SELECT id FROM ${TABLE} WHERE ${INDEXABLE_SQL} AND id = $1`, [id]);
     return r.rows.length === 1;
   }
 
@@ -227,7 +229,7 @@ describe('against Postgres', { skip: DB_URL ? false : 'set DISPUTE_TEST_DATABASE
     await disputes.ensureSchema(pool);   // idempotent
     await pool.query(`INSERT INTO ${TABLE} (first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email)
       VALUES ('Taylor', 'Minato', 'Taylor Minato', 'Minato Law', 'Regina', 'SK', 'Lawyer', 'Taylor@MinatoLaw.ca', 'taylor@minatolaw.ca'),
-             ('Decoy', 'Person', 'Decoy Person', NULL, 'Regina', 'SK', 'Lawyer', 'decoy@example.ca', NULL)`);
+             ('Decoy', 'Person', 'Decoy Person', 'Decoy LLP', 'Regina', 'SK', 'Lawyer', 'decoy@example.ca', NULL)`);
     sent = [];
     server = app().listen(0);
     await new Promise((r) => server.once('listening', r));
@@ -310,7 +312,7 @@ describe('against Postgres', { skip: DB_URL ? false : 'set DISPUTE_TEST_DATABASE
     assert.doesNotMatch(JSON.stringify(res.body), /Minato/);
     assert.strictEqual(await inSitemap(1), false);
     assert.strictEqual(await inSitemap(2), true);
-    const dirQ = await pool.query(`SELECT id FROM ${TABLE} WHERE city ILIKE $1 AND designation IN ('Lawyer','Barrister','Partner','Counsel') AND ${disputes.VISIBLE_SQL} ORDER BY id`, ['%Regina%']);
+    const dirQ = await pool.query(`SELECT id FROM ${TABLE} WHERE city ILIKE $1 AND NOT ${GATED_SQL} ORDER BY id`, ['%Regina%']);
     assert.deepStrictEqual(dirQ.rows.map((x) => x.id), [2], 'directory-style query drops the hidden row');
     const form = await (await fetch(`${base}/api/profiles/1/dispute`)).text();
     assert.match(form, /already hidden/);

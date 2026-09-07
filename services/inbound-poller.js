@@ -14,6 +14,7 @@
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const crypto = require('crypto');
+const dailyDigest = require('./daily-digest');
 
 // Map original recipient address → platform key + backend URL env var name.
 // ACC self-dispatch: prefer ACC_BACKEND_URL if set, else derive from Railway's
@@ -28,6 +29,14 @@ const PLATFORM_ROUTING = {
   'arthur@canadainvesting.app':   { platform: 'inv', backendUrl: process.env.INV_BACKEND_URL },
   'arthur@canadabusinessexits.app': { platform: 'cbe', backendUrl: process.env.CBE_BACKEND_URL }
 };
+
+// support@ mail is stored in ACC's own inbound_messages as manual_review (never
+// dispatched to a platform classifier, so nobody writing to support@ gets an
+// auto-reply) and checked for removal/correction language, which fires the
+// immediate [REMOVAL REQUEST] alert. The daily digest lists every support@ row.
+for (const [address, platform] of Object.entries(dailyDigest.SUPPORT_ADDRESSES)) {
+  PLATFORM_ROUTING[address] = { platform, support: true };
+}
 
 // Header preference order for extracting the original recipient before forwarding
 const RECIPIENT_HEADER_ORDER = ['delivered-to', 'x-forwarded-to', 'x-original-to', 'to'];
@@ -107,7 +116,22 @@ async function _dispatchToBackend(route, messagePayload) {
 // in a poller-owned namespace.
 const POLLER_KEYWORD = 'PlatformInboundDispatched';
 
-async function _processMessage(client, uid, parsed, flags) {
+// Store a support@ message locally. Returns the new row id, or null when the
+// message_id was already stored (idempotent across poll cycles).
+async function _storeSupportMessage(pool, route, payload) {
+  const r = await pool.query(
+    `INSERT INTO inbound_messages
+       (platform, from_email, to_email, subject, body_text, body_html, message_id, received_at,
+        classification_status, classification_decision, processed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'manual_review', 'manual', NOW())
+     ON CONFLICT (message_id) DO NOTHING
+     RETURNING id`,
+    [route.platform, payload.from_email, payload.to_email, payload.subject, payload.body_text, payload.body_html, payload.message_id, payload.received_at]
+  );
+  return r.rowCount > 0 ? r.rows[0].id : null;
+}
+
+async function _processMessage(client, uid, parsed, flags, pool) {
   if (flags && flags.has(POLLER_KEYWORD)) {
     // Already dispatched by a prior poll cycle. Skip.
     return { skipped: true, reason: 'already dispatched' };
@@ -129,6 +153,16 @@ async function _processMessage(client, uid, parsed, flags) {
     message_id: messageId,
     received_at: (parsed.date || new Date()).toISOString()
   };
+  if (route.support) {
+    const storedId = await _storeSupportMessage(pool, route, payload);
+    if (storedId && dailyDigest.isRemovalRequest(payload)) {
+      // Alert before flagging the IMAP keyword: if the alert throws, the next
+      // poll retries and the ON CONFLICT insert keeps it from double-storing.
+      await dailyDigest.sendRemovalAlert({ ...payload, platform: route.platform });
+    }
+    await client.messageFlagsAdd({ uid }, ['\\Seen', POLLER_KEYWORD], { uid: true });
+    return { dispatched: true, support: true, platform: route.platform, message_id: messageId, stored: storedId !== null };
+  }
   await _dispatchToBackend(route, payload);
   // Mark our custom keyword (and \Seen as a courtesy) only after successful
   // dispatch so failures retry on the next poll. The keyword is what gates
@@ -177,7 +211,7 @@ async function pollOnce(pool) {
             continue;
           }
           const parsed = await simpleParser(downloaded.source);
-          const result = await _processMessage(client, uid, parsed, downloaded.flags);
+          const result = await _processMessage(client, uid, parsed, downloaded.flags, pool);
           if (result.skipped) skipped++;
           else if (result.dispatched) dispatched++;
         } catch (perMsgErr) {
@@ -250,4 +284,4 @@ async function _maybeAlert(pool, errorMessage) {
   }
 }
 
-module.exports = { pollOnce };
+module.exports = { pollOnce, _processMessage, _resolvePlatform, PLATFORM_ROUTING };
