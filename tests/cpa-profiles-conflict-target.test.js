@@ -87,6 +87,10 @@ test('every INSERT INTO cpa_profiles supplies cpa_id', () => {
   const offenders = [];
   for (const file of listJsFiles(ROOT)) {
     const src = fs.readFileSync(file, 'utf8');
+    // A file that creates its own cpa_profiles (scripts/referral-rail-selftest.js
+    // builds a scratch lookalike without cpa_id) inserts into that table, not
+    // production's, so the production NOT NULL does not apply to it.
+    if (/CREATE TABLE cpa_profiles\b/i.test(src)) continue;
     for (const stmt of cpaProfileInserts(src)) {
       const cols = (stmt.match(/INSERT INTO cpa_profiles\s*\(([^)]*)\)/i) || [])[1] || '';
       if (!cols.split(',').map(c => c.trim().toLowerCase()).includes('cpa_id')) {
