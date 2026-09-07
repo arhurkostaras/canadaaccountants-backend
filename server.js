@@ -1401,28 +1401,9 @@ const crmIntelligence = new CRMIntelligence({
     console.error('[Migration] profile_disputes migration FAILED (public profile routes will error until fixed):', err.message);
   }
 
-  // cpa_subscriptions.cpa_profile_id is VARCHAR(255) in production (information_schema,
-  // verified 2026-09-07; 2 canceled rows, both NULL) while cpa_profiles.id is SERIAL. Every
-  // comparison against a profile id is written as a text compare on both sides so the code
-  // holds under either type (tests/cpa-subscriptions-cpa-profile-id.test.js). This block
-  // retypes the column to INTEGER. It is a production schema change, so it runs only when
-  // CPA_SUBS_CPA_PROFILE_ID_RETYPE=true is set (default off); it is idempotent and refuses
-  // if any value is not a plain integer string. Remove the flag and this block once it has run.
-  if (process.env.CPA_SUBS_CPA_PROFILE_ID_RETYPE === 'true') {
-    try {
-      const col = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_name = 'cpa_subscriptions' AND column_name = 'cpa_profile_id'`);
-      const dataType = col.rows[0]?.data_type;
-      if (dataType && dataType !== 'integer') {
-        const bad = await pool.query(`SELECT COUNT(*)::int AS n FROM cpa_subscriptions WHERE cpa_profile_id IS NOT NULL AND cpa_profile_id !~ '^[0-9]+$'`);
-        if (bad.rows[0].n > 0) {
-          console.error(`[Migration] cpa_subscriptions.cpa_profile_id retype refused: ${bad.rows[0].n} row(s) hold a non-integer value; expected only cpa_profiles.id strings. Fix those rows, then reboot with the flag set.`);
-        } else {
-          await pool.query(`ALTER TABLE cpa_subscriptions ALTER COLUMN cpa_profile_id TYPE INTEGER USING cpa_profile_id::integer`);
-          console.log(`[Migration] cpa_subscriptions.cpa_profile_id retyped ${dataType} -> integer`);
-        }
-      }
-    } catch (err) { console.error('[Migration] cpa_subscriptions.cpa_profile_id retype:', err.message); }
-  }
+  // cpa_subscriptions.cpa_profile_id was VARCHAR(255) in production until 2026-09-07, when
+  // the flag-gated retype (PR #37) ran it to INTEGER. Comparisons against a profile id stay
+  // text-on-both-sides; tests/cpa-subscriptions-cpa-profile-id.test.js.
 
   // Seed core sequences (creates new or updates existing with new steps)
   try {
