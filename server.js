@@ -19,6 +19,8 @@ const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCP
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
+const profileDisputes = require('./services/profile-disputes');
+const { createProfileDisputeRoutes } = require('./routes/profile-disputes');
 const crypto = require('crypto');
 const cron = require('node-cron');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY || '');
@@ -368,6 +370,15 @@ app.post('/api/admin/founder-outreach/send', createFounderOutreachSendHandler({
 // Defense-in-depth against the "developer forgot to add middleware on new admin route" failure mode.
 // Per-route middleware on individual admin routes is still load-bearing; the umbrella backstops it.
 app.use('/api/admin', authenticateToken, requireAdmin);
+
+// Profile disputes: public GET/POST /api/profiles/:id/dispute and the admin
+// list/resolve routes. Mounted below the umbrella and given the admin
+// middlewares explicitly, so its /api/admin/disputes* routes are guarded twice.
+app.use(createProfileDisputeRoutes({
+  getPool: () => pool,
+  sendEmail,
+  adminAuth: [authenticateToken, requireAdmin],
+}));
 
 // Login endpoint
 app.post('/api/auth/login', async (req, res) => {
@@ -1368,6 +1379,17 @@ const crmIntelligence = new CRMIntelligence({
     console.log('[Migration] generated_bio + profile_visits + ab_test_results + founder_outreach_log + inbound_messages + inbound_poll_status + breakdown_replies + founding_cohort_config + email_template + sequence_pause + sequence_closure_log + founding_cohort_joiners + v2_supply_enrollments verified');
   } catch (err) {
     console.error('[Migration] generated_bio migration error (non-fatal):', err.message);
+  }
+
+  // Profile disputes (migrations/005-profile-disputes.sql): dispute_pending +
+  // removed_at on scraped_cpas and the profile_disputes table. The public
+  // profile, sitemap, directory, and search queries all reference these two
+  // columns, so a failure here is loud: every one of those routes would 500.
+  try {
+    await profileDisputes.ensureSchema(pool);
+    console.log('[Migration] profile_disputes + scraped_cpas.dispute_pending/removed_at verified');
+  } catch (err) {
+    console.error('[Migration] profile_disputes migration FAILED (public profile routes will error until fixed):', err.message);
   }
 
   // Seed core sequences (creates new or updates existing with new steps)
@@ -5414,7 +5436,7 @@ app.get('/api/professionals/search', async (req, res) => {
     const { name, city, province } = req.query;
     if (!name || name.length < 2) return res.status(400).json({ error: 'Name must be at least 2 characters' });
 
-    let query = `SELECT id, first_name, last_name, firm_name, city, province, designation, claim_status FROM scraped_cpas WHERE (first_name || ' ' || last_name) ILIKE $1`;
+    let query = `SELECT id, first_name, last_name, firm_name, city, province, designation, claim_status FROM scraped_cpas WHERE (first_name || ' ' || last_name) ILIKE $1 AND ${profileDisputes.VISIBLE_SQL}`;
     const params = [`%${name}%`];
     if (city) { params.push(`%${city}%`); query += ` AND city ILIKE $${params.length}`; }
     if (province) { params.push(province); query += ` AND province = $${params.length}`; }
@@ -5731,7 +5753,7 @@ app.post('/api/admin/direct-send', async (req, res) => {
         const subject = (subjectTemplate || '').replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
 
         const unsubUrl = `${process.env.BACKEND_URL || 'https://canadaaccountants-backend-production-1d8f.up.railway.app'}/api/unsubscribe/${emailRow.unsubscribe_token}`;
-        let html = template.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl).replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
+        let html = template.replace(/\{\{unsubscribe_url\}\}/g, unsubUrl).replace(/\{\{dispute_url\}\}/g, profileDisputes.disputeUrl(emailRow.recipient_id)).replace(/\{\{first_name\}\}/g, firstName).replace(/\{\{cpa_name\}\}/g, name);
 
         const result = await sendEmail({ to: emailRow.recipient_email, subject, html, from: process.env.FROM_EMAIL });
         if (result && result.success) {
@@ -5872,7 +5894,7 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
     const offset = (page - 1) * perPage;
 
     const countQ = await pool.query(
-      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid'`
+      `SELECT COUNT(*) AS n FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid' AND ${profileDisputes.VISIBLE_SQL}`
     );
     const total = parseInt(countQ.rows[0].n, 10);
     const totalPages = Math.ceil(total / perPage);
@@ -5890,7 +5912,7 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
     }
 
     const rows = await pool.query(
-      `SELECT id FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid' ORDER BY id LIMIT $1 OFFSET $2`,
+      `SELECT id FROM scraped_cpas WHERE COALESCE(enriched_email, email) IS NOT NULL AND status != 'invalid' AND ${profileDisputes.VISIBLE_SQL} ORDER BY id LIMIT $1 OFFSET $2`,
       [perPage, offset]
     );
 
@@ -5964,12 +5986,16 @@ app.get('/api/claim/profile/:refToken', async (req, res) => {
 
     // Fetch scraped CPA profile
     const profile = await pool.query(
-      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason, has_enrichment_collision, is_generic_inbox, collision_count FROM scraped_cpas WHERE id = $1`,
+      `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation, email, enriched_email, is_misclassified, misclassified_reason, has_enrichment_collision, is_generic_inbox, collision_count, dispute_pending, removed_at FROM scraped_cpas WHERE id = $1`,
       [recipient_id]
     );
     if (profile.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
 
     const p = profile.rows[0];
+
+    // Dispute gate (2026-09-07): hidden at the person's request. Same
+    // chokepoint as /api/profiles/:id; body carries no personal data.
+    if (profileDisputes.hiddenReason(p)) return profileDisputes.sendGone(res, 'Claim Profile', p);
 
     // Pool-contamination gate: ACC pool came back clean in the 2026-05-11
     // audit (0 records flagged) but the gate is shipped for symmetry +
@@ -6691,7 +6717,7 @@ app.get('/api/profiles/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT id, first_name, last_name, full_name, firm_name, city, province, designation,
               phone, generated_bio, claim_status, founding_member, is_misclassified, misclassified_reason,
-              has_enrichment_collision, is_generic_inbox, collision_count
+              has_enrichment_collision, is_generic_inbox, collision_count, dispute_pending, removed_at
        FROM scraped_cpas WHERE id = $1`,
       [req.params.id]
     );
@@ -6700,7 +6726,12 @@ app.get('/api/profiles/:id', async (req, res) => {
     // Pool-contamination gate (see /api/claim/profile/:refToken for context).
     // Extended 2026-05-13 (Phase A WS B): also gate on has_enrichment_collision
     // and is_generic_inbox; same recovery path for all three flag types.
-    if (rows[0].is_misclassified === true || rows[0].has_enrichment_collision === true || rows[0].is_generic_inbox === true) {
+    // Extended 2026-09-07: also gate on dispute_pending / removed_at (the
+    // person asked for a correction or removal). That case answers with no
+    // personal data at all, so it takes its own body from the service.
+    const hidden = profileDisputes.hiddenReason(rows[0]);
+    if (hidden || rows[0].is_misclassified === true || rows[0].has_enrichment_collision === true || rows[0].is_generic_inbox === true) {
+      if (hidden) return profileDisputes.sendGone(res, 'Public Profile', rows[0]);
       const gateReason = rows[0].is_misclassified ? (rows[0].misclassified_reason || 'misclassified')
                        : rows[0].has_enrichment_collision ? `enrichment_collision(x${rows[0].collision_count})`
                        : 'generic_inbox';
@@ -6779,6 +6810,7 @@ app.get('/api/profiles/:id', async (req, res) => {
              FROM scraped_cpas
              WHERE province = $1 AND id != $2
                AND COALESCE(enriched_email, email) IS NOT NULL
+               AND ${profileDisputes.VISIBLE_SQL}
              ORDER BY claim_status DESC NULLS LAST, RANDOM()
              LIMIT 6`,
             [p.province, p.id]
@@ -6843,13 +6875,13 @@ app.get('/api/directory/city/:city', async (req, res) => {
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
                 generated_bio, claim_status
          FROM scraped_cpas
-         WHERE city ILIKE $1
+         WHERE city ILIKE $1 AND ${profileDisputes.VISIBLE_SQL}
          ORDER BY claim_status DESC NULLS LAST, full_name ASC
          LIMIT $2`,
         [`%${city}%`, limit]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE city ILIKE $1 AND ${profileDisputes.VISIBLE_SQL}`,
         [`%${city}%`]
       )
     ]);
@@ -6880,17 +6912,17 @@ app.get('/api/directory/:province', async (req, res) => {
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
                 generated_bio
-         FROM scraped_cpas WHERE UPPER(province) = $1
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND ${profileDisputes.VISIBLE_SQL}
          ORDER BY full_name ASC LIMIT $2 OFFSET $3`,
         [provinceCode, limit, offset]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND ${profileDisputes.VISIBLE_SQL}`,
         [provinceCode]
       ),
       pool.query(
         `SELECT designation, COUNT(*) AS count FROM scraped_cpas
-         WHERE UPPER(province) = $1 AND designation IS NOT NULL AND designation != ''
+         WHERE UPPER(province) = $1 AND designation IS NOT NULL AND designation != '' AND ${profileDisputes.VISIBLE_SQL}
          GROUP BY designation ORDER BY count DESC`,
         [provinceCode]
       )
@@ -6928,12 +6960,12 @@ app.get('/api/directory/:province/:designation', async (req, res) => {
       pool.query(
         `SELECT id, full_name, first_name, last_name, firm_name, city, province, designation,
                 generated_bio
-         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2
+         FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2 AND ${profileDisputes.VISIBLE_SQL}
          ORDER BY full_name ASC LIMIT $3 OFFSET $4`,
         [provinceCode, `%${designation.toUpperCase()}%`, limit, offset]
       ),
       pool.query(
-        'SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2',
+        `SELECT COUNT(*) FROM scraped_cpas WHERE UPPER(province) = $1 AND UPPER(designation) LIKE $2 AND ${profileDisputes.VISIBLE_SQL}`,
         [provinceCode, `%${designation.toUpperCase()}%`]
       )
     ]);
