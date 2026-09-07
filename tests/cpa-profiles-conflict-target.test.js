@@ -78,3 +78,29 @@ test('POST /api/claim/instant inserts cpa_profiles with ON CONFLICT (email)', ()
     'the instant-claim cpa_profiles insert must use ON CONFLICT (email) DO NOTHING; (user_id) has no unique index in production');
   assert.doesNotMatch(inserts[0], /ON CONFLICT\s*\(user_id\)/i);
 });
+
+// Production cpa_profiles.cpa_id is NOT NULL with no default (information_schema,
+// 2026-09-07), the only such column on the table. An INSERT that omits it fails
+// with a not-null violation into the same non-fatal catch, so the conflict-target
+// fix above is not enough on its own. Every INSERT INTO cpa_profiles must name it.
+test('every INSERT INTO cpa_profiles supplies cpa_id', () => {
+  const offenders = [];
+  for (const file of listJsFiles(ROOT)) {
+    const src = fs.readFileSync(file, 'utf8');
+    for (const stmt of cpaProfileInserts(src)) {
+      const cols = (stmt.match(/INSERT INTO cpa_profiles\s*\(([^)]*)\)/i) || [])[1] || '';
+      if (!cols.split(',').map(c => c.trim().toLowerCase()).includes('cpa_id')) {
+        offenders.push(`${path.relative(ROOT, file)}: (${cols.replace(/\s+/g, ' ').trim().slice(0, 60)}...)`);
+      }
+    }
+  }
+  assert.deepStrictEqual(
+    offenders,
+    [],
+    `INSERT INTO cpa_profiles without cpa_id.\n` +
+    `  found:    ${offenders.join('; ')}\n` +
+    `  expected: cpa_id in the column list\n` +
+    `  cause:    cpa_profiles.cpa_id is NOT NULL with no default in production; Postgres raises a not-null violation and the surrounding catch swallows it\n` +
+    `  fix:      supply cpa_id, e.g. claim_<userId>_<Date.now()> as /api/claim/instant and the admin backfill do`
+  );
+});
