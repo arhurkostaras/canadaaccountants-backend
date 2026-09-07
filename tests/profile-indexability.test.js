@@ -100,5 +100,5 @@ test('server.js reads the rule through the module: sitemap, related, directory, 
   assert.ok(profile.includes('classifyProfile('), 'profile API must expose the indexable flag');
   assert.ok(profile.includes('INDEXABLE_SQL'), 'related profiles must be filtered to indexable rows');
   const directory = src.slice(src.indexOf("app.get('/api/directory/city/:city'"), src.indexOf('// Founder outreach: weekly digest'));
-  assert.strictEqual((directory.match(/GATED_SQL/g) || []).length, 6, 'all 3 directory endpoints filter gated rows in list + count queries');
+  assert.strictEqual((directory.match(/GATED_SQL/g) || []).length, 7, 'all 3 directory endpoints filter gated rows in list + count queries, plus the province designation counts');
 });
