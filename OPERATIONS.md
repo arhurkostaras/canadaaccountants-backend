@@ -452,9 +452,12 @@ written ruling. Each is a "yes" unless marked otherwise.
   re-subscribed without a campaign that needs it.
 - D4 - Every profile removal or correction request is honoured within three
   business days, without debate. Removal is a hard delete plus a hash-only
-  tombstone (first implemented in canadalawyers-backend, 2026-09-07; ACC and
-  INV get the same shape when their next backend change lands). Requests are
-  never left to the shared inbox: they get a dedicated high-priority alert.
+  tombstone (implemented in canadalawyers-backend on branch
+  claude/new-session-y0bec6, batch 2026-09-04, with the six subjects removed
+  from LAW production on 2026-09-04; ACC and INV get the same shape when
+  their next backend change lands). Requests are never left to the shared
+  inbox: they get a dedicated high-priority alert, and every removal gets a
+  written confirmation to the requester.
 - D5 - CanadaInvesting is HELD, not sunset: subscriber served, lead loop ported
   when it exists, no outreach. Day 60 review (early November 2026) uses a hard
   threshold: fewer than five client requests in 60 days means freeze at zero
