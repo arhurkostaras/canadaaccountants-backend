@@ -20,4 +20,9 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 echo "Base check passed: HEAD contains origin/main ($(git rev-parse --short origin/main))."
 railway status
-railway up --service "$SERVICE" --detach
+# --path-as-root: without it, railway up archives the "project directory" it
+# resolves through git, which from a worktree is the MAIN checkout, not the
+# tree being deployed (LAW, 2026-09-07: two SUCCESS deploys shipped none of
+# the branch). Pinning the archive root to the current directory makes the
+# uploaded tree the one the base check above just verified.
+railway up --path-as-root "$PWD" --service "$SERVICE" --detach
