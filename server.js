@@ -6259,14 +6259,18 @@ app.post('/api/claim/instant', async (req, res) => {
     // raised "no unique or exclusion constraint matching the ON CONFLICT
     // specification" on every call into the catch below, so instant claimants
     // got no profile row. Same defect and fix as LAW PR #15 (ledger BP-013).
+    // cpa_id is NOT NULL with no default in production (the only such column on
+    // cpa_profiles), so it must be supplied; same claim_<user>_<ms> shape the
+    // admin backfill endpoint writes. Without it this insert failed a second way.
     const scraped = profile.rows[0];
     try {
+      const cpaId = `claim_${userId}_${Date.now()}`;
       await pool.query(
-        `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+        `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
          specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'free', 'active', 'active', true, 'pending')
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'free', 'active', 'active', true, 'pending')
          ON CONFLICT (email) DO NOTHING`,
-        [userId, scraped.first_name, scraped.last_name, email,
+        [cpaId, userId, scraped.first_name, scraped.last_name, email,
          scraped.firm_name, scraped.province || scraped.city,
          scraped.specializations || '[]']
       );
