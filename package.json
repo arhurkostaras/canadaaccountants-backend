@@ -9,6 +9,7 @@
     "seed": "node scripts/seed.js",
     "test": "node --test tests/*.test.js",
     "lint": "eslint server.js",
+    "tier1:regen": "railway run --service canadaaccountants-backend node tools/tier1-pregen/gen-db.js",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "dependencies": {
