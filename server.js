@@ -109,12 +109,20 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
         const userId = session.metadata?.userId;
         const tier = session.metadata?.tier || planType;
         if (cpaProfileId && session.subscription) {
-          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(() => {});
+          // The upsert below needs this unique index; production does not have it
+          // (pg_indexes, 2026-09-07). If this CREATE fails the ON CONFLICT raises
+          // "no unique or exclusion constraint" and the subscription row is never written.
+          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(err => {
+            console.error('[Stripe Webhook] cpa_subscriptions unique index create failed (upsert will fail):', err.message);
+          });
           await pool.query(
-            `INSERT INTO cpa_subscriptions (cpa_profile_id, plan_type, status, stripe_subscription_id, stripe_customer_id, current_period_start)
-             VALUES ($3, $4, 'active', $1, $2, NOW())
-             ON CONFLICT (cpa_profile_id) DO UPDATE SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', plan_type = $4, current_period_start = NOW(), updated_at = NOW()`,
-            [session.subscription, session.customer, cpaProfileId, tier || 'professional']
+            // Production columns (information_schema, 2026-09-07): the plan column is
+            // `tier`, not `plan_type`, and `email` is NOT NULL with no default. Same
+            // shape as the LAW webhook.
+            `INSERT INTO cpa_subscriptions (cpa_profile_id, tier, status, stripe_subscription_id, stripe_customer_id, email, current_period_start)
+             VALUES ($3, $4, 'active', $1, $2, $5, NOW())
+             ON CONFLICT (cpa_profile_id) DO UPDATE SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', tier = $4, current_period_start = NOW(), updated_at = NOW()`,
+            [session.subscription, session.customer, cpaProfileId, tier || 'professional', session.customer_email || session.customer_details?.email || '']
           );
         }
         // Update users table with subscription info for upgrade gate
@@ -1391,6 +1399,29 @@ const crmIntelligence = new CRMIntelligence({
     console.log('[Migration] profile_disputes + scraped_cpas.dispute_pending/removed_at verified');
   } catch (err) {
     console.error('[Migration] profile_disputes migration FAILED (public profile routes will error until fixed):', err.message);
+  }
+
+  // cpa_subscriptions.cpa_profile_id is VARCHAR(255) in production (information_schema,
+  // verified 2026-09-07; 2 canceled rows, both NULL) while cpa_profiles.id is SERIAL. Every
+  // comparison against a profile id is written as a text compare on both sides so the code
+  // holds under either type (tests/cpa-subscriptions-cpa-profile-id.test.js). This block
+  // retypes the column to INTEGER. It is a production schema change, so it runs only when
+  // CPA_SUBS_CPA_PROFILE_ID_RETYPE=true is set (default off); it is idempotent and refuses
+  // if any value is not a plain integer string. Remove the flag and this block once it has run.
+  if (process.env.CPA_SUBS_CPA_PROFILE_ID_RETYPE === 'true') {
+    try {
+      const col = await pool.query(`SELECT data_type FROM information_schema.columns WHERE table_name = 'cpa_subscriptions' AND column_name = 'cpa_profile_id'`);
+      const dataType = col.rows[0]?.data_type;
+      if (dataType && dataType !== 'integer') {
+        const bad = await pool.query(`SELECT COUNT(*)::int AS n FROM cpa_subscriptions WHERE cpa_profile_id IS NOT NULL AND cpa_profile_id !~ '^[0-9]+$'`);
+        if (bad.rows[0].n > 0) {
+          console.error(`[Migration] cpa_subscriptions.cpa_profile_id retype refused: ${bad.rows[0].n} row(s) hold a non-integer value; expected only cpa_profiles.id strings. Fix those rows, then reboot with the flag set.`);
+        } else {
+          await pool.query(`ALTER TABLE cpa_subscriptions ALTER COLUMN cpa_profile_id TYPE INTEGER USING cpa_profile_id::integer`);
+          console.log(`[Migration] cpa_subscriptions.cpa_profile_id retyped ${dataType} -> integer`);
+        }
+      }
+    } catch (err) { console.error('[Migration] cpa_subscriptions.cpa_profile_id retype:', err.message); }
   }
 
   // Seed core sequences (creates new or updates existing with new steps)
@@ -2971,9 +3002,9 @@ app.post('/api/cpa/ai-bio', authenticateToken, requireCPA, async (req, res) => {
 app.get('/api/cpa/seo-score', authenticateToken, requireCPA, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT cp.*, cs.plan_type as subscription_tier, sc.claim_status, sc.designation
+      `SELECT cp.*, cs.tier as subscription_tier, sc.claim_status, sc.designation
        FROM cpa_profiles cp
-       LEFT JOIN cpa_subscriptions cs ON cp.id = cs.cpa_profile_id
+       LEFT JOIN cpa_subscriptions cs ON cs.cpa_profile_id::text = cp.id::text
        LEFT JOIN scraped_cpas sc ON sc.claimed_by = cp.user_id
        WHERE cp.user_id = $1
        LIMIT 1`, [req.user.userId]
@@ -5365,7 +5396,10 @@ app.get('/api/outreach/health', async (req, res) => {
     `).catch(() => ({ rows: [{ count: 0 }] }));
     const outreachConv = await pool.query(`SELECT COALESCE(SUM(total_converted), 0) AS conv FROM outreach_campaigns`).catch(() => ({ rows: [{ conv: 0 }] }));
     const paidSubs = await pool.query(`SELECT COUNT(*) FROM cpa_subscriptions WHERE status = 'active'`).catch(() => ({ rows: [{ count: 0 }] }));
-    const revQuery = await pool.query(`SELECT COALESCE(SUM(CASE WHEN plan_type = 'enterprise' THEN 599 WHEN plan_type = 'professional' THEN 299 WHEN plan_type = 'associate' THEN 199 ELSE 0 END), 0) AS mrr FROM cpa_subscriptions WHERE status = 'active' AND plan_type != 'free'`).catch(() => ({ rows: [{ mrr: 0 }] }));
+    const revQuery = await pool.query(`SELECT COALESCE(SUM(CASE WHEN tier = 'enterprise' THEN 599 WHEN tier = 'professional' THEN 299 WHEN tier = 'associate' THEN 199 ELSE 0 END), 0) AS mrr FROM cpa_subscriptions WHERE status = 'active' AND tier != 'free'`).catch(err => {
+      console.error('[Pipeline Monitor] MRR query failed (reporting 0):', err.message);
+      return { rows: [{ mrr: 0 }] };
+    });
     const demandClients = await pool.query(`SELECT COUNT(*) FROM client_profiles WHERE contact_email NOT ILIKE 'arthur@%' AND contact_email NOT ILIKE 'arthur+%' AND contact_email NOT ILIKE '%negotiateandwin%' AND contact_email NOT ILIKE '%akrosfinancial%' AND contact_email NOT ILIKE '%@test.%' AND contact_email NOT ILIKE '%@testcpa%' AND contact_email NOT ILIKE '%@example.%'`).catch(() => ({ rows: [{ count: 0 }] }));
     const demandContact = await pool.query(`SELECT COUNT(*) FROM contact_submissions`).catch(() => ({ rows: [{ count: 0 }] }));
     const matchedLeads = await pool.query(`SELECT COUNT(*) FROM friction_matches fm WHERE NOT EXISTS (SELECT 1 FROM sme_friction_requests r WHERE r.request_id = fm.request_id AND (r.contact_info->>'email' ILIKE 'arthur@%' OR r.contact_info->>'email' ILIKE 'arthur+%' OR r.contact_info->>'email' ILIKE '%negotiateandwin%' OR r.contact_info->>'email' ILIKE '%akrosfinancial%' OR r.contact_info->>'email' ILIKE '%@test.%' OR r.contact_info->>'email' ILIKE '%@testcpa%' OR r.contact_info->>'email' ILIKE '%@example.%'))`).catch(() => ({ rows: [{ count: 0 }] }));
@@ -5574,7 +5608,7 @@ app.get('/api/checkout/:tier', async (req, res) => {
 app.get('/api/stripe/subscription-status', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT cs.* FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1`,
+      `SELECT cs.* FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id::text = cp.id::text WHERE cp.user_id = $1`,
       [req.user.userId]
     );
     res.json({ success: true, subscription: result.rows[0] || null });
@@ -5586,7 +5620,7 @@ app.get('/api/stripe/subscription-status', authenticateToken, async (req, res) =
 app.post('/api/stripe/create-portal-session', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT cs.stripe_customer_id FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1`,
+      `SELECT cs.stripe_customer_id FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id::text = cp.id::text WHERE cp.user_id = $1`,
       [req.user.userId]
     );
     if (!result.rows[0]?.stripe_customer_id) return res.status(400).json({ error: 'No Stripe customer found' });
@@ -6225,14 +6259,18 @@ app.post('/api/claim/instant', async (req, res) => {
     // raised "no unique or exclusion constraint matching the ON CONFLICT
     // specification" on every call into the catch below, so instant claimants
     // got no profile row. Same defect and fix as LAW PR #15 (ledger BP-013).
+    // cpa_id is NOT NULL with no default in production (the only such column on
+    // cpa_profiles), so it must be supplied; same claim_<user>_<ms> shape the
+    // admin backfill endpoint writes. Without it this insert failed a second way.
     const scraped = profile.rows[0];
     try {
+      const cpaId = `claim_${userId}_${Date.now()}`;
       await pool.query(
-        `INSERT INTO cpa_profiles (user_id, first_name, last_name, email, firm_name, province,
+        `INSERT INTO cpa_profiles (cpa_id, user_id, first_name, last_name, email, firm_name, province,
          specializations, subscription_tier, subscription_status, profile_status, is_active, verification_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'free', 'active', 'active', true, 'pending')
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'free', 'active', 'active', true, 'pending')
          ON CONFLICT (email) DO NOTHING`,
-        [userId, scraped.first_name, scraped.last_name, email,
+        [cpaId, userId, scraped.first_name, scraped.last_name, email,
          scraped.firm_name, scraped.province || scraped.city,
          scraped.specializations || '[]']
       );
@@ -6525,7 +6563,7 @@ app.get('/api/dashboard/matches', authenticateToken, requireCPA, async (req, res
   try {
     // Get user subscription status
     const subResult = await pool.query(
-      `SELECT cs.status, cs.plan_type FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id = cp.id WHERE cp.user_id = $1 AND cs.status = 'active'`,
+      `SELECT cs.status, cs.tier FROM cpa_subscriptions cs JOIN cpa_profiles cp ON cs.cpa_profile_id::text = cp.id::text WHERE cp.user_id = $1 AND cs.status = 'active'`,
       [req.user.userId]
     );
     // Also check users table for subscription_status
@@ -6534,7 +6572,7 @@ app.get('/api/dashboard/matches', authenticateToken, requireCPA, async (req, res
       [req.user.userId]
     );
     const hasSubscription = (subResult.rows.length > 0) || (userResult.rows[0]?.subscription_status === 'active');
-    const tier = subResult.rows[0]?.plan_type || userResult.rows[0]?.subscription_tier || null;
+    const tier = subResult.rows[0]?.tier || userResult.rows[0]?.subscription_tier || null;
 
     // Get user's province from profile
     const profile = await pool.query(
