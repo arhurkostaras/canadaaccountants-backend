@@ -209,7 +209,10 @@ test('collectDigestData on a Monday: peers merged, real failures flagged, founde
     pool,
     now: MONDAY,
     fetchPeerFeed: async (peer) => peer.platform === 'LAW'
-      ? { platform: 'LAW', client_requests: [{ name: 'Lee', province: 'BC', service: 'estate', created_at: h(1) }], crons: { poller_last_at: h(0.1), classified_24h: 2, gate_paused: false } }
+      ? {
+        platform: 'LAW', client_requests: [{ name: 'Lee', province: 'BC', service: 'estate', created_at: h(1) }], crons: { poller_last_at: h(0.1), classified_24h: 2, gate_paused: false },
+        lead_loop: { enabled: true, matches: 2, lawyers_emailed: 6, distinct_lawyers: 5, opened: 3, claimed: 1, responded: 1, bounces: 1, unsubscribes: 0, min_scraped_score: 39, leads_under_three: 0 }
+      }
       : { platform: 'INV', notDeployed: true },
     fetchPeerSummary: async (peer) => ({ platform: peer.platform, total: 1, manual_review: 0, pending_breakdowns: peer.platform === 'law' ? [{ recipient_email: 'x@law.ca', replied_at: h(2) }] : [] }),
     collectPipeline: async () => ({
@@ -238,7 +241,10 @@ test('collectDigestData on a Monday: peers merged, real failures flagged, founde
   assert.strictEqual(quiet.INV.ok, false);
   assert.match(quiet.INV.line, /digest feed not deployed yet/);
   assert.match(quiet.LAW.line, /digest feed ok/);
-  assert.strictEqual(quiet.LAW.ok, true);
+  // Lead loop: the line renders in Quiet, and the bounce is raised as a LAW action.
+  assert.match(quiet.LAW.line, /lead loop: 2 matches, 6 lawyers emailed \(5 distinct\), 3 opened, 1 claimed, 1 responded, 1 bounces, 0 unsubscribes, gate 39: 0 lead\(s\) under three recipients/);
+  assert.ok(failures.some(f => f.startsWith('LAW: 1 bounce(s) on lead notifications')), failures.join(' | '));
+  assert.strictEqual(quiet.LAW.ok, false);
 
   const out = digest.buildDigest(data);
   assert.match(out.subject, /^Platforms daily — 2026-09-07 — \d+ actions required$/);

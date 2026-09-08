@@ -351,7 +351,27 @@ function mergePeerFeed(feed, actions, quietParts) {
   if (c.poller_last_at) quietParts.push(`poller ${torontoTime(c.poller_last_at)}`);
   if (c.classified_24h != null) quietParts.push(`classifier ${c.classified_24h} processed`);
   if (c.gate_paused === true) actions.failures.push({ platform: p, message: 'deliverability gate has the platform PAUSED' });
+  mergeLeadLoop(p, feed.lead_loop, actions, quietParts);
   quietParts.push('digest feed ok');
+}
+
+// Lead-loop line for a platform that runs the lead notification loop (LAW from
+// 2026-09-07). A bounce on a lead notification is an action the same day, not
+// a quiet line: the recipient pool is scraped registry data and a bounce means
+// an address that should leave the pool before the next request lands.
+function leadLoopLine(l) {
+  const n = (v) => (v == null ? '?' : v);
+  return `lead loop${l.enabled ? '' : ' (flag off)'}: ${n(l.matches)} matches, ${n(l.lawyers_emailed)} lawyers emailed (${n(l.distinct_lawyers)} distinct), ` +
+    `${n(l.opened)} opened, ${n(l.claimed)} claimed, ${n(l.responded)} responded, ${n(l.bounces)} bounces, ${n(l.unsubscribes)} unsubscribes, ` +
+    `gate ${n(l.min_scraped_score)}: ${n(l.leads_under_three)} lead(s) under three recipients`;
+}
+
+function mergeLeadLoop(platform, leadLoop, actions, quietParts) {
+  if (!leadLoop) return;
+  quietParts.push(leadLoopLine(leadLoop));
+  if (leadLoop.bounces > 0) {
+    actions.failures.push({ platform, message: `${leadLoop.bounces} bounce(s) on lead notifications in the last 24h; remove the address(es) from the pool today (outreach_unsubscribes reason bounce, lawyer_email in lead_notifications)` });
+  }
 }
 
 // deps: { pool, now, collectPipeline, webhookCheck, founderDigest, breakerState,
