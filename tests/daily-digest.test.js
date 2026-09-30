@@ -277,3 +277,30 @@ test('sendDailyDigest and sendRemovalAlert address arthur@negotiateandwin.com th
   assert.strictEqual(sent[1].to, 'arthur@negotiateandwin.com');
   assert.strictEqual(sent[1].subject, '[REMOVAL REQUEST] ACC: remove');
 });
+
+test('revenue card shows per-platform Stripe states, totals collectible MRR, and marks a local-table fallback', () => {
+  const stripeOnly = {
+    ACC: { paid: 0, mrr: 0, paused: 0, cancelling: 0, past_due: 0, trialing: 0, revenue_source: 'stripe', detail: null },
+    LAW: { paid: 0, mrr: 0, paused: 1, cancelling: 0, past_due: 0, trialing: 0, revenue_source: 'stripe', detail: null },
+    INV: { paid: 1, mrr: 199, paused: 0, cancelling: 1, past_due: 0, trialing: 0, revenue_source: 'stripe', detail: null }
+  };
+  const out = digest.buildDigest({ ...quietDay(), revenue: stripeOnly });
+  assert.ok(out.html.includes('Revenue (Stripe)'), 'card present');
+  assert.ok(out.html.includes('1 paid, $199 MRR collectible'), 'totals from paid only');
+  assert.ok(out.html.includes('0 paid, $0 MRR (1 paused) [Stripe]'), 'LAW paused state shown');
+  assert.ok(out.html.includes('1 paid, $199 MRR (1 cancelling) [Stripe]'), 'INV cancelling state shown');
+  assert.ok(!out.html.includes('LOCAL TABLE'), 'no fallback marker when every platform read Stripe');
+  assert.ok(out.text.includes('REVENUE (Stripe'), 'text has the block');
+  assert.ok(out.text.includes('LAW: 0 paid, $0 MRR (1 paused) [Stripe]'), 'text line');
+
+  const withFallback = { ...stripeOnly, INV: { paid: 1, mrr: 299, paused: 0, cancelling: 0, past_due: 0, trialing: 0, revenue_source: 'local_table', detail: 'Stripe unavailable: fetch failed' } };
+  const out2 = digest.buildDigest({ ...quietDay(), revenue: withFallback });
+  assert.ok(out2.html.includes('[LOCAL TABLE, Stripe unavailable]'), 'fallback marked on the platform line');
+  assert.ok(out2.html.includes('Stripe unavailable: fetch failed'), 'detail shown');
+  assert.ok(out2.html.includes('read its local table, not Stripe'), 'card header says so');
+
+  const notReported = digest.buildDigest({ ...quietDay(), revenue: { ACC: stripeOnly.ACC, LAW: null, INV: null } });
+  assert.ok(notReported.html.includes('<strong>LAW</strong>: not reported'), 'a peer feed without revenue reads as not reported');
+  const none = digest.buildDigest(quietDay());
+  assert.ok(!none.html.includes('Revenue (Stripe)'), 'no card without revenue data');
+});

@@ -9510,7 +9510,7 @@ async function collectPipelineMonitor() {
         <strong>Claims:</strong> ${claimsParts.join(' | ')} | Total ${totalClaimed} (${totalConv} outreach-attributed, ${Math.max(0, totalClaimed - totalConv)} direct)
       </div>
       <div style="margin:0 0 16px;padding:14px 16px;background:#eff6ff;border-left:4px solid #2563eb;border-radius:0 6px 6px 0;font-size:14px;color:#1e40af;">
-        <strong>Revenue:</strong> ${paidParts.join(' | ')} → ${totalPaid} paid | $${totalMRR} MRR | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d)
+        <strong>Revenue:</strong> ${paidParts.join(' | ')} → ${totalPaid} paid | $${totalMRR} MRR per local tables (Stripe figure in the Revenue card) | ${totalDemand} demand submissions | ${totalMatched} matched | ${totalContacts7d} contacts (7d)
       </div>
       ${sentFootnote}
       ${demandHtml}
