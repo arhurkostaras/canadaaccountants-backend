@@ -1,5 +1,5 @@
 // House fallback resolver (2026-10-05). Both matchers append the house CPA (Arthur,
-// cpa_profiles.id=3) when real matches < 3, but they looked it up only by
+// cpa_profiles.id=4) when real matches < 3, but they looked it up only by
 // fallback_priority = true AND is_active = true. Production had no row passing that
 // filter, so the append never fired (no "house fallback appended" line in the
 // deployment logs) and Renata Medeiros (client_profile_id 23) got a single weak match.
@@ -29,10 +29,10 @@ test('returns the flagged active row when one exists', async () => {
   assert.strictEqual(queries.length, 1);
 });
 
-test('falls back to cpa_profiles.id=3 when no row is flagged', async () => {
-  const { fn, queries } = loadHelper((sql, params) => (params && params[0] === 3 ? [{ id: 3, is_active: false }] : []));
-  assert.deepStrictEqual(await fn('t'), { id: 3, is_active: false });
-  assert.strictEqual(queries[1].params[0], 3);
+test('falls back to cpa_profiles.id=4 when no row is flagged', async () => {
+  const { fn, queries } = loadHelper((sql, params) => (params && params[0] === 4 ? [{ id: 4, is_active: false }] : []));
+  assert.deepStrictEqual(await fn('t'), { id: 4, is_active: false });
+  assert.strictEqual(queries[1].params[0], 4);
 });
 
 test('returns null when neither lookup finds a row', async () => {
