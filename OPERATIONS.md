@@ -502,7 +502,29 @@ Fix applied (Arthur, psql via `railway connect Postgres`, same session):
   REINDEX TABLE CONCURRENTLY scraped_cpas;            -- rebuilt all 20 indexes, 0 invalid after
 Then `tier1:regen --write` completed: written 7,910, static_page_at set=7,912, cleared=0.
 
-Not yet known: the cause. Two independent corrupt indexes on one table point at the instance
+UPDATE 2026-10-05 (later the same day): instance-wide, not one table. Railway deploy logs for
+the 07:01 MDT deployment showed the outreach follow-up queue failing every cycle on a THIRD
+corrupt index, idx_outreach_emails_recipient_email ("overlaps with invalid duplicate tuple
+at offset 49 of block 39"). A whole-database rebuild then surfaced two more:
+  4. outreach_unsubscribes_email_key (UNIQUE): the corrupt index had let 4 duplicate emails
+     through ON CONFLICT (email) DO NOTHING (AlexCash@tomjones.net, Brunetn.brunet@
+     bestbuydistributors.ca, China@esgsolutions.com, You@Benson.com; later copies deleted,
+     earliest kept, suppression preserved). REINDEX DATABASE CONCURRENTLY aborted on it and
+     left 5 *_ccnew invalid indexes (4 on outreach_unsubscribes + its toast), dropped by hand.
+  5. email_validations_email_key (UNIQUE): amcheck "item order invariant violated"; no
+     duplicates in the heap.
+Final state (Arthur, psql, with index scans disabled during the dedupe):
+  REINDEX DATABASE CONCURRENTLY railway  -> completed; pg_index shows 0 invalid.
+  amcheck bt_index_check(idx, heapallindexed=true) on all 186 public btree indexes -> clean.
+  (verify_heapam on the four affected tables not run; heapallindexed already proved every
+  heap tuple is reachable from each index.)
+Sentry: zero matching events in 90 days, and only ONE error event org-wide in 30 days. The
+backend has 292 console.error sites and 12 swallowed catches against 7 captureException
+calls, so Sentry's silence is non-evidence; Railway deploy logs are the only record, and the
+07:01 deployment's log range starts at 07:01, so the first occurrence is still undated
+(check the 2026-10-04 evening and 2026-09-07 deployments' logs for the same strings).
+
+Not yet known: the cause. Five corrupt indexes across four tables point at the instance
 (unclean shutdown / OOM during index writes / storage), not at a query. Reads were unaffected
 (a corrupt btree still answers lookups, which is why the API never errored), so the damage
 could have been silently steering writes into failures for weeks: any UPDATE that touched a
@@ -510,12 +532,18 @@ corrupt index (claims, disputes, bio persistence, enrichment) would have thrown 
 FATAL. Check Sentry for "cannot find insert offset" / "invalid duplicate tuple" since 09-07.
 
 Follow-ups (not done):
-  a. Run the same two-query check on the LAW (shinkansen), INV (yamanote) and CBE (nozomi)
-     instances: `SELECT ... FROM pg_index WHERE NOT indisvalid` shows only indexes that
-     FAILED a rebuild, not latent corruption. Latent corruption needs amcheck:
+  a. Run amcheck on the LAW (shinkansen), INV (yamanote) and CBE (nozomi) instances; the
+     ACC instance is proven clean as of 2026-10-05 (186/186). One statement per instance:
        CREATE EXTENSION IF NOT EXISTS amcheck;
-       SELECT bt_index_check(indexrelid, true) FROM pg_index WHERE indrelid = 'scraped_cpas'::regclass;
-     Run that on ACC too, now that the rebuild is done, to prove the heap is clean.
+       SELECT COUNT(*) FROM (SELECT bt_index_check(c.oid, true) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_am a ON a.oid = c.relam WHERE a.amname = 'btree' AND n.nspname = 'public') s;
+     A number back = clean; an ERROR names the first bad index (then REINDEX DATABASE
+     CONCURRENTLY, dedupe any unique key it trips on, drop *_ccnew leftovers, repeat).
+  a2. If ACC corrupts again: do not repair in place a second time. pg_dump to a NEW Railway
+     Postgres service, repoint DATABASE_URL, retire the volume. A volume that corrupted five
+     indexes in one window is suspect regardless of a clean amcheck today.
+  a3. Sentry coverage: route the write-path catch blocks (claims, disputes, enrichment, bio
+     persistence, outreach queue) through Sentry.captureException so the next DB fault
+     reaches Sentry instead of only the Railway log stream.
   b. Backups: DONE 2026-10-05 (Arthur, Railway dashboard). ACC Postgres (fulfilling-empathy)
      already had a weekly volume backup (last taken 2026-10-03, 2.04 GB); daily + weekly +
      monthly now all enabled (6 daily, 4 weekly, 3 monthly retained). Same three schedules
