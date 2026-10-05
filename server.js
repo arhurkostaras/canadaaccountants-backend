@@ -1826,13 +1826,13 @@ app.post('/api/performance/score', async (req, res) => {
 // 6-FACTOR MATCHING ALGORITHM
 // =====================================================
 
-// House fallback CPA (Arthur, cpa_profiles.id=3). Resolved by the fallback_priority flag first;
+// House fallback CPA (Arthur, cpa_profiles.id=4; id 3 does not exist in production). Resolved by the fallback_priority flag first;
 // if no active row carries the flag, use HOUSE_FALLBACK_CPA_ID so a mis-flagged row can't
 // silently drop the house match (it did for every request until 2026-10-05).
 async function findHouseFallbackCpa(tag) {
   const flagged = await pool.query("SELECT * FROM cpa_profiles WHERE COALESCE(fallback_priority, false) = true AND is_active = true LIMIT 1");
   if (flagged.rows.length) return flagged.rows[0];
-  const id = parseInt(process.env.HOUSE_FALLBACK_CPA_ID || '3', 10);
+  const id = parseInt(process.env.HOUSE_FALLBACK_CPA_ID || '4', 10);
   const byId = await pool.query('SELECT * FROM cpa_profiles WHERE id = $1', [id]);
   if (byId.rows.length) {
     const r = byId.rows[0];
