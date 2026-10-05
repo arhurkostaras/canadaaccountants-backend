@@ -519,7 +519,9 @@ Follow-ups (not done):
   b. Backups: DONE 2026-10-05 (Arthur, Railway dashboard). ACC Postgres (fulfilling-empathy)
      already had a weekly volume backup (last taken 2026-10-03, 2.04 GB); daily + weekly +
      monthly now all enabled (6 daily, 4 weekly, 3 monthly retained). Same three schedules
-     enabled on the INV Postgres (canadainvesting-backend project). LAW (shinkansen, in the
-     lawyer-intelligence-backend project) and CBE (nozomi) not yet checked.
+     enabled on the INV Postgres (canadainvesting-backend project), on the LAW production
+     Postgres (shinkansen, lawyer-intelligence-backend project) and on the CBE Postgres
+     (nozomi, kind-transformation project). All four production instances now covered;
+     DB_MAP.md's "Backup: UNKNOWN" entries are superseded by this note.
   c. Ledger candidate (BP-016): a weekly amcheck cron or a pre-regen amcheck step in
      gen-db.js so index corruption is found by a scheduled read, not by the first bulk write.
