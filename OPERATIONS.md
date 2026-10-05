@@ -423,3 +423,56 @@ explicitly per the Railway deploy discipline; NEVER touch a postgres service):
 
 Order within each step does not matter; order BETWEEN steps does. Never set the
 new value as primary anywhere before step 2 has covered all four services.
+
+---
+
+## 2026-10-05 - Profile index: email clause dropped, two-tier delivery (static file + SPA)
+
+WHY. Search Console, September 2026: canadalawyers.app 26.8K clicks / 549K impressions from
+134,924 sitemap URLs; canadaaccountants.app last reported 468 clicks (July) from 7,912 static
+pages; canadainvesting.app nothing since the 2026-05-11 noindex. Per indexed page the three
+sites earn the same ~0.2 clicks/month (LAW Sept 0.20, ACC June 0.19). The gap is page count.
+LAW's count comes from its 2026-06-01 sitemap decision: no email requirement ("indexing
+eligibility shouldn't depend on contact-info enrichment"), 6,250 -> 134,924 eligible. ACC's
+threshold kept the email clause, which alone excluded 91,727 of 101,935 rows (BP-010 count).
+
+CHANGE (backend, this repo, branch claude/beautiful-darwin-7mdaot):
+1. utils/profile-indexability.js: INDEXABLE_SQL / classifyProfile() no longer require an
+   email. Content floor unchanged: status <> 'invalid', not gated (5 flags), firm_name, city,
+   bio-or-designation. Phone still never required.
+2. Delivery tier. New column scraped_cpas.static_page_at (migrations/006, also ensured on
+   boot). Set -> canonical /profile/{id}/ (static file exists); NULL -> canonical
+   /profile?id={id} (the SPA, which self-canonicalises on indexable:true and noindexes on
+   404/410/indexable:false; the LAW model). profilePath(row)/profileUrl(row) read the row;
+   the profile API (structured_data.url, related links, new delivery_tier field), the
+   directory listings (profile_url) and the sitemap route all emit the row's own form.
+3. /api/sitemap-profiles.xml: ?tier=static|spa (default both); X-Profile-Tier header.
+4. tools/tier1-pregen/gen-db.js: writes sitemap-profiles-N.xml (static tier, parity-gated)
+   AND sitemap-spa-N.xml (every other indexable id), wires both into sitemap_index.xml and
+   robots.txt, and aligns static_page_at with the files on disk in the same --write run.
+   --admit-new now takes --admit-limit N. Without --admit-new, new qualifiers go to the SPA
+   tier (zero storage).
+5. GET /api/admin/profile-index-drift reads both families and reports tier_mismatch;
+   POST /api/admin/profile-static-sync (dry run; ?execute=true) bootstraps the column from
+   the live static sitemap.
+Frontend (canadaaccountants, branch claude/spa-tier-sitemap-gate): scripts/check-sitemap-
+profiles.mjs also validates the SPA family (?id= form only, never a file, never in both
+families, wired in index + robots, no Disallow on /profile). profile.html needs no change.
+
+ROLLOUT (Arthur, in order):
+a. Merge + deploy backend (safe-deploy.sh). Boot applies migration 006.
+b. npm run tier1:regen  (dry run). Read: "indexable in DB", "qualifies, no page yet" (= SPA
+   tier size), prune count and reasons. Expect prune 0 (the threshold only widened).
+c. npm run tier1:regen -- --write   (no --admit-new on the first run). Writes sitemap-spa-*.xml,
+   rewires index + robots, sets static_page_at for the 7,912 pages on disk.
+d. Merge the frontend gate branch, commit the regenerated artifacts together, push; CI
+   sitemap-parity must be green. Submit sitemap_index.xml again in Search Console.
+e. Within 2-4 weeks: GET /api/admin/profile-index-drift should read 0 listed_not_indexable and
+   0 tier_mismatch; Search Console Pages report should show the SPA URLs moving from
+   Discovered to Indexed. Only then consider --admit-new --admit-limit for the top ids.
+
+RISKS. Thin pages: the firm+city+designation floor stays, so an admitted row always renders
+name, designation, firm, city and a templated or stored bio. Disputes: more indexed pages ->
+more correct-or-remove requests; the 2026-09-07 dispute gate hides and prunes automatically.
+Transitional state between (a) and (c): the API emits ?id= for the 7,912 static ids until the
+column is set; the SPA redirects ?id= -> static when the file exists, so links keep working.
