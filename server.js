@@ -6867,7 +6867,7 @@ const {
 } = require('./utils/profile-indexability');
 // Leading "Name, CPA, CA" header line inside stored bios: stripped at render time, shared with the
 // static page generator so the SPA, the static pages and the directory snippets agree.
-const { stripBioHeader } = require('./tools/tier1-pregen/normalize');
+const { stripBioHeader, templatedSummary } = require('./tools/tier1-pregen/normalize');
 const nameForms = r => [r.full_name, `${r.first_name || ''} ${r.last_name || ''}`.trim()];
 
 // Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
@@ -6949,11 +6949,22 @@ app.get('/api/profiles/:id', async (req, res) => {
     }
     const fullName = dedupeName(`${firstName} ${lastName}`.trim());
 
-    // Generate AI bio on-the-fly if missing
+    const loc = resolveLocation(p.city, p.province);
+    const location = [loc.city, loc.province].filter(Boolean).join(', ');
+
+    // Bio. A stored bio is served as-is. A row with none gets the same factual templated
+    // summary the static generator emits (2026-10-05): with the SPA tier listing ~54K
+    // bio-less profiles, a live model call per first visit would be unreviewed public AI
+    // content at crawl scale, and its latency can overrun the page's 5s synchronous
+    // prerender fetch (which Google reads as a thin page). Bios come from the Tier-1b
+    // pipeline (tools/tier1-pregen/gen-bios.js). PROFILE_BIO_ON_DEMAND=true restores the
+    // old on-the-fly generation without a code change.
     let bio = p.generated_bio;
-    if (!bio) {
+    let bioKind = bio ? 'stored' : 'templated';
+    if (!bio && process.env.PROFILE_BIO_ON_DEMAND === 'true') {
       try {
         bio = await generateBio({ ...p, first_name: firstName, last_name: lastName }, 'accountants');
+        if (bio) bioKind = 'generated';
         // Persist for future requests (fire and forget)
         pool.query('UPDATE scraped_cpas SET generated_bio = $1 WHERE id = $2', [bio, p.id]).catch(() => {}); // non-critical, fire-and-forget
       } catch (bioErr) {
@@ -6962,6 +6973,10 @@ app.get('/api/profiles/:id', async (req, res) => {
       }
     }
     bio = stripBioHeader(cleanBio(bio), [fullName, ...nameForms(p)]);
+    if (!bio) {
+      bio = templatedSummary({ name: fullName, designation: p.designation, firm_name: p.firm_name, location });
+      bioKind = 'templated';
+    }
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
@@ -6978,8 +6993,6 @@ app.get('/api/profiles/:id', async (req, res) => {
     });
 
     const jobTitle = p.designation ? `${p.designation} — Chartered Professional Accountant` : 'Chartered Professional Accountant';
-    const loc = resolveLocation(p.city, p.province);
-    const location = [loc.city, loc.province].filter(Boolean).join(', ');
 
     const jsonLd = {
       '@context': 'https://schema.org',
@@ -7030,6 +7043,7 @@ app.get('/api/profiles/:id', async (req, res) => {
         province: loc.province,
         designation: p.designation,
         bio: bio,
+        bio_kind: bioKind,
         claim_status: p.claim_status || 'unclaimed',
         claimed: p.claim_status === 'claimed',
         founding_member: p.founding_member || false

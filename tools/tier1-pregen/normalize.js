@@ -45,4 +45,15 @@ function resolveLocation(city, province) {
   }
   return { city: outCity, province: province || null };
 }
-module.exports = { dedupeName, cleanBio, stripBioHeader, resolveLocation };
+// Factual summary for a row with no stored bio, built only from directory fields. Shared by the
+// static page generator (gen-ssr.js) and the profile API so both tiers render the same text, and
+// so no public page ever waits on a live model call (bios are produced by the Tier-1b pipeline,
+// tools/tier1-pregen/gen-bios.js, which is spot-checked before anything is persisted).
+function templatedSummary({ name, designation, firm_name, location }) {
+  const who = [`${name} is a ${designation || 'CPA'}`];
+  if (firm_name) who.push(`at ${firm_name}`);
+  if (location) who.push(`in ${location}`);
+  return `${who.join(' ')}, listed in the CanadaAccountants CPA directory. This profile has not been claimed yet; claiming it adds a professional bio, specializations and contact details.`;
+}
+
+module.exports = { dedupeName, cleanBio, stripBioHeader, resolveLocation, templatedSummary };
