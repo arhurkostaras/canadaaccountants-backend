@@ -516,7 +516,10 @@ Follow-ups (not done):
        CREATE EXTENSION IF NOT EXISTS amcheck;
        SELECT bt_index_check(indexrelid, true) FROM pg_index WHERE indrelid = 'scraped_cpas'::regclass;
      Run that on ACC too, now that the rebuild is done, to prove the heap is clean.
-  b. Backups: DB_MAP.md records backup status UNKNOWN for the production instances. A
-     corruption incident is the argument for turning Railway's backup on today.
+  b. Backups: DONE 2026-10-05 (Arthur, Railway dashboard). ACC Postgres (fulfilling-empathy)
+     already had a weekly volume backup (last taken 2026-10-03, 2.04 GB); daily + weekly +
+     monthly now all enabled (6 daily, 4 weekly, 3 monthly retained). Same three schedules
+     enabled on the INV Postgres (canadainvesting-backend project). LAW (shinkansen, in the
+     lawyer-intelligence-backend project) and CBE (nozomi) not yet checked.
   c. Ledger candidate (BP-016): a weekly amcheck cron or a pre-regen amcheck step in
      gen-db.js so index corruption is found by a scheduled read, not by the first bulk write.
