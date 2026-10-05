@@ -1826,6 +1826,23 @@ app.post('/api/performance/score', async (req, res) => {
 // 6-FACTOR MATCHING ALGORITHM
 // =====================================================
 
+// House fallback CPA (Arthur, cpa_profiles.id=3). Resolved by the fallback_priority flag first;
+// if no active row carries the flag, use HOUSE_FALLBACK_CPA_ID so a mis-flagged row can't
+// silently drop the house match (it did for every request until 2026-10-05).
+async function findHouseFallbackCpa(tag) {
+  const flagged = await pool.query("SELECT * FROM cpa_profiles WHERE COALESCE(fallback_priority, false) = true AND is_active = true LIMIT 1");
+  if (flagged.rows.length) return flagged.rows[0];
+  const id = parseInt(process.env.HOUSE_FALLBACK_CPA_ID || '3', 10);
+  const byId = await pool.query('SELECT * FROM cpa_profiles WHERE id = $1', [id]);
+  if (byId.rows.length) {
+    const r = byId.rows[0];
+    console.warn(`[${tag}] house fallback flag missing; using cpa_profiles.id=${id} (is_active=${r.is_active}, fallback_priority=${r.fallback_priority}). Set fallback_priority=true AND is_active=true on it.`);
+    return r;
+  }
+  console.error(`[${tag}] house fallback unavailable: no flagged active cpa_profiles row and id=${id} not found`);
+  return null;
+}
+
 async function runCPAMatchingAlgorithm(clientProfile) {
   try {
     const cpas = await pool.query(
@@ -1917,9 +1934,9 @@ async function runCPAMatchingAlgorithm(clientProfile) {
     // the friction pipeline at server.js ~2565). Appended after ranking + before the store loop so it
     // persists to `matches`, and scored identically via scoreCpaRow so it never competes for a slot.
     if (topMatches.length < 3) {
-      const fb = await pool.query("SELECT * FROM cpa_profiles WHERE COALESCE(fallback_priority, false) = true AND is_active = true LIMIT 1");
-      if (fb.rows.length) {
-        topMatches.push(scoreCpaRow(fb.rows[0]));
+      const fb = await findHouseFallbackCpa('CPAMatch');
+      if (fb && !topMatches.some(m => m.cpa.id === fb.id)) {
+        topMatches.push(scoreCpaRow(fb));
         console.log(`[CPAMatch] house fallback appended (real matches=${topMatches.length - 1})`);
       }
     }
@@ -2712,9 +2729,9 @@ async function generateFrictionBasedMatches(request, frictionScore) {
     // House fallback: append the canonical Arthur CPA ONLY when third-party matches < 3.
     // Appended after ranking, so it never competes for a ranked slot.
     if (topMatches.length < 3) {
-      const fb = await pool.query("SELECT * FROM cpa_profiles WHERE COALESCE(fallback_priority, false) = true AND is_active = true LIMIT 1");
-      if (fb.rows.length) {
-        topMatches.push(scoreCPA(fb.rows[0]));
+      const fb = await findHouseFallbackCpa('FrictionMatch');
+      if (fb && !topMatches.some(m => m.id === String(fb.id))) {
+        topMatches.push(scoreCPA(fb));
         console.log(`[FrictionMatch] house fallback appended (third-party matches=${topMatches.length - 1})`);
       }
     }
