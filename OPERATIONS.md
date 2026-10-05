@@ -487,3 +487,36 @@ content"), and its latency overruns the SPA's 5s synchronous prerender fetch. Bi
 the Tier-1b pipeline (gen-bios.js, spot-checked). PROFILE_BIO_ON_DEMAND=true on the service
 restores the old behaviour with no code change. The SPA (canadaaccountants profile.html,
 branch claude/spa-bio-kind) labels templated text "Professional Summary", never "AI-Generated".
+
+## 2026-10-05 - INCIDENT: two corrupt btree indexes on production scraped_cpas
+
+Found by the first `tier1:regen --write` (the static_page_at UPDATE, the first write to
+scraped_cpas rows in bulk since the 2026-09-07 regen). Postgres refused the index inserts:
+  1. idx_scraped_firm:                 "cannot find insert offset between offsets 2 and 3 of block 73"
+  2. idx_scraped_cpas_enriched_email:  "overlaps with invalid duplicate tuple at offset 137 of block 124"
+Instance confirmed by system_identifier 7533606245792546852 (fulfilling-empathy Postgres, the
+ACC production instance per DB_MAP.md). Server reported PG 16.15.
+
+Fix applied (Arthur, psql via `railway connect Postgres`, same session):
+  REINDEX INDEX CONCURRENTLY idx_scraped_firm;        -- cleared #1, then #2 surfaced
+  REINDEX TABLE CONCURRENTLY scraped_cpas;            -- rebuilt all 20 indexes, 0 invalid after
+Then `tier1:regen --write` completed: written 7,910, static_page_at set=7,912, cleared=0.
+
+Not yet known: the cause. Two independent corrupt indexes on one table point at the instance
+(unclean shutdown / OOM during index writes / storage), not at a query. Reads were unaffected
+(a corrupt btree still answers lookups, which is why the API never errored), so the damage
+could have been silently steering writes into failures for weeks: any UPDATE that touched a
+corrupt index (claims, disputes, bio persistence, enrichment) would have thrown the same
+FATAL. Check Sentry for "cannot find insert offset" / "invalid duplicate tuple" since 09-07.
+
+Follow-ups (not done):
+  a. Run the same two-query check on the LAW (shinkansen), INV (yamanote) and CBE (nozomi)
+     instances: `SELECT ... FROM pg_index WHERE NOT indisvalid` shows only indexes that
+     FAILED a rebuild, not latent corruption. Latent corruption needs amcheck:
+       CREATE EXTENSION IF NOT EXISTS amcheck;
+       SELECT bt_index_check(indexrelid, true) FROM pg_index WHERE indrelid = 'scraped_cpas'::regclass;
+     Run that on ACC too, now that the rebuild is done, to prove the heap is clean.
+  b. Backups: DB_MAP.md records backup status UNKNOWN for the production instances. A
+     corruption incident is the argument for turning Railway's backup on today.
+  c. Ledger candidate (BP-016): a weekly amcheck cron or a pre-regen amcheck step in
+     gen-db.js so index corruption is found by a scheduled read, not by the first bulk write.
