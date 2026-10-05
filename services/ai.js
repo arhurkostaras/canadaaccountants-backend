@@ -9,6 +9,9 @@ const RETRY_DELAYS = [30000, 60000, 120000]; // 30s, 60s, 120s
 // Belt-and-suspenders: independent of caller-passed flags. See generateBio.
 // TODO(v1.3): consolidate this into a shared services/db.js module.
 let _aiPool = null;
+const { wrapPoolQuery } = require('../utils/db-error-reporter');
+// server.js initialises Sentry before anything else loads; here it is only referenced, never initialised.
+function _sentry() { try { return require('@sentry/node'); } catch (_) { return null; } }
 function _getAiPool() {
   if (!_aiPool) {
     _aiPool = new Pool({
@@ -16,6 +19,8 @@ function _getAiPool() {
       max: 3,
       ssl: process.env.PGSSL === 'true' ? { rejectUnauthorized: false } : undefined
     });
+    // Same DB-failure chokepoint as the main pool (utils/db-error-reporter.js).
+    wrapPoolQuery(_aiPool, { sentry: process.env.SENTRY_DSN ? _sentry() : null, label: 'pg-ai' });
   }
   return _aiPool;
 }

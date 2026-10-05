@@ -423,3 +423,140 @@ explicitly per the Railway deploy discipline; NEVER touch a postgres service):
 
 Order within each step does not matter; order BETWEEN steps does. Never set the
 new value as primary anywhere before step 2 has covered all four services.
+
+---
+
+## 2026-10-05 - Profile index: email clause dropped, two-tier delivery (static file + SPA)
+
+WHY. Search Console, September 2026: canadalawyers.app 26.8K clicks / 549K impressions from
+134,924 sitemap URLs; canadaaccountants.app last reported 468 clicks (July) from 7,912 static
+pages; canadainvesting.app nothing since the 2026-05-11 noindex. Per indexed page the three
+sites earn the same ~0.2 clicks/month (LAW Sept 0.20, ACC June 0.19). The gap is page count.
+LAW's count comes from its 2026-06-01 sitemap decision: no email requirement ("indexing
+eligibility shouldn't depend on contact-info enrichment"), 6,250 -> 134,924 eligible. ACC's
+threshold kept the email clause, which alone excluded 91,727 of 101,935 rows (BP-010 count).
+
+CHANGE (backend, this repo, branch claude/beautiful-darwin-7mdaot):
+1. utils/profile-indexability.js: INDEXABLE_SQL / classifyProfile() no longer require an
+   email. Content floor unchanged: status <> 'invalid', not gated (5 flags), firm_name, city,
+   bio-or-designation. Phone still never required.
+2. Delivery tier. New column scraped_cpas.static_page_at (migrations/006, also ensured on
+   boot). Set -> canonical /profile/{id}/ (static file exists); NULL -> canonical
+   /profile?id={id} (the SPA, which self-canonicalises on indexable:true and noindexes on
+   404/410/indexable:false; the LAW model). profilePath(row)/profileUrl(row) read the row;
+   the profile API (structured_data.url, related links, new delivery_tier field), the
+   directory listings (profile_url) and the sitemap route all emit the row's own form.
+3. /api/sitemap-profiles.xml: ?tier=static|spa (default both); X-Profile-Tier header.
+4. tools/tier1-pregen/gen-db.js: writes sitemap-profiles-N.xml (static tier, parity-gated)
+   AND sitemap-spa-N.xml (every other indexable id), wires both into sitemap_index.xml and
+   robots.txt, and aligns static_page_at with the files on disk in the same --write run.
+   --admit-new now takes --admit-limit N. Without --admit-new, new qualifiers go to the SPA
+   tier (zero storage).
+5. GET /api/admin/profile-index-drift reads both families and reports tier_mismatch;
+   POST /api/admin/profile-static-sync (dry run; ?execute=true) bootstraps the column from
+   the live static sitemap.
+Frontend (canadaaccountants, branch claude/spa-tier-sitemap-gate): scripts/check-sitemap-
+profiles.mjs also validates the SPA family (?id= form only, never a file, never in both
+families, wired in index + robots, no Disallow on /profile). profile.html needs no change.
+
+ROLLOUT (Arthur, in order):
+a. Merge + deploy backend (safe-deploy.sh). Boot applies migration 006.
+b. npm run tier1:regen  (dry run). Read: "indexable in DB", "qualifies, no page yet" (= SPA
+   tier size), prune count and reasons. Expect prune 0 (the threshold only widened).
+c. npm run tier1:regen -- --write   (no --admit-new on the first run). Writes sitemap-spa-*.xml,
+   rewires index + robots, sets static_page_at for the 7,912 pages on disk.
+d. Merge the frontend gate branch, commit the regenerated artifacts together, push; CI
+   sitemap-parity must be green. Submit sitemap_index.xml again in Search Console.
+e. Within 2-4 weeks: GET /api/admin/profile-index-drift should read 0 listed_not_indexable and
+   0 tier_mismatch; Search Console Pages report should show the SPA URLs moving from
+   Discovered to Indexed. Only then consider --admit-new --admit-limit for the top ids.
+
+RISKS. Thin pages: the firm+city+designation floor stays, so an admitted row always renders
+name, designation, firm, city and a templated or stored bio. Disputes: more indexed pages ->
+more correct-or-remove requests; the 2026-09-07 dispute gate hides and prunes automatically.
+Transitional state between (a) and (c): the API emits ?id= for the 7,912 static ids until the
+column is set; the SPA redirects ?id= -> static when the file exists, so links keep working.
+
+ADDENDUM 2026-10-05 (after the first dry run: 61,725 indexable, 7,912 static, 53,813 SPA tier,
+53,659 of them with no stored bio). /api/profiles/:id no longer calls the bio model on the
+fly for a row without a bio; it returns the same factual templated summary the static
+generator emits (tools/tier1-pregen/normalize.js templatedSummary) and reports
+profile.bio_kind = 'stored' | 'generated' | 'templated'. Reasons: a live model call per
+first crawl of ~54K pages is unreviewed public AI content at scale (CLAUDE.md "Generated
+content"), and its latency overruns the SPA's 5s synchronous prerender fetch. Bios stay with
+the Tier-1b pipeline (gen-bios.js, spot-checked). PROFILE_BIO_ON_DEMAND=true on the service
+restores the old behaviour with no code change. The SPA (canadaaccountants profile.html,
+branch claude/spa-bio-kind) labels templated text "Professional Summary", never "AI-Generated".
+
+## 2026-10-05 - INCIDENT: two corrupt btree indexes on production scraped_cpas
+
+Found by the first `tier1:regen --write` (the static_page_at UPDATE, the first write to
+scraped_cpas rows in bulk since the 2026-09-07 regen). Postgres refused the index inserts:
+  1. idx_scraped_firm:                 "cannot find insert offset between offsets 2 and 3 of block 73"
+  2. idx_scraped_cpas_enriched_email:  "overlaps with invalid duplicate tuple at offset 137 of block 124"
+Instance confirmed by system_identifier 7533606245792546852 (fulfilling-empathy Postgres, the
+ACC production instance per DB_MAP.md). Server reported PG 16.15.
+
+Fix applied (Arthur, psql via `railway connect Postgres`, same session):
+  REINDEX INDEX CONCURRENTLY idx_scraped_firm;        -- cleared #1, then #2 surfaced
+  REINDEX TABLE CONCURRENTLY scraped_cpas;            -- rebuilt all 20 indexes, 0 invalid after
+Then `tier1:regen --write` completed: written 7,910, static_page_at set=7,912, cleared=0.
+
+UPDATE 2026-10-05 (later the same day): instance-wide, not one table. Railway deploy logs for
+the 07:01 MDT deployment showed the outreach follow-up queue failing every cycle on a THIRD
+corrupt index, idx_outreach_emails_recipient_email ("overlaps with invalid duplicate tuple
+at offset 49 of block 39"). A whole-database rebuild then surfaced two more:
+  4. outreach_unsubscribes_email_key (UNIQUE): the corrupt index had let 4 duplicate emails
+     through ON CONFLICT (email) DO NOTHING (AlexCash@tomjones.net, Brunetn.brunet@
+     bestbuydistributors.ca, China@esgsolutions.com, You@Benson.com; later copies deleted,
+     earliest kept, suppression preserved). REINDEX DATABASE CONCURRENTLY aborted on it and
+     left 5 *_ccnew invalid indexes (4 on outreach_unsubscribes + its toast), dropped by hand.
+  5. email_validations_email_key (UNIQUE): amcheck "item order invariant violated"; no
+     duplicates in the heap.
+Final state (Arthur, psql, with index scans disabled during the dedupe):
+  REINDEX DATABASE CONCURRENTLY railway  -> completed; pg_index shows 0 invalid.
+  amcheck bt_index_check(idx, heapallindexed=true) on all 186 public btree indexes -> clean.
+  (verify_heapam on the four affected tables not run; heapallindexed already proved every
+  heap tuple is reachable from each index.)
+Sentry: zero matching events in 90 days, and only ONE error event org-wide in 30 days. The
+backend has 292 console.error sites and 12 swallowed catches against 7 captureException
+calls, so Sentry's silence is non-evidence; Railway deploy logs are the only record, and the
+07:01 deployment's log range starts at 07:01, so the first occurrence is still undated
+(check the 2026-10-04 evening and 2026-09-07 deployments' logs for the same strings).
+
+Not yet known: the cause. Five corrupt indexes across four tables point at the instance
+(unclean shutdown / OOM during index writes / storage), not at a query. Reads were unaffected
+(a corrupt btree still answers lookups, which is why the API never errored), so the damage
+could have been silently steering writes into failures for weeks: any UPDATE that touched a
+corrupt index (claims, disputes, bio persistence, enrichment) would have thrown the same
+FATAL. Check Sentry for "cannot find insert offset" / "invalid duplicate tuple" since 09-07.
+
+Follow-ups (not done):
+  a. DONE 2026-10-05 (Arthur, psql): amcheck bt_index_check(heapallindexed=true) on all four
+     production instances, all clean: ACC 186/186 (PG 16.15), LAW shinkansen 187/187
+     (PG 17.11), INV yamanote 136/136 (PG 17.11), CBE nozomi 80/80 (PG 18.6). The corruption
+     was confined to the ACC instance. For future checks, one statement per instance:
+       CREATE EXTENSION IF NOT EXISTS amcheck;
+       SELECT COUNT(*) FROM (SELECT bt_index_check(c.oid, true) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_am a ON a.oid = c.relam WHERE a.amname = 'btree' AND n.nspname = 'public') s;
+     A number back = clean; an ERROR names the first bad index (then REINDEX DATABASE
+     CONCURRENTLY, dedupe any unique key it trips on, drop *_ccnew leftovers, repeat).
+  a2. If ACC corrupts again: do not repair in place a second time. pg_dump to a NEW Railway
+     Postgres service, repoint DATABASE_URL, retire the volume. A volume that corrupted five
+     indexes in one window is suspect regardless of a clean amcheck today.
+  a3. DONE 2026-10-05 (code, this repo): utils/db-error-reporter.js wraps pool.query on the
+     main pool (server.js, right after construction) and on services/ai.js's dedicated pool.
+     Every rejected query reports once to Sentry with the Postgres code, constraint/table and
+     a 160-char whitespace-collapsed SQL prefix (never the parameters), fingerprinted by
+     code + constraint so one corrupt index is one Sentry issue, then re-throws unchanged.
+     23505 unique_violation is excluded (claim/referral routes use it as 409 flow). This is
+     the chokepoint form of the fix: no call site changed, swallowed catches included.
+     tests/db-error-reporter.test.js pins the behaviour and the installation. Ledger BP-016.
+  b. Backups: DONE 2026-10-05 (Arthur, Railway dashboard). ACC Postgres (fulfilling-empathy)
+     already had a weekly volume backup (last taken 2026-10-03, 2.04 GB); daily + weekly +
+     monthly now all enabled (6 daily, 4 weekly, 3 monthly retained). Same three schedules
+     enabled on the INV Postgres (canadainvesting-backend project), on the LAW production
+     Postgres (shinkansen, lawyer-intelligence-backend project) and on the CBE Postgres
+     (nozomi, kind-transformation project). All four production instances now covered;
+     DB_MAP.md's "Backup: UNKNOWN" entries are superseded by this note.
+  c. Ledger candidate (BP-016): a weekly amcheck cron or a pre-regen amcheck step in
+     gen-db.js so index corruption is found by a scheduled read, not by the first bulk write.

@@ -2,6 +2,7 @@
 // emits lean /profile/{id}/index.html referencing shared /assets/profile-page.{css,js}. Parity is
 // proven by the 25-page headless diff (the gate), not assumed.
 const fs = require('fs'), path = require('path'), https = require('https');
+const { templatedSummary } = require('./normalize');
 const OUT = process.env.OUT_DIR || '/Users/arthurkostaras/projects/canadaaccountants';
 const API = 'https://canadaaccountants-backend-production-1d8f.up.railway.app';
 // IDS_FILE is only read on the CLI path (bottom of file); requiring buildPage must not touch disk.
@@ -48,12 +49,9 @@ function buildPage(data, id) {
     // No stored bio (the threshold admits designation-only rows): a factual templated summary from
     // the directory fields, never a spinner, so a static page always carries real content. No LLM
     // call on the generator path; the SPA still generates a bio on view via /api/profiles/:id.
-    const who = [`${p.name} is a ${p.designation || 'CPA'}`];
-    if (p.firm_name) who.push(`at ${p.firm_name}`);
-    if (location) who.push(`in ${location}`);
     bioTitle = 'Professional Summary';
     bioSubtitle = 'Listing details from CPA directory data';
-    bioHtml = `<div class="bio-text">${who.join(' ')}, listed in the CanadaAccountants CPA directory. This profile has not been claimed yet; claiming it adds a professional bio, specializations and contact details.</div>`;
+    bioHtml = `<div class="bio-text">${templatedSummary({ name: p.name, designation: p.designation, firm_name: p.firm_name, location })}</div>`;
   }
   const recHtml = (seo.recommendations || []).slice(0, 5).map(r => {
     const ic = r.impact === 'high' ? 'rec-high' : r.impact === 'medium' ? 'rec-medium' : 'rec-low';

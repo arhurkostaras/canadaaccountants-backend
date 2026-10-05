@@ -10,6 +10,7 @@ if (process.env.SENTRY_DSN) {
   });
 }
 const express = require('express');
+const { wrapPoolQuery } = require('./utils/db-error-reporter');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -744,6 +745,12 @@ pool.on('error', (err) => {
   }
 });
 
+// Every rejected pool.query reports once to Sentry (code, constraint, sql prefix) and is
+// re-thrown unchanged: the one chokepoint for DB failures, so a corrupt index or a schema
+// drift announces itself instead of dying in a console.error or a swallowed catch
+// (OPERATIONS.md 2026-10-05). 23505 is excluded: the claim and referral routes use it as flow.
+wrapPoolQuery(pool, { sentry: process.env.SENTRY_DSN ? Sentry : null, label: 'pg' });
+
 // Resend webhook health check: unauthenticated, mounted before any auth middleware.
 // NOT the receiver. Returns freshness of the events table so a probe can tell
 // whether real signed events are landing. The receiver still rejects unsigned POSTs.
@@ -1399,6 +1406,18 @@ const crmIntelligence = new CRMIntelligence({
     console.log('[Migration] profile_disputes + scraped_cpas.dispute_pending/removed_at verified');
   } catch (err) {
     console.error('[Migration] profile_disputes migration FAILED (public profile routes will error until fixed):', err.message);
+  }
+
+  // Profile delivery tier (migrations/006-static-page-tier.sql): scraped_cpas.static_page_at
+  // says whether an indexable row's canonical URL is the static /profile/{id}/ file or the
+  // SPA /profile?id= form. Read by the profile API, the sitemap route and every directory
+  // listing through utils/profile-indexability.js, so a failure here is loud too.
+  try {
+    await pool.query(`ALTER TABLE scraped_cpas ADD COLUMN IF NOT EXISTS static_page_at TIMESTAMPTZ`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_scraped_cpas_static_page ON scraped_cpas (id) WHERE static_page_at IS NOT NULL`);
+    console.log('[Migration] scraped_cpas.static_page_at verified');
+  } catch (err) {
+    console.error('[Migration] static_page_at migration FAILED (profile routes will error until fixed):', err.message);
   }
 
   // cpa_subscriptions.cpa_profile_id was VARCHAR(255) in production until 2026-09-07, when
@@ -5936,20 +5955,25 @@ app.post('/api/admin/monitor/fire', async (req, res) => {
   }
 });
 
-// Profile sitemap generator — returns XML sitemap of all public profile URLs.
+// Profile sitemap generator — returns XML sitemap of public profile URLs.
 // Used to generate static sitemap files for the frontend GitHub Pages repo.
 // Filter = INDEXABLE_SQL (utils/profile-indexability.js), the same predicate the static page
-// generator (tools/tier1-pregen/gen-db.js) uses, so the sitemap can only ever list ids that
-// have a /profile/{id}/ page. URL form is the static path, never the legacy ?id= SPA form.
-// The served file is written by gen-db.js in the same run that writes the pages; this route
+// generator (tools/tier1-pregen/gen-db.js) uses. Two delivery tiers (2026-10-05):
+//   ?tier=static  rows with a generated /profile/{id}/ file (static_page_at set); static URL form
+//   ?tier=spa     indexable rows with no file; the /profile?id= form the SPA self-canonicalises
+//   (no tier)     both, each row at its own canonical form
+// The served files are written by gen-db.js in the same run that writes the pages; this route
 // is the on-demand equivalent (parity check, drift read, manual regen).
 app.get('/api/sitemap-profiles.xml', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const perPage = 45000; // Under Google's 50K limit
     const offset = (page - 1) * perPage;
+    const tier = req.query.tier === 'static' ? 'static' : req.query.tier === 'spa' ? 'spa' : null;
+    const where = `${INDEXABLE_SQL}${tier === 'static' ? ` AND ${STATIC_TIER_SQL}` : tier === 'spa' ? ` AND ${SPA_TIER_SQL}` : ''}`;
+    const shardName = tier === 'spa' ? 'sitemap-spa' : 'sitemap-profiles';
 
-    const countQ = await pool.query(`SELECT COUNT(*) AS n FROM scraped_cpas WHERE ${INDEXABLE_SQL}`);
+    const countQ = await pool.query(`SELECT COUNT(*) AS n FROM scraped_cpas WHERE ${where}`);
     const total = parseInt(countQ.rows[0].n, 10);
     const totalPages = Math.ceil(total / perPage);
 
@@ -5958,7 +5982,7 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
       let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
       xml += '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
       for (let i = 1; i <= totalPages; i++) {
-        xml += `  <sitemap><loc>https://canadaaccountants.app/sitemap-profiles-${i}.xml</loc></sitemap>\n`;
+        xml += `  <sitemap><loc>https://canadaaccountants.app/${shardName}-${i}.xml</loc></sitemap>\n`;
       }
       xml += '</sitemapindex>';
       res.set('Content-Type', 'application/xml');
@@ -5966,19 +5990,20 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
     }
 
     const rows = await pool.query(
-      `SELECT id FROM scraped_cpas WHERE ${INDEXABLE_SQL} ORDER BY id LIMIT $1 OFFSET $2`,
+      `SELECT id, static_page_at FROM scraped_cpas WHERE ${where} ORDER BY id LIMIT $1 OFFSET $2`,
       [perPage, offset]
     );
 
     let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
     xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
     for (const row of rows.rows) {
-      xml += `  <url><loc>${profileUrl(row.id)}</loc><changefreq>monthly</changefreq></url>\n`;
+      xml += `  <url><loc>${profileUrl(row)}</loc><changefreq>monthly</changefreq></url>\n`;
     }
     xml += '</urlset>';
 
     res.set('Content-Type', 'application/xml');
     res.set('X-Profile-Count', String(total));
+    res.set('X-Profile-Tier', tier || 'all');
     res.send(xml);
   } catch (err) {
     console.error('[Sitemap] Error:', err.message);
@@ -5986,20 +6011,32 @@ app.get('/api/sitemap-profiles.xml', async (req, res) => {
   }
 });
 
-// Drift read for the served profile corpus: compares the live sitemap-profiles-*.xml on
-// canadaaccountants.app against INDEXABLE_SQL right now. "listed_not_indexable" are pages the
-// site still serves 200 for profiles that should be gone or held (regen + prune fixes them);
-// "indexable_not_listed" are admissions the next regen would add. Read-only; admin umbrella.
+// Live sitemap readers for the two delivery tiers. Static shards list /profile/{id}/ and
+// spa shards list /profile?id={id}; both are read until the first missing shard.
+async function readLiveSitemapIds(shardName, re, maxShards = 10) {
+  const ids = [];
+  for (let shard = 1; shard <= maxShards; shard++) {
+    const r = await fetch(`https://canadaaccountants.app/${shardName}-${shard}.xml`);
+    if (!r.ok) break;
+    const xml = await r.text();
+    for (const m of xml.matchAll(re)) ids.push(parseInt(m[1], 10));
+  }
+  return ids;
+}
+const readLiveStaticIds = () => readLiveSitemapIds('sitemap-profiles', /\/profile\/(\d+)\//g);
+const readLiveSpaIds = () => readLiveSitemapIds('sitemap-spa', /\/profile\?id=(\d+)</g);
+
+// Drift read for the served profile corpus: compares the live sitemap shards on
+// canadaaccountants.app (static + spa tiers) against INDEXABLE_SQL right now.
+// "listed_not_indexable" are URLs the site still lists for profiles that should be gone or
+// held (regen + prune fixes them); "indexable_not_listed" are admissions the next regen would
+// add; "tier_mismatch" are ids whose live tier disagrees with static_page_at (run
+// POST /api/admin/profile-static-sync, or regen). Read-only; admin umbrella.
 app.get('/api/admin/profile-index-drift', async (req, res) => {
   try {
-    const liveIds = [];
-    for (let shard = 1; shard <= 3; shard++) {
-      const r = await fetch(`https://canadaaccountants.app/sitemap-profiles-${shard}.xml`);
-      if (!r.ok) break;
-      const xml = await r.text();
-      for (const m of xml.matchAll(/\/profile\/(\d+)\//g)) liveIds.push(parseInt(m[1], 10));
-    }
-    const [listedNot, notListed] = await Promise.all([
+    const [staticIds, spaIds] = await Promise.all([readLiveStaticIds(), readLiveSpaIds()]);
+    const liveIds = [...staticIds, ...spaIds];
+    const [listedNot, notListed, tierRows] = await Promise.all([
       pool.query(
         `SELECT u.id, s.id IS NULL AS missing, ${INDEXABILITY_COLUMNS}
          FROM unnest($1::int[]) u(id) LEFT JOIN scraped_cpas s ON s.id = u.id
@@ -6010,7 +6047,13 @@ app.get('/api/admin/profile-index-drift', async (req, res) => {
         `SELECT COUNT(*)::int AS n FROM scraped_cpas WHERE ${INDEXABLE_SQL} AND NOT (id = ANY($1::int[]))`,
         [liveIds]
       ),
+      pool.query(
+        `SELECT id, static_page_at IS NOT NULL AS db_static FROM scraped_cpas WHERE id = ANY($1::int[])`,
+        [liveIds]
+      ),
     ]);
+    const liveStatic = new Set(staticIds);
+    const tierMismatch = tierRows.rows.filter(r => r.db_static !== liveStatic.has(r.id)).map(r => r.id);
     const listed = listedNot.rows.map(r => ({
       id: r.id,
       ...(r.missing ? { http_status: 404, reason: 'not_found' } : classifyProfile(r)),
@@ -6019,14 +6062,42 @@ app.get('/api/admin/profile-index-drift', async (req, res) => {
     for (const l of listed) byStatus[l.http_status] = (byStatus[l.http_status] || 0) + 1;
     res.json({
       live_sitemap_count: liveIds.length,
+      live_static_count: staticIds.length,
+      live_spa_count: spaIds.length,
       listed_not_indexable: listed.length,
       listed_not_indexable_by_status: byStatus,
       listed_not_indexable_ids: listed.slice(0, 200),
       indexable_not_listed: notListed.rows[0].n,
+      tier_mismatch: tierMismatch.length,
+      tier_mismatch_ids: tierMismatch.slice(0, 200),
       read_at: new Date().toISOString(),
     });
   } catch (err) {
     console.error('[ProfileIndexDrift] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Realign scraped_cpas.static_page_at with the static files the frontend actually serves,
+// read from the live sitemap-profiles-N.xml shards (the parity gate guarantees those list
+// exactly the /profile/{id}/ files on disk). Bootstrap after migration 006, or after any
+// hand-fix on the frontend; gen-db.js --write keeps the column aligned on normal regens.
+// Dry run by default; ?execute=true writes. Admin umbrella.
+app.post('/api/admin/profile-static-sync', async (req, res) => {
+  try {
+    const staticIds = await readLiveStaticIds();
+    if (staticIds.length === 0) return res.status(409).json({ error: 'live static sitemap is empty or unreachable; refusing to clear every static_page_at' });
+    const [toSet, toClear] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS n FROM scraped_cpas WHERE id = ANY($1::int[]) AND static_page_at IS NULL`, [staticIds]),
+      pool.query(`SELECT COUNT(*)::int AS n FROM scraped_cpas WHERE static_page_at IS NOT NULL AND NOT (id = ANY($1::int[]))`, [staticIds]),
+    ]);
+    const plan = { live_static_count: staticIds.length, would_set: toSet.rows[0].n, would_clear: toClear.rows[0].n };
+    if (req.query.execute !== 'true') return res.json({ dry_run: true, ...plan });
+    const set = await pool.query(`UPDATE scraped_cpas SET static_page_at = NOW() WHERE id = ANY($1::int[]) AND static_page_at IS NULL`, [staticIds]);
+    const clear = await pool.query(`UPDATE scraped_cpas SET static_page_at = NULL WHERE static_page_at IS NOT NULL AND NOT (id = ANY($1::int[]))`, [staticIds]);
+    res.json({ dry_run: false, ...plan, set: set.rowCount, cleared: clear.rowCount });
+  } catch (err) {
+    console.error('[ProfileStaticSync] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -6798,11 +6869,12 @@ function cleanBio(bio) {
 // Profile indexability rule: one predicate shared by the profile API, the sitemap generator,
 // the static page generator, directory listings and related links (see utils/profile-indexability.js).
 const {
-  INDEXABLE_SQL, GATED_SQL, INDEXABILITY_COLUMNS, classifyProfile, profilePath, profileUrl, withPublicIndexFields,
+  INDEXABLE_SQL, GATED_SQL, STATIC_TIER_SQL, SPA_TIER_SQL, INDEXABILITY_COLUMNS,
+  classifyProfile, profilePath, profileUrl, spaPath, withPublicIndexFields,
 } = require('./utils/profile-indexability');
 // Leading "Name, CPA, CA" header line inside stored bios: stripped at render time, shared with the
 // static page generator so the SPA, the static pages and the directory snippets agree.
-const { stripBioHeader } = require('./tools/tier1-pregen/normalize');
+const { stripBioHeader, templatedSummary } = require('./tools/tier1-pregen/normalize');
 const nameForms = r => [r.full_name, `${r.first_name || ''} ${r.last_name || ''}`.trim()];
 
 // Public directory list shape: replace the raw bio with a cleanBio'd 160-char snippet so the
@@ -6884,11 +6956,22 @@ app.get('/api/profiles/:id', async (req, res) => {
     }
     const fullName = dedupeName(`${firstName} ${lastName}`.trim());
 
-    // Generate AI bio on-the-fly if missing
+    const loc = resolveLocation(p.city, p.province);
+    const location = [loc.city, loc.province].filter(Boolean).join(', ');
+
+    // Bio. A stored bio is served as-is. A row with none gets the same factual templated
+    // summary the static generator emits (2026-10-05): with the SPA tier listing ~54K
+    // bio-less profiles, a live model call per first visit would be unreviewed public AI
+    // content at crawl scale, and its latency can overrun the page's 5s synchronous
+    // prerender fetch (which Google reads as a thin page). Bios come from the Tier-1b
+    // pipeline (tools/tier1-pregen/gen-bios.js). PROFILE_BIO_ON_DEMAND=true restores the
+    // old on-the-fly generation without a code change.
     let bio = p.generated_bio;
-    if (!bio) {
+    let bioKind = bio ? 'stored' : 'templated';
+    if (!bio && process.env.PROFILE_BIO_ON_DEMAND === 'true') {
       try {
         bio = await generateBio({ ...p, first_name: firstName, last_name: lastName }, 'accountants');
+        if (bio) bioKind = 'generated';
         // Persist for future requests (fire and forget)
         pool.query('UPDATE scraped_cpas SET generated_bio = $1 WHERE id = $2', [bio, p.id]).catch(() => {}); // non-critical, fire-and-forget
       } catch (bioErr) {
@@ -6897,6 +6980,10 @@ app.get('/api/profiles/:id', async (req, res) => {
       }
     }
     bio = stripBioHeader(cleanBio(bio), [fullName, ...nameForms(p)]);
+    if (!bio) {
+      bio = templatedSummary({ name: fullName, designation: p.designation, firm_name: p.firm_name, location });
+      bioKind = 'templated';
+    }
 
     // Calculate SEO score on-the-fly
     const seoScore = calculateSEOScore({
@@ -6913,8 +7000,6 @@ app.get('/api/profiles/:id', async (req, res) => {
     });
 
     const jobTitle = p.designation ? `${p.designation} — Chartered Professional Accountant` : 'Chartered Professional Accountant';
-    const loc = resolveLocation(p.city, p.province);
-    const location = [loc.city, loc.province].filter(Boolean).join(', ');
 
     const jsonLd = {
       '@context': 'https://schema.org',
@@ -6924,15 +7009,18 @@ app.get('/api/profiles/:id', async (req, res) => {
       ...(p.firm_name && { worksFor: { '@type': 'Organization', name: p.firm_name } }),
       ...(location && { address: { '@type': 'PostalAddress', addressLocality: loc.city || '', addressRegion: loc.province || '', addressCountry: 'CA' } }),
       ...(bio && { description: bio }),
-      url: indexability.indexable ? profileUrl(p.id) : `https://canadaaccountants.app/profile?id=${p.id}`
+      // Canonical form follows the row's delivery tier (static file vs SPA); a non-indexable
+      // row keeps the SPA form, which the page marks noindex.
+      url: indexability.indexable ? profileUrl(p) : `https://canadaaccountants.app${spaPath(p.id)}`
     };
 
-    // Related profiles for internal SEO linking (item D): only indexable rows, linked at their
-    // static path, so no profile page ever links to a gated or below-threshold profile.
+    // Related profiles for internal SEO linking (item D): only indexable rows, each linked at
+    // its own canonical form (static file or SPA), so no profile page ever links to a gated or
+    // below-threshold profile, nor to a static path that has no file.
     let related = [];
     try {
         const relatedQuery = await pool.query(
-            `SELECT id, first_name, last_name, firm_name, city, province, designation
+            `SELECT id, first_name, last_name, firm_name, city, province, designation, static_page_at
              FROM scraped_cpas
              WHERE province = $1 AND id != $2
                AND ${INDEXABLE_SQL}
@@ -6942,7 +7030,7 @@ app.get('/api/profiles/:id', async (req, res) => {
         );
         related = relatedQuery.rows.map(r => ({
             id: r.id,
-            url: profilePath(r.id),
+            url: profilePath(r),
             name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
             firm: r.firm_name,
             city: r.city,
@@ -6962,12 +7050,14 @@ app.get('/api/profiles/:id', async (req, res) => {
         province: loc.province,
         designation: p.designation,
         bio: bio,
+        bio_kind: bioKind,
         claim_status: p.claim_status || 'unclaimed',
         claimed: p.claim_status === 'claimed',
         founding_member: p.founding_member || false
       },
       indexable: indexability.indexable,
       index_reason: indexability.reason,
+      delivery_tier: indexability.tier || null,
       seo_score: seoScore,
       structured_data: jsonLd,
       related
