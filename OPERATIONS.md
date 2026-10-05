@@ -532,8 +532,10 @@ corrupt index (claims, disputes, bio persistence, enrichment) would have thrown 
 FATAL. Check Sentry for "cannot find insert offset" / "invalid duplicate tuple" since 09-07.
 
 Follow-ups (not done):
-  a. Run amcheck on the LAW (shinkansen), INV (yamanote) and CBE (nozomi) instances; the
-     ACC instance is proven clean as of 2026-10-05 (186/186). One statement per instance:
+  a. DONE 2026-10-05 (Arthur, psql): amcheck bt_index_check(heapallindexed=true) on all four
+     production instances, all clean: ACC 186/186 (PG 16.15), LAW shinkansen 187/187
+     (PG 17.11), INV yamanote 136/136 (PG 17.11), CBE nozomi 80/80 (PG 18.6). The corruption
+     was confined to the ACC instance. For future checks, one statement per instance:
        CREATE EXTENSION IF NOT EXISTS amcheck;
        SELECT COUNT(*) FROM (SELECT bt_index_check(c.oid, true) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_am a ON a.oid = c.relam WHERE a.amname = 'btree' AND n.nspname = 'public') s;
      A number back = clean; an ERROR names the first bad index (then REINDEX DATABASE
