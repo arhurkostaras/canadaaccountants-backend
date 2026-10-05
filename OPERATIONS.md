@@ -476,3 +476,14 @@ name, designation, firm, city and a templated or stored bio. Disputes: more inde
 more correct-or-remove requests; the 2026-09-07 dispute gate hides and prunes automatically.
 Transitional state between (a) and (c): the API emits ?id= for the 7,912 static ids until the
 column is set; the SPA redirects ?id= -> static when the file exists, so links keep working.
+
+ADDENDUM 2026-10-05 (after the first dry run: 61,725 indexable, 7,912 static, 53,813 SPA tier,
+53,659 of them with no stored bio). /api/profiles/:id no longer calls the bio model on the
+fly for a row without a bio; it returns the same factual templated summary the static
+generator emits (tools/tier1-pregen/normalize.js templatedSummary) and reports
+profile.bio_kind = 'stored' | 'generated' | 'templated'. Reasons: a live model call per
+first crawl of ~54K pages is unreviewed public AI content at scale (CLAUDE.md "Generated
+content"), and its latency overruns the SPA's 5s synchronous prerender fetch. Bios stay with
+the Tier-1b pipeline (gen-bios.js, spot-checked). PROFILE_BIO_ON_DEMAND=true on the service
+restores the old behaviour with no code change. The SPA (canadaaccountants profile.html,
+branch claude/spa-bio-kind) labels templated text "Professional Summary", never "AI-Generated".

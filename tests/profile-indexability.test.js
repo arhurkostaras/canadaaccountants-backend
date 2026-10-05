@@ -126,6 +126,11 @@ test('server.js reads the rule through the module: sitemap, related, directory, 
   assert.ok(profile.includes('delivery_tier'), 'profile API must expose the delivery tier');
   assert.ok(profile.includes('INDEXABLE_SQL'), 'related profiles must be filtered to indexable rows');
   assert.ok(profile.includes('static_page_at') && profile.includes('profilePath(r)'), 'related links must be tiered by row');
+  // No live model call on the public profile path unless explicitly re-enabled; bio-less rows
+  // get the same templated summary the static generator emits, and the response says which.
+  assert.ok(profile.includes("process.env.PROFILE_BIO_ON_DEMAND === 'true'"), 'on-the-fly bio generation must be gated behind PROFILE_BIO_ON_DEMAND');
+  assert.ok(profile.includes('templatedSummary('), 'bio-less rows must get the shared templated summary');
+  assert.ok(profile.includes('bio_kind'), 'profile API must report bio_kind');
   const directory = src.slice(src.indexOf("app.get('/api/directory/city/:city'"), src.indexOf('// Founder outreach: weekly digest'));
   assert.strictEqual((directory.match(/GATED_SQL/g) || []).length, 7, 'all 3 directory endpoints filter gated rows in list + count queries, plus the province designation counts');
   // Boot-time schema guard for the tier column
