@@ -15,6 +15,25 @@ const VALID_STATUSES = [
   'churned'             // 7b. Subscription canceled
 ];
 
+// outreach_recipients exists only on INV; ACC/LAW use outreach_emails. Check before querying
+// instead of letting the query fail: every rejected pool.query now reports to Sentry
+// (utils/db-error-reporter.js), so an expected "relation does not exist" became NODE-H.
+// Cached per pool; a failed check is not cached and reads as "absent".
+const _tableExistsCache = new WeakMap();
+async function tableExists(db, name) {
+  let byName = _tableExistsCache.get(db);
+  if (!byName) { byName = new Map(); _tableExistsCache.set(db, byName); }
+  if (!byName.has(name)) {
+    try {
+      const r = await db.query(`SELECT to_regclass($1) IS NOT NULL AS exists`, [name]);
+      byName.set(name, !!(r.rows[0] && r.rows[0].exists));
+    } catch (e) {
+      return false;
+    }
+  }
+  return byName.get(name);
+}
+
 // Legal state transitions — key: from_status, value: allowed to_statuses
 const TRANSITIONS = {
   raw_import:        ['enriched', 'enrichment_failed', 'invalid'],
@@ -185,7 +204,8 @@ class CRMService {
       console.log(`[CRM] outreach_emails table not found, trying outreach_recipients`);
     }
     // Also check outreach_recipients (used by investing)
-    try {
+    const hasRecipients = await tableExists(this.db, 'outreach_recipients');
+    if (hasRecipients) try {
       await this.db.query(`
         UPDATE ${this.table} p SET crm_status = 'contacted', crm_status_updated_at = NOW()
         WHERE EXISTS (
@@ -210,7 +230,7 @@ class CRMService {
       console.log(`[CRM] Skipping outreach_emails engaged backfill`);
     }
     // Also check outreach_recipients for engaged (used by investing)
-    try {
+    if (hasRecipients) try {
       await this.db.query(`
         UPDATE ${this.table} p SET crm_status = 'engaged', crm_status_updated_at = NOW()
         WHERE EXISTS (
@@ -951,7 +971,7 @@ class SequenceEngine {
                 `SELECT COALESCE(enriched_email, email) as email FROM ${this.table} WHERE id = $1`,
                 [professionalId]
               ).catch(() => ({ rows: [] }));
-              if (profEmail.rows[0]?.email) {
+              if (profEmail.rows[0]?.email && await tableExists(this.db, 'outreach_recipients')) {
                 const r2 = await this.db.query(
                   `SELECT DISTINCT campaign_id FROM outreach_recipients WHERE email = $1 AND status = 'clicked'`,
                   [profEmail.rows[0].email]
@@ -1561,4 +1581,4 @@ class CRMIntelligence {
   }
 }
 
-module.exports = { CRMService, SequenceEngine, CRMIntelligence, VALID_STATUSES, TRANSITIONS };
+module.exports = { CRMService, SequenceEngine, CRMIntelligence, VALID_STATUSES, TRANSITIONS, tableExists };
