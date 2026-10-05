@@ -1734,9 +1734,9 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p>CPAs typically spend hundreds of hours a year on client development — networking, referrals, word of mouth. Your CanadaAccountants profile puts you in front of businesses that are already searching for a CPA in {{city}}. That's time back in your week.</p>
 <p>Here are 3 things you can do right now to start attracting clients:</p>
 <ol>
-<li><strong>Complete your bio</strong> — accountants with a full bio get 2x more views</li>
+<li><strong>Complete your bio</strong> — it is what clients read before they get in touch</li>
 <li><strong>Add your specialties</strong> — help the right clients find you</li>
-<li><strong>Upload a professional photo</strong> — profiles with photos get 40% more engagement</li>
+<li><strong>Upload a professional photo</strong> — it helps clients recognise you</li>
 </ol>
 <p><a href="{{platform_url}}/cpa-dashboard" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Go to Your Dashboard</a></p>
 <p>Questions? Just reply to this email.</p>
@@ -8401,7 +8401,7 @@ app.post('/api/admin/send-behavioral-sequences', requireLegacyProBlasts, async (
         const html = `
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
   <p>Hi ${r.first_name || 'there'},</p>
-  <p>Your free profile on CanadaAccountants is live — but did you know you could be getting <strong>5x more client inquiries</strong>?</p>
+  <p>Your free profile on CanadaAccountants is live. Here is what a paid plan adds.</p>
   <p>Upgraded members get:</p>
   <ul style="color:#334155;">
     <li><strong>Priority placement</strong> in ${r.city || r.province || 'local'} search results</li>
