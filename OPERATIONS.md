@@ -543,9 +543,14 @@ Follow-ups (not done):
   a2. If ACC corrupts again: do not repair in place a second time. pg_dump to a NEW Railway
      Postgres service, repoint DATABASE_URL, retire the volume. A volume that corrupted five
      indexes in one window is suspect regardless of a clean amcheck today.
-  a3. Sentry coverage: route the write-path catch blocks (claims, disputes, enrichment, bio
-     persistence, outreach queue) through Sentry.captureException so the next DB fault
-     reaches Sentry instead of only the Railway log stream.
+  a3. DONE 2026-10-05 (code, this repo): utils/db-error-reporter.js wraps pool.query on the
+     main pool (server.js, right after construction) and on services/ai.js's dedicated pool.
+     Every rejected query reports once to Sentry with the Postgres code, constraint/table and
+     a 160-char whitespace-collapsed SQL prefix (never the parameters), fingerprinted by
+     code + constraint so one corrupt index is one Sentry issue, then re-throws unchanged.
+     23505 unique_violation is excluded (claim/referral routes use it as 409 flow). This is
+     the chokepoint form of the fix: no call site changed, swallowed catches included.
+     tests/db-error-reporter.test.js pins the behaviour and the installation. Ledger BP-016.
   b. Backups: DONE 2026-10-05 (Arthur, Railway dashboard). ACC Postgres (fulfilling-empathy)
      already had a weekly volume backup (last taken 2026-10-03, 2.04 GB); daily + weekly +
      monthly now all enabled (6 daily, 4 weekly, 3 monthly retained). Same three schedules

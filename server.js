@@ -10,6 +10,7 @@ if (process.env.SENTRY_DSN) {
   });
 }
 const express = require('express');
+const { wrapPoolQuery } = require('./utils/db-error-reporter');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -743,6 +744,12 @@ pool.on('error', (err) => {
     Sentry.captureException(err, { extra: { context: 'pg pool idle client' } });
   }
 });
+
+// Every rejected pool.query reports once to Sentry (code, constraint, sql prefix) and is
+// re-thrown unchanged: the one chokepoint for DB failures, so a corrupt index or a schema
+// drift announces itself instead of dying in a console.error or a swallowed catch
+// (OPERATIONS.md 2026-10-05). 23505 is excluded: the claim and referral routes use it as flow.
+wrapPoolQuery(pool, { sentry: process.env.SENTRY_DSN ? Sentry : null, label: 'pg' });
 
 // Resend webhook health check: unauthenticated, mounted before any auth middleware.
 // NOT the receiver. Returns freshness of the events table so a probe can tell
