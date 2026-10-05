@@ -18,6 +18,7 @@ const { Pool } = require('pg');
 const rateLimit = require('express-rate-limit');
 const { sendEmail, sendFrictionMatchNotification, sendCPAOnboardingEmail, sendCPARegistrationConfirmation, sendContactFormEmail, sendCPAVerificationEmail, sendPasswordResetEmail, sendReferralEmail } = require('./services/email');
 const dailyDigest = require('./services/daily-digest');
+const { cpaEligibility } = require('./services/cpa-match-eligibility');
 const { OutreachEngine, CPA_ACQUISITION_TEMPLATE, SME_ACQUISITION_TEMPLATE } = require('./services/outreach');
 const { CRMService, SequenceEngine, CRMIntelligence } = require('./services/crm');
 const { generateBio, calculateSEOScore, generateOutreachTemplate } = require('./services/ai');
@@ -1978,7 +1979,10 @@ async function runCPAMatchingAlgorithm(clientProfile) {
         geographic_score: geoScore, availability_score: availScore
       };
     }
-    const scored = cpas.rows.map(scoreCpaRow);
+    // Only CPAs who can take the work are matches (services/cpa-match-eligibility.js);
+    // the score then ranks them.
+    const client = { province: clientProfile.province, location: clientProfile.city, meetingPreference: clientProfile.meeting_preference };
+    const scored = cpas.rows.filter(cpa => cpaEligibility(client, cpa).ok).map(scoreCpaRow);
 
     scored.sort((a, b) => b.overall_score - a.overall_score);
     const topMatches = scored.slice(0, 5);
@@ -2775,7 +2779,9 @@ async function generateFrictionBasedMatches(request, frictionScore) {
         matchScore: matchScore
       };
     };
-    const scoredCPAs = result.rows.map(scoreCPA);
+    // Only CPAs who can take the work are matches (services/cpa-match-eligibility.js).
+    const client = { province: request.contactInfo?.province, location: request.contactInfo?.location };
+    const scoredCPAs = result.rows.filter(cpa => cpaEligibility(client, cpa).ok).map(scoreCPA);
 
     // Sort by score descending, take top 3 real third-party matches.
     const topMatches = scoredCPAs.sort((a, b) => b.matchScore - a.matchScore).slice(0, 3);

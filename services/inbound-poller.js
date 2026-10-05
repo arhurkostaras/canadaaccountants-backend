@@ -172,7 +172,53 @@ async function _processMessage(client, uid, parsed, flags, pool) {
   return { dispatched: true, platform: route.platform, message_id: messageId };
 }
 
+// ImapFlow reports a server NO/BAD reply as the bare message "Command failed";
+// the server's own words (e.g. Gmail's bandwidth-limit text) are on separate
+// properties. Fold them in so logs and the alert email say what went wrong.
+function _imapErrorDetail(err) {
+  if (!err) return 'unknown error';
+  const parts = [err.message || String(err)];
+  if (err.serverResponseCode) parts.push(`[${err.serverResponseCode}]`);
+  if (err.responseText && err.responseText !== err.message) parts.push(err.responseText);
+  if (err.code && !parts.some(p => p.includes(err.code))) parts.push(`(${err.code})`);
+  return parts.join(' ');
+}
+
+// Phase 1 of a poll: one FETCH of flags plus the routing headers for every
+// message in the window. A few hundred bytes per message, where downloading
+// every full message (attachments included) every 5 minutes ran into Gmail's
+// IMAP bandwidth limit and failed the poll with "Command failed".
+async function _listCandidates(client, uids) {
+  const candidates = [];
+  let skipped = 0;
+  if (uids.length === 0) return { candidates, skipped };
+  for await (const msg of client.fetch(uids, { uid: true, flags: true, headers: RECIPIENT_HEADER_ORDER }, { uid: true })) {
+    if (msg.flags && msg.flags.has(POLLER_KEYWORD)) { skipped++; continue; }
+    const headerOnly = msg.headers ? await simpleParser(msg.headers) : null;
+    if (!headerOnly || !_resolvePlatform(headerOnly)) { skipped++; continue; }
+    candidates.push(msg.uid);
+  }
+  return { candidates, skipped };
+}
+
+// The cron fires every 5 minutes whether or not the last poll finished; two
+// overlapping IMAP sessions double the load and can trip Gmail's limits.
+let _pollInFlight = false;
+
 async function pollOnce(pool) {
+  if (_pollInFlight) {
+    console.warn('[InboundPoller] previous poll still running; skipping this cycle');
+    return { ok: true, skipped_cycle: true };
+  }
+  _pollInFlight = true;
+  try {
+    return await _pollOnceInner(pool);
+  } finally {
+    _pollInFlight = false;
+  }
+}
+
+async function _pollOnceInner(pool) {
   const startedAt = new Date();
   const appPassword = process.env.GMAIL_IMAP_APP_PASSWORD;
   const mailboxUser = process.env.GMAIL_IMAP_USER || 'arthur@negotiateandwin.com';
@@ -202,7 +248,14 @@ async function pollOnce(pool) {
       // dispatch — see _processMessage.
       const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000); // last 7d window
       const uids = await client.search({ since }, { uid: true });
-      for (const uid of uids) {
+      const listed = await _listCandidates(client, uids);
+      skipped += listed.skipped;
+      for (const uid of listed.candidates) {
+        if (!client.usable) {
+          // The connection dropped mid-poll. Every further command would fail
+          // with "Connection not available"; stop and let the next cycle retry.
+          throw new Error('IMAP connection lost mid-poll');
+        }
         try {
           const downloaded = await client.fetchOne(uid, { source: true, flags: true }, { uid: true });
           if (!downloaded?.source) {
@@ -216,7 +269,7 @@ async function pollOnce(pool) {
           else if (result.dispatched) dispatched++;
         } catch (perMsgErr) {
           errored++;
-          console.error(`[InboundPoller] uid ${uid} processing error:`, perMsgErr.message);
+          console.error(`[InboundPoller] uid ${uid} processing error:`, _imapErrorDetail(perMsgErr));
           // Leave UNSEEN; next poll retries.
         }
       }
@@ -234,11 +287,12 @@ async function pollOnce(pool) {
     console.log(`[InboundPoller] ${startedAt.toISOString()}: dispatched=${dispatched} skipped=${skipped} errored=${errored}`);
     return { ok, dispatched, skipped, errored };
   } catch (connErr) {
-    console.error('[InboundPoller] connection or fetch error:', connErr.message);
+    const detail = _imapErrorDetail(connErr);
+    console.error('[InboundPoller] connection or fetch error:', detail);
     try { await client.logout(); } catch (_) { /* socket already dead */ }
-    await _writeStatus(pool, { status: 'failed', error: connErr.message, count: 0, increment_failures: true });
-    await _maybeAlert(pool, connErr.message);
-    return { ok: false, error: connErr.message };
+    await _writeStatus(pool, { status: 'failed', error: detail, count: dispatched, increment_failures: dispatched === 0 });
+    await _maybeAlert(pool, detail);
+    return { ok: false, error: detail, dispatched };
   }
 }
 
@@ -284,4 +338,4 @@ async function _maybeAlert(pool, errorMessage) {
   }
 }
 
-module.exports = { pollOnce, _processMessage, _resolvePlatform, PLATFORM_ROUTING };
+module.exports = { pollOnce, _processMessage, _resolvePlatform, _listCandidates, _imapErrorDetail, PLATFORM_ROUTING, POLLER_KEYWORD };
