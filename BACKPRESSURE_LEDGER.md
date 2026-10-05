@@ -41,8 +41,7 @@ each repo in Scope must get its own copy. Never write "shared template" in Scope
 
 send-loop and pre-flight crons disabled via `CBE_CRONS_ENABLED` (default off),
 canadabusinessexits-backend PR #1 merged fa1afae5d5c931993b315a277efa61b752afc065.
-Deploy: NOT CONFIRMED from the 30 Sep session (Railway API and app domains were
-denied by the session network policy). Confirm the `[Parked] send-loop and
-pre-flight crons disabled` line in the CBE deploy log; if the service does not
-autodeploy from main, deploy it. Digest, webhooks, admin routes, referral intake
-unchanged.
+Deploy: CONFIRMED 2026-10-05. Railway deployment fc9ec174 (commit 7e36403f,
+14:01 UTC) logged `[Parked] send-loop and pre-flight crons disabled` at boot;
+`CBE_CRONS_ENABLED` is unset on the service, so the default (off) holds.
+Digest, webhooks, admin routes, referral intake unchanged.
