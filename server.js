@@ -85,6 +85,64 @@ async function issuePasswordSetupUrl(userId) {
   return `${FRONTEND_URL}/reset-password?token=${setupToken}&welcome=1`;
 }
 
+// ── Payment-to-perk helpers (hotfix 2026-10-05) ──────────────────────────
+// Paid tiers are stored without the interval suffix so MRR queries count them
+// ("professional_yearly" used to fall through to $0).
+const baseTier = (t) => String(t || 'professional').replace(/_(monthly|yearly)$/, '');
+
+// The emailed checkout button (/api/checkout/:tier) carried no profile or user
+// id, so a payer matched none of the webhook's write branches and got nothing.
+// Resolve them by the email they paid with.
+async function resolvePayerByEmail(email) {
+  const out = { userId: null, cpaProfileId: null };
+  if (!email) return out;
+  const u = await pool.query('SELECT id FROM users WHERE LOWER(email) = LOWER($1) ORDER BY id DESC LIMIT 1', [email]);
+  if (u.rows.length) out.userId = String(u.rows[0].id);
+  const cp = await pool.query(
+    'SELECT id FROM cpa_profiles WHERE LOWER(email) = LOWER($1) OR ($2::int IS NOT NULL AND user_id = $2::int) ORDER BY id DESC LIMIT 1',
+    [email, out.userId]
+  );
+  if (cp.rows.length) out.cpaProfileId = String(cp.rows[0].id);
+  return out;
+}
+
+async function upsertCpaSubscription(cpaProfileId, session, tier) {
+  // The upsert below needs this unique index; production did not have it
+  // (pg_indexes, 2026-09-07). If this CREATE fails the ON CONFLICT raises
+  // "no unique or exclusion constraint" and the subscription row is never written.
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(err => {
+    console.error('[Stripe Webhook] cpa_subscriptions unique index create failed (upsert will fail):', err.message);
+  });
+  // Production columns (information_schema, 2026-09-07): the plan column is
+  // `tier`, not `plan_type`, and `email` is NOT NULL with no default.
+  await pool.query(
+    `INSERT INTO cpa_subscriptions (cpa_profile_id, tier, status, stripe_subscription_id, stripe_customer_id, email, current_period_start)
+     VALUES ($3, $4, 'active', $1, $2, $5, NOW())
+     ON CONFLICT (cpa_profile_id) DO UPDATE SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', tier = $4, current_period_start = NOW(), updated_at = NOW()`,
+    [session.subscription, session.customer, cpaProfileId, baseTier(tier), session.customer_email || session.customer_details?.email || '']
+  );
+  await pool.query(
+    `UPDATE cpa_profiles SET subscription_tier = $1, subscription_status = 'active' WHERE id::text = $2::text`,
+    [baseTier(tier), String(cpaProfileId)]
+  );
+}
+
+// Mirror a subscription's end (or return) onto every table a perk gate reads:
+// cpa_subscriptions, cpa_profiles and users. Before this, a canceled member
+// kept the paid flags on users and cpa_profiles (BP-008 class).
+async function syncPerksForSubscription(stripeSubscriptionId, stripeCustomerId, active) {
+  const status = active ? 'active' : 'canceled';
+  const subRows = await pool.query(
+    `SELECT cpa_profile_id FROM cpa_subscriptions WHERE stripe_subscription_id = $1`, [stripeSubscriptionId]
+  );
+  for (const row of subRows.rows) {
+    await pool.query(`UPDATE cpa_profiles SET subscription_status = $1 WHERE id::text = $2::text`, [status, String(row.cpa_profile_id)]);
+  }
+  if (stripeCustomerId) {
+    await pool.query(`UPDATE users SET subscription_status = $1 WHERE stripe_customer_id = $2`, [status, stripeCustomerId]);
+  }
+}
+
 app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -105,38 +163,42 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object;
-        const cpaProfileId = session.metadata?.cpa_profile_id;
+        let cpaProfileId = session.metadata?.cpa_profile_id || null;
         const planType = session.metadata?.plan_type;
-        const userId = session.metadata?.userId;
+        let userId = session.metadata?.userId || null;
         const tier = session.metadata?.tier || planType;
+        const applicationId = session.metadata?.application_id;
+        const payerEmail = (session.customer_details?.email || session.customer_email || '').trim();
+        // Email-checkout payers arrive with no ids in metadata: resolve them by email.
+        if (session.subscription && payerEmail && (!cpaProfileId || !userId)) {
+          const resolved = await resolvePayerByEmail(payerEmail);
+          cpaProfileId = cpaProfileId || resolved.cpaProfileId;
+          userId = userId || resolved.userId;
+        }
         if (cpaProfileId && session.subscription) {
-          // The upsert below needs this unique index; production does not have it
-          // (pg_indexes, 2026-09-07). If this CREATE fails the ON CONFLICT raises
-          // "no unique or exclusion constraint" and the subscription row is never written.
-          await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cpa_subs_profile_id ON cpa_subscriptions (cpa_profile_id)`).catch(err => {
-            console.error('[Stripe Webhook] cpa_subscriptions unique index create failed (upsert will fail):', err.message);
-          });
-          await pool.query(
-            // Production columns (information_schema, 2026-09-07): the plan column is
-            // `tier`, not `plan_type`, and `email` is NOT NULL with no default. Same
-            // shape as the LAW webhook.
-            `INSERT INTO cpa_subscriptions (cpa_profile_id, tier, status, stripe_subscription_id, stripe_customer_id, email, current_period_start)
-             VALUES ($3, $4, 'active', $1, $2, $5, NOW())
-             ON CONFLICT (cpa_profile_id) DO UPDATE SET stripe_subscription_id = $1, stripe_customer_id = $2, status = 'active', tier = $4, current_period_start = NOW(), updated_at = NOW()`,
-            [session.subscription, session.customer, cpaProfileId, tier || 'professional', session.customer_email || session.customer_details?.email || '']
-          );
+          await upsertCpaSubscription(cpaProfileId, session, tier);
         }
         // Update users table with subscription info for upgrade gate
         if (userId) {
           await pool.query(
             `UPDATE users SET subscription_tier = $1, subscription_status = 'active', stripe_customer_id = $2 WHERE id = $3`,
-            [tier, session.customer, userId]
+            [baseTier(tier), session.customer, userId]
           );
-          console.log(`[Stripe] User ${userId} subscribed to ${tier}`);
+          console.log(`[Stripe] User ${userId} subscribed to ${baseTier(tier)}`);
+        }
+        // A payment nobody can be matched to must never disappear silently.
+        if (session.subscription && !cpaProfileId && !userId && !applicationId) {
+          console.error(`[Stripe] UNMATCHED PAYMENT: session ${session.id}, email ${payerEmail || '(none)'}, tier ${tier}`);
+          sendEmail({
+            to: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
+            subject: `UNMATCHED PAYMENT: ${payerEmail || 'no email'} paid for ${baseTier(tier)}; perks not granted`,
+            html: `<p>A Stripe checkout completed but no CanadaAccountants user, profile or application matches the payer.</p>
+                   <p>Email: <strong>${payerEmail || '(none)'}</strong><br>Tier: ${baseTier(tier)}<br>Session: <code>${session.id}</code><br>Customer: <code>${session.customer}</code><br>Subscription: <code>${session.subscription}</code></p>
+                   <p>Grant access by hand and reply to the member.</p>`,
+          }).catch(err => console.error('[Stripe] unmatched-payment alert failed:', err.message));
         }
 
         // Handle application payment (auto-approved, email checkout, or manually approved)
-        const applicationId = session.metadata?.application_id;
         if (applicationId && (session.metadata?.source === 'auto_approved_application' || session.metadata?.source === 'email_checkout')) {
           const appTier = session.metadata?.tier || 'professional';
           await pool.query(
@@ -211,6 +273,12 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
                 profileId = newProfile.rows[0].id;
               }
               console.log(`[Stripe] Created/updated cpa_profile #${profileId} for ${applicant.email}`);
+              // Paying applicants also need the rows the member perk gates read.
+              if (session.subscription) await upsertCpaSubscription(profileId, session, appTier);
+              await pool.query(
+                `UPDATE users SET subscription_tier = $1, subscription_status = 'active', stripe_customer_id = $2 WHERE LOWER(email) = LOWER($3)`,
+                [baseTier(appTier), session.customer, applicant.email]
+              );
             } catch (profileErr) {
               console.error('[Stripe] Profile creation error (non-fatal):', profileErr.message);
             }
@@ -265,6 +333,12 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           `UPDATE cpa_subscriptions SET status = $1, current_period_start = $2, current_period_end = $3, updated_at = NOW() WHERE stripe_subscription_id = $4`,
           [sub.status === 'active' ? 'active' : sub.status, new Date(sub.current_period_start * 1000), new Date(sub.current_period_end * 1000), sub.id]
         );
+        // past_due keeps perks during Stripe's retry window; terminal states end them.
+        if (['canceled', 'unpaid', 'incomplete_expired'].includes(sub.status)) {
+          await syncPerksForSubscription(sub.id, sub.customer, false);
+        } else if (sub.status === 'active') {
+          await syncPerksForSubscription(sub.id, sub.customer, true);
+        }
         break;
       }
       case 'customer.subscription.deleted': {
@@ -273,6 +347,7 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
           `UPDATE cpa_subscriptions SET status = 'canceled', updated_at = NOW() WHERE stripe_subscription_id = $1`,
           [sub.id]
         );
+        await syncPerksForSubscription(sub.id, sub.customer, false);
         break;
       }
       case 'invoice.payment_failed': {
@@ -1659,9 +1734,9 @@ CanadaAccountants.app | Toronto, ON, Canada<br><a href="{{unsubscribe_url}}" sty
 <p>CPAs typically spend hundreds of hours a year on client development — networking, referrals, word of mouth. Your CanadaAccountants profile puts you in front of businesses that are already searching for a CPA in {{city}}. That's time back in your week.</p>
 <p>Here are 3 things you can do right now to start attracting clients:</p>
 <ol>
-<li><strong>Complete your bio</strong> — accountants with a full bio get 2x more views</li>
+<li><strong>Complete your bio</strong> — it is what clients read before they get in touch</li>
 <li><strong>Add your specialties</strong> — help the right clients find you</li>
-<li><strong>Upload a professional photo</strong> — profiles with photos get 40% more engagement</li>
+<li><strong>Upload a professional photo</strong> — it helps clients recognise you</li>
 </ol>
 <p><a href="{{platform_url}}/cpa-dashboard" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;">Go to Your Dashboard</a></p>
 <p>Questions? Just reply to this email.</p>
@@ -1792,34 +1867,12 @@ CanadaAccountants.app &middot; <a href="{{unsubscribe_url}}" style="color:#888;"
   }
 })();
 
-// AI Performance Scoring Engine API
-app.post('/api/performance/score', async (req, res) => {
-  try {
-    const { cpa, businessRequirements } = req.body;
-
-    // AI Performance Scoring Logic
-    const performanceScore = {
-      overallScore: Math.floor(Math.random() * 15) + 85, // 85-99%
-      performanceMetrics: {
-        clientSatisfaction: Math.floor(Math.random() * 10) + 90,
-        responseTime: Math.floor(Math.random() * 15) + 85,
-        expertise: Math.floor(Math.random() * 8) + 92,
-        reliability: Math.floor(Math.random() * 12) + 88
-      },
-      successPrediction: Math.floor(Math.random() * 20) + 80,
-      confidence: Math.floor(Math.random() * 15) + 85,
-      aiInsights: [
-        "Strong track record in " + (businessRequirements?.industry || "technology") + " sector",
-        "Excellent client retention rate",
-        "Responsive communication style"
-      ]
-    };
-
-    res.json(performanceScore);
-  } catch (error) {
-    console.error('Performance scoring error:', error);
-    res.status(500).json({ error: 'Performance scoring failed' });
-  }
+// AI Performance Scoring Engine API: retired 2026-10-05. It returned random
+// "85-99%" scores and canned insights ("Excellent client retention rate") that
+// no data supported. Anything shown to a client must come from real data; the
+// 6-factor matcher below is the only scoring path.
+app.post('/api/performance/score', (req, res) => {
+  res.status(410).json({ error: 'Performance scoring has been retired. Use /api/match-cpas for data-based matches.' });
 });
 
 // =====================================================
@@ -5598,6 +5651,8 @@ app.get('/api/checkout/:tier', async (req, res) => {
     const priceId = STRIPE_PRICES[tier];
     if (!priceId) return res.status(400).send('Invalid tier. Valid: associate, professional, enterprise');
     if (!email) return res.status(400).send('Email required');
+    // Carry the payer's ids so the webhook can grant perks (it also falls back to email).
+    const known = await resolvePayerByEmail(email).catch(() => ({ userId: null, cpaProfileId: null }));
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
@@ -5611,6 +5666,8 @@ app.get('/api/checkout/:tier', async (req, res) => {
         application_id: appId,
         tier,
         name,
+        cpa_profile_id: known.cpaProfileId || '',
+        userId: known.userId || '',
       },
       allow_promotion_codes: true,
     });
@@ -6573,7 +6630,32 @@ app.get('/api/referral/:userId', authenticateToken, async (req, res) => {
 // POST-CLAIM RETENTION LOOP
 // =====================================================
 
-const PROVINCE_POP_WEIGHT = { ON: 14, QC: 8.5, BC: 5.1, AB: 4.4, MB: 1.4, SK: 1.2, NS: 1, NB: 0.8, NL: 0.5, PE: 0.16 };
+// Legacy admin bulk emails to professionals (activity digest, weekly digest,
+// behavioral sequences, competitive report). Off by default (2026-10-05): they
+// email claimed and contacted professionals, which the 2026-06-10 ACC
+// professional-contact moratorium does not allow, and three of them carried
+// fabricated numbers. Set LEGACY_PRO_BLASTS_ENABLED=true only with a written
+// lift of the moratorium.
+function requireLegacyProBlasts(req, res, next) {
+  if (process.env.LEGACY_PRO_BLASTS_ENABLED === 'true') return next();
+  return res.status(403).json({ skipped: true, reason: 'LEGACY_PRO_BLASTS_ENABLED off (ACC professional-contact moratorium)' });
+}
+
+// Real view count for a scraped_cpas id: distinct visitor IPs on the profile
+// page (profile_visits) plus email-link visits (outreach_emails.real_visit_at),
+// optionally limited to the last `days` days. Never estimated or padded.
+async function countRealProfileViews(scrapedId, days) {
+  const since = days ? `AND visited_at > NOW() - make_interval(days => $2)` : '';
+  const sinceOutreach = days ? `AND real_visit_at > NOW() - make_interval(days => $2)` : '';
+  const params = days ? [scrapedId, days] : [scrapedId];
+  const pageViews = await pool.query(
+    `SELECT COUNT(DISTINCT visitor_ip)::int AS n FROM profile_visits WHERE profile_id = $1 ${since}`, params
+  ).catch(() => ({ rows: [{ n: 0 }] }));
+  const linkViews = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM outreach_emails WHERE recipient_id = $1 AND real_visit_at IS NOT NULL ${sinceOutreach}`, params
+  ).catch(() => ({ rows: [{ n: 0 }] }));
+  return (pageViews.rows[0].n || 0) + (linkViews.rows[0].n || 0);
+}
 
 // Profile activity endpoint — returns view counts + SME match previews
 app.get('/api/dashboard/activity', authenticateToken, requireCPA, async (req, res) => {
@@ -6589,19 +6671,10 @@ app.get('/api/dashboard/activity', authenticateToken, requireCPA, async (req, re
     const province = p.province || p.scraped_province || 'ON';
     const city = p.city || p.scraped_city || '';
 
-    // Count real visits from outreach_emails (real_visit_at)
-    let realViews = 0;
-    if (p.scraped_id) {
-      const viewResult = await pool.query(
-        `SELECT COUNT(*) as views FROM outreach_emails WHERE recipient_id = $1 AND real_visit_at IS NOT NULL`,
-        [p.scraped_id]
-      );
-      realViews = parseInt(viewResult.rows[0].views) || 0;
-    }
-    // Generate realistic view count based on province population weight
-    const popWeight = PROVINCE_POP_WEIGHT[province] || 1;
-    const baseViews = Math.floor(popWeight * 2.5 + Math.random() * popWeight * 1.5);
-    const profileViews = Math.max(realViews, baseViews);
+    // Real views only (2026-10-05): profile page visits plus email-link visits.
+    // A province-weighted random floor used to be shown here; members must only
+    // ever see counts that happened.
+    const profileViews = p.scraped_id ? await countRealProfileViews(p.scraped_id) : 0;
 
     // Query SME matches in same province
     const matches = await pool.query(
@@ -6694,7 +6767,7 @@ app.get('/api/dashboard/matches', authenticateToken, requireCPA, async (req, res
 });
 
 // Weekly activity digest email — sends to all claimed CPAs
-app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, requireLegacyProBlasts, async (req, res) => {
   try {
     const claimed = await pool.query(
       `SELECT sc.id, sc.first_name, sc.last_name, sc.email, sc.province, sc.city, sc.designation, u.id as user_id
@@ -6707,15 +6780,10 @@ app.post('/api/admin/send-activity-digest', authenticateToken, requireAdmin, asy
       try {
         const province = cpa.province || 'ON';
         const city = cpa.city || 'your area';
-        const popWeight = PROVINCE_POP_WEIGHT[province] || 1;
-        const profileViews = Math.floor(popWeight * 2.5 + Math.random() * popWeight * 1.5);
-
-        // Real visit count
-        const viewResult = await pool.query(
-          `SELECT COUNT(*) as views FROM outreach_emails WHERE recipient_id = $1 AND real_visit_at IS NOT NULL`, [cpa.id]
-        );
-        const realViews = parseInt(viewResult.rows[0].views) || 0;
-        const totalViews = Math.max(realViews, profileViews);
+        // Real views in the last 7 days only; no estimate floor. Nothing to
+        // report means no email ("viewed 0 times" helps nobody).
+        const totalViews = await countRealProfileViews(cpa.id, 7);
+        if (totalViews === 0) continue;
 
         // SME matches
         const matches = await pool.query(
@@ -8089,7 +8157,7 @@ app.get('/api/admin/recovery-status', async (req, res) => {
   res.json(recoveryState);
 });
 
-app.post('/api/admin/send-weekly-digest', async (req, res) => {
+app.post('/api/admin/send-weekly-digest', requireLegacyProBlasts, async (req, res) => {
   if (digestState.running) {
     return res.status(409).json({ status: 'already_running', ...digestState });
   }
@@ -8117,7 +8185,6 @@ app.post('/api/admin/send-weekly-digest', async (req, res) => {
   // Process in background
   (async () => {
     try {
-      const PROVINCE_POP = { ON: 14, QC: 8.5, BC: 5.1, AB: 4.4, MB: 1.4, SK: 1.2, NS: 1, NB: 0.8, NL: 0.5, PE: 0.16 };
       const delay = ms => new Promise(r => setTimeout(r, ms));
 
       const { rows: recipients } = await pool.query(
@@ -8138,22 +8205,20 @@ app.post('/api/admin/send-weekly-digest', async (req, res) => {
             if (cpas.length === 0) { digestState.remaining--; continue; }
             const cpa = cpas[0];
             const province = (cpa.province || 'ON').toUpperCase();
-            const popWeight = PROVINCE_POP[province] || 1;
-            const views = Math.floor(popWeight * (Math.random() * 3 + 2));
-            const { rows: cityCount } = await pool.query(
-              `SELECT COUNT(*) FROM scraped_cpas WHERE city = $1`, [cpa.city || 'Unknown']
-            );
-            const totalInCity = parseInt(cityCount[0].count) || 10;
-            const rank = Math.floor(Math.random() * totalInCity * 0.6) + 1;
+            // Real 7-day views only (2026-10-05). The random view count, the
+            // random rank and the "search appearances" row (which was really the
+            // number of CPAs in the city) are gone. No views, no email.
+            const views = await countRealProfileViews(cpa.id, 7);
+            if (views === 0) { digestState.remaining--; continue; }
             let tip = '';
-            if (!cpa.phone) tip = 'Add your phone number — profiles with a phone get 40% more inquiries.';
+            if (!cpa.phone) tip = 'Add your phone number so clients can reach you directly.';
             else if (!cpa.firm_name) tip = 'Add your firm name — it builds trust and improves search ranking.';
             else tip = 'Your profile is looking strong! Consider upgrading for priority placement.';
             const firstName = cpa.first_name || 'there';
             const city = cpa.city || province;
             const subject = `Your profile this week — ${views} views in ${city}`;
             const profileUrl = claimRedirectUrl(cpa.id);
-            const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;"><h2 style="color:#1e3a8a;">Weekly Profile Report</h2><p>Hi ${firstName},</p><div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;"><div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div><div style="color:#666;font-size:14px;">profile views this week</div></div><table style="width:100%;border-collapse:collapse;margin:16px 0;"><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Search appearances in ${city}</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">${totalInCity}</td></tr><tr><td style="padding:8px;border-bottom:1px solid #eee;color:#888;">Your ranking</td><td style="padding:8px;border-bottom:1px solid #eee;font-weight:bold;text-align:right;">#${rank} of ${totalInCity}</td></tr></table><div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;"><strong style="color:#92400e;">Tip to boost your profile:</strong><p style="margin:8px 0 0;color:#78350f;">${tip}</p></div><p style="text-align:center;margin:24px 0;"><a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p><p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p></div>`;
+            const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#fff;padding:24px;"><h2 style="color:#1e3a8a;">Weekly Profile Report</h2><p>Hi ${firstName},</p><div style="text-align:center;margin:20px 0;padding:20px;background:#f0f7ff;border-radius:12px;"><div style="font-size:48px;font-weight:bold;color:#2563eb;">${views}</div><div style="color:#666;font-size:14px;">profile views this week</div></div><div style="margin:20px 0;padding:16px;background:#fffbeb;border-left:4px solid #f59e0b;border-radius:4px;"><strong style="color:#92400e;">Tip to boost your profile:</strong><p style="margin:8px 0 0;color:#78350f;">${tip}</p></div><p style="text-align:center;margin:24px 0;"><a href="${profileUrl}" style="display:inline-block;background:#2563eb;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:600;">View Your Profile</a></p><p style="color:#999;font-size:11px;">CanadaAccountants.app<br><a href="${BACKEND_URL}/api/unsubscribe?email=${encodeURIComponent(r.recipient_email)}">Unsubscribe</a></p></div>`;
             await sendEmail({ to: r.recipient_email, subject, html, from: OUTREACH_FROM });
             digestState.sent++;
           } catch (e) {
@@ -8180,7 +8245,7 @@ app.get('/api/admin/digest-status', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════
 // ENGAGEMENT LAYER 2: Behavioral Sequences
 // ═══════════════════════════════════════════════════════════════════
-app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
+app.post('/api/admin/send-behavioral-sequences', requireLegacyProBlasts, async (req, res) => {
   try {
     const delay = ms => new Promise(r => setTimeout(r, ms));
     const counts = { segmentA: 0, segmentB: 0, segmentC: 0, segmentD: 0, segmentE: 0 };
@@ -8336,7 +8401,7 @@ app.post('/api/admin/send-behavioral-sequences', async (req, res) => {
         const html = `
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
   <p>Hi ${r.first_name || 'there'},</p>
-  <p>Your free profile on CanadaAccountants is live — but did you know you could be getting <strong>5x more client inquiries</strong>?</p>
+  <p>Your free profile on CanadaAccountants is live. Here is what a paid plan adds.</p>
   <p>Upgraded members get:</p>
   <ul style="color:#334155;">
     <li><strong>Priority placement</strong> in ${r.city || r.province || 'local'} search results</li>
@@ -8471,9 +8536,8 @@ app.post('/api/admin/send-visitor-notifications', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════
 // ENGAGEMENT LAYER 4: Competitive Report
 // ═══════════════════════════════════════════════════════════════════
-app.post('/api/admin/send-competitive-report', async (req, res) => {
+app.post('/api/admin/send-competitive-report', requireLegacyProBlasts, async (req, res) => {
   try {
-    const PROVINCE_POP = { ON: 14, QC: 8.5, BC: 5.1, AB: 4.4, MB: 1.4, SK: 1.2, NS: 1, NB: 0.8, NL: 0.5, PE: 0.16 };
     const delay = ms => new Promise(r => setTimeout(r, ms));
     const now = new Date();
     const monthName = now.toLocaleString('en-US', { month: 'long', year: 'numeric' });
@@ -8483,13 +8547,10 @@ app.post('/api/admin/send-competitive-report', async (req, res) => {
       `SELECT province, COUNT(*) as total FROM scraped_cpas WHERE province IS NOT NULL GROUP BY province`
     );
     const statsMap = {};
+    // Real counts only (2026-10-05): "new claims" was population weight x 3 and
+    // "avg. profile score" a constant 50; both rows are removed from the email.
     for (const s of provinceStats) {
-      const popWeight = PROVINCE_POP[s.province] || 1;
-      statsMap[s.province] = {
-        total: parseInt(s.total),
-        newClaims: Math.floor(popWeight * 3),
-        avgScore: 50
-      };
+      statsMap[s.province] = { total: parseInt(s.total) };
     }
 
     // Get all emailed professionals grouped by province
@@ -8505,7 +8566,8 @@ app.post('/api/admin/send-competitive-report', async (req, res) => {
     let sent = 0, failed = 0;
     for (const r of recipients) {
       try {
-        const stats = statsMap[r.province] || { total: 100, newClaims: 3, avgScore: 50 };
+        const stats = statsMap[r.province];
+        if (!stats) continue;
         const subject = `CPA Market Report — ${r.province} ${monthName}`;
         const html = `
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
@@ -8514,8 +8576,6 @@ app.post('/api/admin/send-competitive-report', async (req, res) => {
   <p>Here's your monthly competitive intelligence briefing for CPAs in ${r.province}:</p>
   <table style="width:100%;border-collapse:collapse;margin:20px 0;">
     <tr style="background:#f8fafc;"><td style="padding:12px;border:1px solid #e2e8f0;font-weight:bold;">Total CPAs listed</td><td style="padding:12px;border:1px solid #e2e8f0;text-align:right;font-size:18px;color:#2563eb;">${stats.total.toLocaleString()}</td></tr>
-    <tr><td style="padding:12px;border:1px solid #e2e8f0;font-weight:bold;">New claims this month</td><td style="padding:12px;border:1px solid #e2e8f0;text-align:right;font-size:18px;color:#059669;">+${stats.newClaims}</td></tr>
-    <tr style="background:#f8fafc;"><td style="padding:12px;border:1px solid #e2e8f0;font-weight:bold;">Avg. profile score</td><td style="padding:12px;border:1px solid #e2e8f0;text-align:right;font-size:18px;color:#f59e0b;">${stats.avgScore}/100</td></tr>
   </table>
   <div style="padding:16px;background:#eff6ff;border-radius:8px;margin:16px 0;">
     <p style="margin:0;font-weight:bold;color:#1e3a8a;">What this means for you:</p>
