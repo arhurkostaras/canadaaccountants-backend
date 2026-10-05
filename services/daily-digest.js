@@ -16,6 +16,7 @@
 
 const { sendEmail } = require('./email');
 const inboundSummary = require('./inbound-summary');
+const stripeRevenue = require('./stripe-revenue');
 
 const ADMIN_EMAIL = 'arthur@negotiateandwin.com';
 const TZ = 'America/Toronto';
@@ -119,6 +120,42 @@ function renderActions(actions, now) {
   ].join('');
 }
 
+// Revenue card. Each platform's feed reads Stripe directly (services/stripe-revenue.js):
+// a subscription counts as paid only when active, not paused and not cancelling,
+// so the card shows the states the local tables cannot see. A platform whose
+// feed fell back to its local table is marked, and the card turns amber.
+function revenueLine(r) {
+  if (!r) return 'not reported';
+  const states = [];
+  if (r.paused) states.push(`${r.paused} paused`);
+  if (r.cancelling) states.push(`${r.cancelling} cancelling`);
+  if (r.past_due) states.push(`${r.past_due} past due`);
+  if (r.trialing) states.push(`${r.trialing} trialing`);
+  const source = r.revenue_source === 'stripe' ? 'Stripe'
+    : r.revenue_source === 'local_table' ? 'LOCAL TABLE, Stripe unavailable' : 'UNAVAILABLE';
+  return `${r.paid || 0} paid, $${r.mrr || 0} MRR${states.length ? ' (' + states.join(', ') + ')' : ''} [${source}]`;
+}
+
+function renderRevenue(revenue) {
+  if (!revenue || !Object.keys(revenue).length) return '';
+  let paid = 0, mrr = 0, fallback = false;
+  const items = Object.keys(revenue).map(p => {
+    const r = revenue[p];
+    if (r) {
+      paid += r.paid || 0;
+      mrr += r.mrr || 0;
+      if (r.revenue_source !== 'stripe') fallback = true;
+    }
+    const detail = r && r.detail ? ` <span style="color:#92400e;">${esc(r.detail)}</span>` : '';
+    return `<li><strong>${esc(p)}</strong>: ${esc(revenueLine(r))}${detail}</li>`;
+  });
+  const color = fallback ? AMBER : BLUE;
+  return `<div style="${CARD}background:${color.bg};border-left:4px solid ${color.edge};color:${color.text};">
+    <strong>Revenue (Stripe)</strong>: ${paid} paid, $${mrr} MRR collectible${fallback ? ' · at least one platform read its local table, not Stripe' : ''}
+    <ul style="margin:6px 0 0;padding-left:18px;">${items.join('')}</ul>
+  </div>`;
+}
+
 function renderQuiet(quiet) {
   const lines = (quiet || []).map(q =>
     `<li style="color:${q.ok ? '#166534' : '#92400e'};"><strong>${esc(q.platform)}</strong>: ${esc(q.line)}</li>`).join('');
@@ -154,6 +191,7 @@ function buildDigest(data) {
       <h3 style="margin:20px 0 10px;font-size:15px;color:#0f172a;">2. Numbers</h3>
       ${numbers.html || '<p style="font-size:13px;color:#64748b;">Pipeline numbers unavailable.</p>'}
       ${notesHtml}
+      ${renderRevenue(data.revenue)}
       ${renderFounder(data.founder)}
       <h3 style="margin:20px 0 6px;font-size:15px;color:#0f172a;">3. Quiet</h3>
       ${renderQuiet(data.quiet)}
@@ -161,11 +199,11 @@ function buildDigest(data) {
     </div>
   </div>`;
 
-  const text = buildText({ dateLabel, count, actions, numbers, quiet: data.quiet, founder: data.founder, now });
+  const text = buildText({ dateLabel, count, actions, numbers, quiet: data.quiet, founder: data.founder, revenue: data.revenue, now });
   return { subject: buildSubject(dateLabel, count), html, text, actionCount: count };
 }
 
-function buildText({ dateLabel, count, actions, numbers, quiet, founder, now }) {
+function buildText({ dateLabel, count, actions, numbers, quiet, founder, revenue, now }) {
   const lines = [`Platforms daily ${dateLabel}: ${count} action(s) required`, '', '1. ACTION REQUIRED'];
   if (count === 0) lines.push('Nothing needs you today.');
   const push = (title, items, fmt) => {
@@ -181,6 +219,10 @@ function buildText({ dateLabel, count, actions, numbers, quiet, founder, now }) 
   lines.push('', '2. NUMBERS');
   lines.push(numbers.text || (numbers.html ? numbers.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : 'unavailable'));
   (numbers.notes || []).forEach(n => lines.push(`  note: ${n}`));
+  if (revenue && Object.keys(revenue).length) {
+    lines.push('', 'REVENUE (Stripe; a platform read from its local table says so)');
+    Object.keys(revenue).forEach(p => lines.push(`  ${p}: ${revenueLine(revenue[p])}`));
+  }
   if (founder) lines.push('', `Monday: ${founder.total} founder-outreach candidates (see HTML)`);
   lines.push('', '3. QUIET');
   (quiet || []).forEach(q => lines.push(`  ${q.platform}: ${q.line}`));
@@ -209,7 +251,7 @@ async function safeRows(pool, label, sql, params, failures) {
 
 // ACC's own feed. The same shape is served at GET /api/daily-digest/feed so the
 // LAW/INV ports return it to this collector.
-async function collectLocalFeed(pool, sinceISO, { now = new Date() } = {}) {
+async function collectLocalFeed(pool, sinceISO, { now = new Date(), stripe } = {}) {
   const failures = [];
   const clientRequests = [];
 
@@ -287,6 +329,9 @@ async function collectLocalFeed(pool, sinceISO, { now = new Date() } = {}) {
     failures.push({ platform: 'ACC', message: `deliverability gate read failed: ${err.message}` });
   }
 
+  // Revenue from Stripe (local table only as a marked fallback); see stripe-revenue.js.
+  const revenue = await stripeRevenue.collectRevenue({ pool, stripe, failures });
+
   return {
     platform: 'ACC',
     since: sinceISO,
@@ -295,6 +340,7 @@ async function collectLocalFeed(pool, sinceISO, { now = new Date() } = {}) {
     applications_awaiting_payment: applicationsAwaitingPayment,
     removal_requests: removalRequests,
     inbound_needing_human: inboundNeedingHuman,
+    revenue,
     crons: {
       poller_last_at: pollHealth?.last_poll_at || null,
       poller_status: pollHealth?.last_poll_status || null,
@@ -332,7 +378,7 @@ async function fetchPeerFeed(peer, sinceISO) {
   }
 }
 
-function mergePeerFeed(feed, actions, quietParts) {
+function mergePeerFeed(feed, actions, quietParts, revenue) {
   const p = feed.platform;
   if (feed.notDeployed) {
     quietParts.push('digest feed not deployed yet (sibling port pending)');
@@ -352,6 +398,7 @@ function mergePeerFeed(feed, actions, quietParts) {
   if (c.classified_24h != null) quietParts.push(`classifier ${c.classified_24h} processed`);
   if (c.gate_paused === true) actions.failures.push({ platform: p, message: 'deliverability gate has the platform PAUSED' });
   mergeLeadLoop(p, feed.lead_loop, actions, quietParts);
+  if (revenue && feed.revenue) revenue[p] = feed.revenue;
   quietParts.push('digest feed ok');
 }
 
@@ -388,6 +435,8 @@ async function collectDigestData(deps) {
 
   // 1. ACC local feed
   const local = await collectLocalFeed(deps.pool, sinceISO, { now });
+  // Per-platform revenue as read by each backend's feed (null until that feed reports it).
+  const revenue = { ACC: local.revenue || null, LAW: null, INV: null };
   actions.clientRequests.push(...local.client_requests);
   actions.applicationsAwaitingPayment.push(...local.applications_awaiting_payment);
   actions.removalRequests.push(...local.removal_requests);
@@ -411,7 +460,7 @@ async function collectDigestData(deps) {
   for (const peer of PEER_FEEDS) {
     const feed = await peerFeed(peer, sinceISO);
     const before = actions.failures.length;
-    mergePeerFeed({ ...feed, platform: peer.platform }, actions, quietByPlatform[peer.platform]);
+    mergePeerFeed({ ...feed, platform: peer.platform }, actions, quietByPlatform[peer.platform], revenue);
     if (actions.failures.length > before) healthy[peer.platform] = false;
     feedOk[peer.platform] = !feed.error && !feed.notDeployed;
   }
@@ -501,7 +550,7 @@ async function collectDigestData(deps) {
     line: quietByPlatform[platform].length ? quietByPlatform[platform].join(' · ') : 'no signals collected'
   }));
 
-  return { now, dateLabel: torontoDate(now), actions, numbers, quiet, founder };
+  return { now, dateLabel: torontoDate(now), actions, numbers, quiet, founder, revenue };
 }
 
 async function sendDailyDigest(deps) {

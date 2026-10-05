@@ -143,7 +143,9 @@ test('server.js wires the gate, sitemap, listings, boot migration, and routes', 
   assert.strictEqual(idx.classifyProfile({ dispute_pending: true }).http_status, 410);
   assert.deepStrictEqual(idx.classifyProfile({ removed_at: new Date(), is_misclassified: true }).reason, 'removed', 'removal outranks contamination flags');
   assert.strictEqual(src.indexOf('${profileDisputes.VISIBLE_SQL}'), -1, 'no ACC query carries a second copy of the predicate');
-  assert.match(src.slice(sitemapIdx, sitemapEnd), /WHERE \$\{INDEXABLE_SQL\}/, 'sitemap filters through INDEXABLE_SQL');
+  // Either inline, or through a composed `where` that starts with INDEXABLE_SQL (the 2026-10-05 tier split).
+  const sitemapSrc = src.slice(sitemapIdx, sitemapEnd);
+  assert.ok(/WHERE \$\{INDEXABLE_SQL\}/.test(sitemapSrc) || (/const where = `\$\{INDEXABLE_SQL\}/.test(sitemapSrc) && /WHERE \$\{where\}/.test(sitemapSrc)), 'sitemap filters through INDEXABLE_SQL');
   for (const route of ["app.get('/api/directory/city/:city'", "app.get('/api/directory/:province'", "app.get('/api/directory/:province/:designation'", "app.get('/api/professionals/search'"]) {
     const at = src.indexOf(route);
     assert.ok(at > 0, `${route} exists`);
