@@ -1,4 +1,5 @@
 const { Resend } = require('resend');
+const frictionAck = require('./friction-ack');
 
 // Initialize Resend - graceful fallback when API key missing
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -113,25 +114,10 @@ async function sendEmail({ to, subject, html, text, headers, from, replyTo }) {
  */
 async function sendFrictionMatchNotification(requestId, request, matches) {
   const contactInfo = request.contactInfo || {};
-  const matchList = matches
-    .map((m, i) => `<li><strong>${m.name}</strong> — ${m.specializations.join(', ')} (${m.matchScore.toFixed(0)}% match)</li>`)
-    .join('');
 
   // Email to admin
-  await sendEmail({
-    to: ADMIN_EMAIL,
-    subject: `New SME Match Request: ${contactInfo.name || requestId}`,
-    html: wrapInBrandTemplate(`
-      <h2 style="margin:0 0 18px;color:#1a1a1a;font-size:20px;font-weight:600;">New Friction Elimination Match Request</h2>
-      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Request ID:</strong> ${requestId}</p>
-      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Contact:</strong> ${contactInfo.name || 'N/A'} (${contactInfo.email || 'N/A'})</p>
-      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Pain Point:</strong> ${request.painPoint || request.pain_point || 'N/A'}</p>
-      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Business Type:</strong> ${request.businessType || request.business_type || 'N/A'}</p>
-      <p style="margin:0 0 12px;color:#333333;font-size:15px;line-height:1.7;"><strong>Urgency:</strong> ${request.urgencyLevel || request.urgency_level || 'N/A'}</p>
-      <h3 style="margin:18px 0 12px;color:#1a1a1a;font-size:17px;font-weight:600;">Matches Generated (${matches.length})</h3>
-      <ul style="margin:0 0 18px;color:#333333;font-size:15px;line-height:1.7;">${matchList}</ul>
-    `),
-  });
+  const alert = frictionAck.adminAlert({ requestId, request, matches });
+  await sendEmail({ to: ADMIN_EMAIL, subject: alert.subject, html: wrapInBrandTemplate(alert.body) });
 
   // Confirmation to SME (if we have their email) — skip self-test/seed addresses to
   // protect sender reputation (synthetic addresses hard-bounce). Loud log on skip.
@@ -139,16 +125,12 @@ async function sendFrictionMatchNotification(requestId, request, matches) {
   if (contactInfo.email && __isSelfTest(contactInfo.email)) {
     console.warn(`[FrictionAck] SKIPPED requester ack to self-test/seed address ${contactInfo.email} (request ${requestId})`);
   } else if (contactInfo.email) {
+    const ack = frictionAck.requesterAck({ request, matchCount: matches.length });
     await sendEmail({
       to: contactInfo.email,
       replyTo: process.env.ADMIN_EMAIL || 'arthur@negotiateandwin.com',
-      subject: `We've got your request — a CPA match in ${contactInfo.city || contactInfo.location || 'your area'}`,
-      html: wrapInBrandTemplate(`
-        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Hi ${contactInfo.name || 'there'},</p>
-        <p style="margin:0 0 16px;color:#333333;font-size:15px;line-height:1.7;">Thanks for reaching out${request.painPoint ? ' about ' + request.painPoint : ''}. Here's exactly what happens next: I'll match you with a CPA who fits &mdash; you'll have an introduction in your inbox within 1 business day. I personally review every request at this stage, so a real person (me) is reading yours. If you want to add anything, just reply to this email; it comes straight to me.</p>
-        <p style="margin:0;color:#333333;font-size:15px;line-height:1.7;">Arthur Kostaras<br>Founder, CanadaAccountants.app</p>
-        <p style="margin:18px 0 0;color:#888888;font-size:12px;line-height:1.6;">You're receiving this because you submitted a match request at canadaaccountants.app. We use your details only to match you with a CPA and follow up. <a href="https://canadaaccountants.app/privacy-policy" style="color:#2563eb;">Privacy policy</a> &middot; reply "unsubscribe" to opt out.</p>
-      `),
+      subject: ack.subject,
+      html: wrapInBrandTemplate(ack.body),
     });
   }
 }
