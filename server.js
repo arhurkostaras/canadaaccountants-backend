@@ -5645,14 +5645,52 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
   }
 });
 
-// On-demand Stripe Checkout — email links redirect here instead of pre-generated session URLs.
-// Stripe sessions expire after 24h, so emails must never contain pre-generated URLs.
-app.get('/api/checkout/:tier', async (req, res) => {
+// On-demand Stripe Checkout for emailed and post-application links, in two steps
+// so mail-security scanners cannot create sessions. Gateways such as Safe Links
+// GET every link in a message; a GET used to create a Stripe session, so each
+// scanned email showed up as expired "email_checkout" sessions that looked like
+// buyer interest. Stripe sessions expire after 24h, so emails still carry this
+// link rather than a pre-generated session URL. Now:
+//   GET  /api/checkout/:tier  -> a one-button page (creates nothing)
+//   POST /api/checkout/:tier  -> creates the session and 303s to Stripe
+function checkoutEscape(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function checkoutParams(src) {
+  return { email: String(src.email || '').trim(), name: String(src.name || ''), appId: String(src.app || '') };
+}
+
+function checkoutPage(tier, { email, name, appId }) {
+  const label = baseTier(tier).charAt(0).toUpperCase() + baseTier(tier).slice(1);
+  const interval = /_yearly$/.test(tier) ? 'yearly' : 'monthly';
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex,nofollow"><title>Secure checkout - CanadaAccountants</title>
+<style>body{font-family:Arial,sans-serif;max-width:560px;margin:56px auto;padding:0 20px;color:#333;line-height:1.6}
+h1{color:#1e3a8a;font-size:24px;margin:0 0 8px}button{background:linear-gradient(135deg,#2563eb,#1e3a8a);color:#fff;border:none;padding:14px 28px;border-radius:6px;font-size:16px;font-weight:600;cursor:pointer}
+.muted{color:#888;font-size:13px;margin-top:28px}</style></head>
+<body><h1>CanadaAccountants ${checkoutEscape(label)} plan</h1>
+<p>You're about to start the ${checkoutEscape(label)} plan (${interval}) for <strong>${checkoutEscape(email)}</strong>. Payment is handled securely by Stripe.</p>
+<form method="POST" action="/api/checkout/${encodeURIComponent(tier)}">
+<input type="hidden" name="email" value="${checkoutEscape(email)}"><input type="hidden" name="name" value="${checkoutEscape(name)}"><input type="hidden" name="app" value="${checkoutEscape(appId)}">
+<button type="submit">Continue to secure checkout</button></form>
+<p class="muted">Questions? Write to <a href="mailto:arthur@negotiateandwin.com">arthur@negotiateandwin.com</a>.</p></body></html>`;
+}
+
+app.get('/api/checkout/:tier', (req, res) => {
+  const tier = req.params.tier;
+  const params = checkoutParams(req.query);
+  if (!STRIPE_PRICES[tier]) return res.status(400).send('Invalid tier. Valid: associate, professional, enterprise');
+  if (!params.email) return res.status(400).send('Email required');
+  res.set('Cache-Control', 'no-store');
+  res.type('html').send(checkoutPage(tier, params));
+});
+
+app.post('/api/checkout/:tier', express.urlencoded({ extended: false }), async (req, res) => {
   try {
     const tier = req.params.tier;
-    const email = req.query.email;
-    const name = req.query.name || '';
-    const appId = req.query.app || '';
+    const { email, name, appId } = checkoutParams(req.body || {});
 
     const priceId = STRIPE_PRICES[tier];
     if (!priceId) return res.status(400).send('Invalid tier. Valid: associate, professional, enterprise');
