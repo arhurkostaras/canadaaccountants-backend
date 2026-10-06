@@ -54,7 +54,8 @@ test('legacy bulk emails to professionals are gated by LEGACY_PRO_BLASTS_ENABLED
 });
 
 test('emailed checkout carries the payer ids and the webhook resolves by email', () => {
-  const checkout = routeBody("app.get('/api/checkout/:tier'");
+  // The session is created by the POST (the GET only renders the scanner-safe page).
+  const checkout = routeBody("app.post('/api/checkout/:tier'");
   assert.match(checkout, /resolvePayerByEmail\(email\)/);
   assert.match(checkout, /cpa_profile_id: known\.cpaProfileId/);
   const webhook = routeBody("app.post('/api/stripe/webhook'");
