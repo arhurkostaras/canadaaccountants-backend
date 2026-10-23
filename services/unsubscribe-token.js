@@ -6,6 +6,12 @@
 //
 // Stateless: no DB lookup needed to verify. The endpoint reconstructs the
 // expected HMAC from the supplied email and compares constant-time.
+//
+// Rotation: tokens are always issued with UNSUBSCRIBE_SECRET. Verification
+// also accepts UNSUBSCRIBE_SECRET_PREVIOUS when it is set, so links in mail
+// sent before a rotation keep working (CASL s.11(3): the unsubscribe
+// mechanism must stay valid for at least 60 days after sending). Remove
+// _PREVIOUS 60 days after the rotation; see OPERATIONS.md.
 
 const crypto = require('crypto');
 
@@ -17,6 +23,14 @@ function _secret() {
   return s;
 }
 
+// Secrets accepted for verification, current first. A missing, short or
+// duplicate _PREVIOUS is ignored.
+function _verifySecrets() {
+  const current = _secret();
+  const prev = process.env.UNSUBSCRIBE_SECRET_PREVIOUS;
+  return prev && prev.length >= 16 && prev !== current ? [current, prev] : [current];
+}
+
 function _b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -26,8 +40,8 @@ function _b64urlDecode(s) {
   return Buffer.from(padded, 'base64').toString('utf8');
 }
 
-function _hmac(email) {
-  return crypto.createHmac('sha256', _secret()).update(email.toLowerCase()).digest('hex');
+function _hmac(email, secret = _secret()) {
+  return crypto.createHmac('sha256', secret).update(email.toLowerCase()).digest('hex');
 }
 
 function makeUrl(email, baseUrl) {
@@ -46,16 +60,19 @@ function verify(emailB64, sig) {
   } catch (_) {
     return null;
   }
-  if (!email || !sig) return null;
-  let expected;
+  if (!email || !sig || !/^[0-9a-f]{64}$/i.test(String(sig))) return null;
+  let secrets;
   try {
-    expected = _hmac(email);
+    secrets = _verifySecrets();
   } catch (_) {
     return null;
   }
-  if (sig.length !== expected.length) return null;
-  const ok = crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
-  return ok ? email : null;
+  const given = Buffer.from(String(sig), 'hex');
+  for (const secret of secrets) {
+    const expected = Buffer.from(_hmac(email, secret), 'hex');
+    if (given.length === expected.length && crypto.timingSafeEqual(given, expected)) return email;
+  }
+  return null;
 }
 
 module.exports = { makeUrl, verify };

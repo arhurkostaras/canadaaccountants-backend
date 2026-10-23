@@ -48,3 +48,33 @@ test('IMAP error detail carries the server response, not just "Command failed"',
   assert.match(d, /bandwidth limits/);
   assert.strictEqual(poller._imapErrorDetail(new Error('plain')), 'plain');
 });
+
+// B4 (Railway incident, 2026-10-23): no default mailbox. With GMAIL_IMAP_USER
+// unset the poller must refuse before any IMAP connection, never falling back
+// to a personal inbox.
+test('poller refuses to run without GMAIL_IMAP_USER and records the failure', async () => {
+  const saved = { u: process.env.GMAIL_IMAP_USER, p: process.env.GMAIL_IMAP_APP_PASSWORD };
+  const queries = [];
+  const pool = { query: async (sql, params) => { queries.push({ sql, params }); return { rows: [] }; } };
+  try {
+    process.env.GMAIL_IMAP_APP_PASSWORD = 'not-a-real-app-password';
+    for (const unset of [undefined, '', '   ']) {
+      if (unset === undefined) delete process.env.GMAIL_IMAP_USER;
+      else process.env.GMAIL_IMAP_USER = unset;
+      queries.length = 0;
+      const r = await poller.pollOnce(pool);
+      assert.deepStrictEqual(r, { ok: false, error: 'GMAIL_IMAP_USER not configured' });
+      assert.strictEqual(queries.length, 1, 'one status write, nothing else');
+      assert.match(queries[0].sql, /UPDATE inbound_poll_status/);
+      assert.deepStrictEqual(queries[0].params, ['failed', 0, 'GMAIL_IMAP_USER not configured']);
+    }
+  } finally {
+    if (saved.u === undefined) delete process.env.GMAIL_IMAP_USER; else process.env.GMAIL_IMAP_USER = saved.u;
+    if (saved.p === undefined) delete process.env.GMAIL_IMAP_APP_PASSWORD; else process.env.GMAIL_IMAP_APP_PASSWORD = saved.p;
+  }
+});
+
+test('poller source has no hardcoded default mailbox', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/inbound-poller.js'), 'utf8');
+  assert.doesNotMatch(src, /GMAIL_IMAP_USER\s*\|\|\s*['"][^'"]+@/);
+});

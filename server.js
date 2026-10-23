@@ -9752,14 +9752,19 @@ const monitorCronFire = (label) => {
 
 cron.schedule('0 7 * * *', () => monitorCronFire('07:00 daily'), { timezone: 'America/Toronto' });
 
-// Inbound mail polling cron (Section 4.0 of campaign brief v1.7). Polls
-// arthur@negotiateandwin.com via IMAP every 5 minutes, dispatches platform-routed
+// Inbound mail polling cron (Section 4.0 of campaign brief v1.7). Polls the
+// GMAIL_IMAP_USER mailbox via IMAP every 5 minutes, dispatches platform-routed
 // replies to /api/inbound on each backend. ACC hosts this single polling cron;
-// LAW/INV/CBE only expose the /api/inbound receiver.
+// LAW/INV/CBE only expose the /api/inbound receiver. Not started when
+// GMAIL_IMAP_USER is unset (there is no default mailbox).
 const inboundPoller = require('./services/inbound-poller');
-cron.schedule('*/5 * * * *', () => {
-  inboundPoller.pollOnce(pool).catch(e => console.error('[InboundPoller] uncaught:', e.message));
-}, { timezone: 'America/Toronto' });
+if ((process.env.GMAIL_IMAP_USER || '').trim()) {
+  cron.schedule('*/5 * * * *', () => {
+    inboundPoller.pollOnce(pool).catch(e => console.error('[InboundPoller] uncaught:', e.message));
+  }, { timezone: 'America/Toronto' });
+} else {
+  console.error('[InboundPoller] GMAIL_IMAP_USER not set; inbound mail poller NOT started');
+}
 
 // Inbound classifier worker (Section 4.1 of campaign brief v1.7). Polls
 // inbound_messages every 2 minutes and routes breakdown triggers to the auto-reply
