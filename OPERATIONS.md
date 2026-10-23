@@ -560,3 +560,39 @@ Follow-ups (not done):
      DB_MAP.md's "Backup: UNKNOWN" entries are superseded by this note.
   c. Ledger candidate (BP-016): a weekly amcheck cron or a pre-regen amcheck step in
      gen-db.js so index corruption is found by a scheduled read, not by the first bulk write.
+
+## 2026-10-23 - Railway incident: unsubscribe tokens accept UNSUBSCRIBE_SECRET_PREVIOUS
+
+Railway disclosed on 21 Oct 2026 that environment variables in its customer store were
+accessed and some decrypted. Every variable in the workspace is treated as compromised,
+including UNSUBSCRIBE_SECRET. Rotating it naively would break the unsubscribe link in
+every email already sent, and CASL s.11(3) requires that mechanism to stay valid for at
+least 60 days after sending.
+
+services/unsubscribe-token.js now issues tokens with UNSUBSCRIBE_SECRET only and verifies
+against UNSUBSCRIBE_SECRET, then UNSUBSCRIBE_SECRET_PREVIOUS when set (>=16 chars). No
+behaviour change while _PREVIOUS is unset. tests/unsubscribe-token.test.js pins it.
+
+Rotation (operator, after merge; values copied shell to shell, never displayed):
+1. Copy the current UNSUBSCRIBE_SECRET into UNSUBSCRIBE_SECRET_PREVIOUS.
+2. Set a new UNSUBSCRIBE_SECRET. Redeploy.
+3. Verify: an old unsubscribe link from a sent email still works; a fresh one works too.
+
+Trade-off accepted: for 60 days the compromised value still verifies unsubscribe links.
+The worst a holder can do with it is unsubscribe an address.
+
+**REMINDER: remove UNSUBSCRIBE_SECRET_PREVIOUS 60 days after the rotation date, then
+redeploy. Rotation planned Mon 2026-10-26 -> remove on or after 2026-12-25. Rotated on:
+____ (fill in) -> remove on or after: ____.**
+
+## 2026-10-23 - Railway incident: inbound poller has no default mailbox
+
+Same incident. services/inbound-poller.js used to fall back to arthur@negotiateandwin.com
+when GMAIL_IMAP_USER was unset, so the poller's app password opened the main personal
+inbox. There is now no default: with GMAIL_IMAP_USER unset, server.js does not schedule
+the poller (one error at boot), and pollOnce refuses before any IMAP connection and
+records 'GMAIL_IMAP_USER not configured' in inbound_poll_status. tests/inbound-poller.test.js
+pins it.
+
+**Merge order: set GMAIL_IMAP_USER (and its app password) to the new dedicated mailbox
+first, then merge. Merging first stops the poller.**

@@ -221,7 +221,14 @@ async function pollOnce(pool) {
 async function _pollOnceInner(pool) {
   const startedAt = new Date();
   const appPassword = process.env.GMAIL_IMAP_APP_PASSWORD;
-  const mailboxUser = process.env.GMAIL_IMAP_USER || 'arthur@negotiateandwin.com';
+  // No default mailbox: an unset user must never fall back to a personal inbox.
+  const mailboxUser = (process.env.GMAIL_IMAP_USER || '').trim();
+  if (!mailboxUser) {
+    const err = new Error('GMAIL_IMAP_USER not configured');
+    await _writeStatus(pool, { status: 'failed', error: err.message, count: 0, increment_failures: true });
+    console.error('[InboundPoller] aborting:', err.message);
+    return { ok: false, error: err.message };
+  }
   if (!appPassword) {
     const err = new Error('GMAIL_IMAP_APP_PASSWORD not configured');
     await _writeStatus(pool, { status: 'failed', error: err.message, count: 0, increment_failures: true });
