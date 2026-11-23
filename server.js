@@ -1508,6 +1508,47 @@ const crmIntelligence = new CRMIntelligence({
     console.error('[Migration] profile_suppressions migration FAILED (removed profiles can be re-scraped until fixed):', err.message);
   }
 
+  // Suppression entries for removal requests, keyed by profile id so no personal data lives in
+  // the code. Each entry is built from the removed scraped_cpas row (name keys both orders,
+  // permit number, row emails). Idempotent: ON CONFLICT DO NOTHING on (name_key, province).
+  // The self-check asks ps_find_suppression() whether a new row with the same name, in either
+  // order, would be blocked, and logs the answer; it writes nothing.
+  //   48509: delisting request relayed by Arthur, 2026-11-23 (OPERATIONS.md, ACC privacy removal).
+  const SUPPRESSED_PROFILE_IDS = [{ id: 48509, ref: '2026-11-23/1' }];
+  for (const s of SUPPRESSED_PROFILE_IDS) {
+    try {
+      const ins = await pool.query(
+        `INSERT INTO profile_suppressions
+           (subject_ref, removed_profile_id, removed_profile_ids, registry_id, first_name, last_name,
+            name_key, name_key_rev, province_code, emails, reason, request_source, requested_at, removed_at, notes)
+         SELECT $2, id, ARRAY[id], NULLIF(btrim(permit_number), ''), first_name, last_name,
+                ps_name_key(COALESCE(first_name, '') || COALESCE(last_name, '')),
+                ps_name_key(COALESCE(last_name, '') || COALESCE(first_name, '')),
+                ps_province_code(province),
+                ARRAY(SELECT DISTINCT lower(btrim(e)) FROM unnest(ARRAY[email, enriched_email]) e
+                       WHERE e IS NOT NULL AND btrim(e) <> ''),
+                'removal_request', 'arthur', COALESCE(removed_at, NOW()), removed_at, $3
+           FROM scraped_cpas WHERE id = $1 AND removed_at IS NOT NULL
+         ON CONFLICT DO NOTHING`,
+        [s.id, s.ref, `ACC profile ${s.id} delisting request`]
+      );
+      const chk = await pool.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM profile_suppressions WHERE removed_profile_id = $1) AS entries,
+           (SELECT matched_on FROM ps_find_suppression(p.first_name, p.last_name, p.full_name, p.province, NULL, NULL, NULL)) AS same_name,
+           (SELECT matched_on FROM ps_find_suppression(p.last_name, p.first_name,
+               COALESCE(p.last_name, '') || ', ' || COALESCE(p.first_name, ''), p.province, NULL, NULL, NULL)) AS reversed_name
+         FROM scraped_cpas p WHERE p.id = $1`,
+        [s.id]
+      );
+      const c = chk.rows[0] || {};
+      const ok = c.entries >= 1 && !!c.same_name && !!c.reversed_name;
+      console.log(`[Suppression] profile ${s.id}: inserted=${ins.rowCount} entries=${c.entries} same_name_blocked=${!!c.same_name} reversed_name_blocked=${!!c.reversed_name} -> ${ok ? 'VERIFIED' : 'NOT VERIFIED'}`);
+    } catch (err) {
+      console.error(`[Suppression] profile ${s.id} entry FAILED (can be re-scraped until fixed):`, err.message);
+    }
+  }
+
   // cpa_subscriptions.cpa_profile_id was VARCHAR(255) in production until 2026-09-07, when
   // the flag-gated retype (PR #37) ran it to INTEGER. Comparisons against a profile id stay
   // text-on-both-sides; tests/cpa-subscriptions-cpa-profile-id.test.js.
