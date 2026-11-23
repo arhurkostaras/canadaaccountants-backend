@@ -259,6 +259,9 @@ class OutreachEngine {
           -- ACC WS-B columns (Phase A flags — column-based, complementary to structural gates above)
           AND sc.is_generic_inbox IS DISTINCT FROM true
           AND sc.has_enrichment_collision IS DISTINCT FROM true
+          -- Profiles removed or hidden at the person's request are never contacted
+          AND sc.removed_at IS NULL
+          AND sc.dispute_pending IS DISTINCT FROM true
           -- Existing dedup gates (preserved verbatim)
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
           AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE recipient_type = 'cpa')
@@ -761,6 +764,8 @@ class OutreachEngine {
         SELECT COUNT(*) FROM scraped_cpas sc
         WHERE COALESCE(sc.enriched_email, sc.email) IS NOT NULL
           AND sc.status != 'invalid'
+          AND sc.removed_at IS NULL
+          AND sc.dispute_pending IS DISTINCT FROM true
           AND COALESCE(sc.enriched_email, sc.email) NOT IN (SELECT email FROM outreach_unsubscribes)
           AND sc.id NOT IN (SELECT recipient_id FROM outreach_emails WHERE campaign_id = $1 AND recipient_type = 'cpa')
       `;
