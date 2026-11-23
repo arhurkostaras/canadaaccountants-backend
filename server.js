@@ -1501,7 +1501,8 @@ const crmIntelligence = new CRMIntelligence({
   // email, or name + province) and logs it to profile_suppression_hits. sme-intelligence-backend
   // writes to this same instance, so the trigger covers every scraper and import path.
   try {
-    await pool.query(fs.readFileSync(path.join(__dirname, 'migrations', '007-profile-suppressions.sql'), 'utf8'));
+    // fs/path required here: server.js does not import them at top level (the first deploy failed with "fs is not defined").
+    await pool.query(require('fs').readFileSync(require('path').join(__dirname, 'migrations', '007-profile-suppressions.sql'), 'utf8'));
     console.log('[Migration] profile_suppressions + trg_ps_block_suppressed_cpa verified');
   } catch (err) {
     console.error('[Migration] profile_suppressions migration FAILED (removed profiles can be re-scraped until fixed):', err.message);
