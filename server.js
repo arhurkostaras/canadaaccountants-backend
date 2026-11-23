@@ -1496,6 +1496,17 @@ const crmIntelligence = new CRMIntelligence({
     console.error('[Migration] static_page_at migration FAILED (profile routes will error until fixed):', err.message);
   }
 
+  // Profile suppression list (migrations/007-profile-suppressions.sql): a BEFORE INSERT
+  // trigger on scraped_cpas that drops any new row matching a removed person (permit number,
+  // email, or name + province) and logs it to profile_suppression_hits. sme-intelligence-backend
+  // writes to this same instance, so the trigger covers every scraper and import path.
+  try {
+    await pool.query(fs.readFileSync(path.join(__dirname, 'migrations', '007-profile-suppressions.sql'), 'utf8'));
+    console.log('[Migration] profile_suppressions + trg_ps_block_suppressed_cpa verified');
+  } catch (err) {
+    console.error('[Migration] profile_suppressions migration FAILED (removed profiles can be re-scraped until fixed):', err.message);
+  }
+
   // cpa_subscriptions.cpa_profile_id was VARCHAR(255) in production until 2026-09-07, when
   // the flag-gated retype (PR #37) ran it to INTEGER. Comparisons against a profile id stay
   // text-on-both-sides; tests/cpa-subscriptions-cpa-profile-id.test.js.
